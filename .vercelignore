@@ -1,0 +1,7 @@
+.env*
+!.env.example
+.next
+node_modules
+covered_codex_package.zip
+mnt
+*.tsbuildinfo

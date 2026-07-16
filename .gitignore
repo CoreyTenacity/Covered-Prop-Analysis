@@ -1,0 +1,19 @@
+.next/
+.open-next/
+.wrangler/
+node_modules/
+.pnpm-store/
+.env*
+!.env.example
+!.env.public.example
+# Cloudflare Worker local secrets. Globbed rather than a literal ".dev.vars"
+# because macOS/sync tools create duplicates like ".dev 2.vars", which a literal
+# pattern does not match -- and those duplicates hold the same live secrets.
+.dev*.vars
+npm-debug.log*
+*.tsbuildinfo
+.vercel
+.DS_Store
+.public-export-audit/
+covered_codex_package.zip
+mnt/

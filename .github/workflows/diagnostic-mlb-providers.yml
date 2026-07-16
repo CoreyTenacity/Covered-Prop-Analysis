@@ -1,0 +1,48 @@
+name: Diagnostic - MLB Provider Sources
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_date:
+        description: Date to test (YYYY-MM-DD, defaults to today)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run MLB provider diagnostic
+        env:
+          BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
+        run: |
+          node scripts/diagnostic-mlb-providers.mjs \
+            "${{ github.event.inputs.test_date || '' }}"
+
+      - name: Report diagnostic results
+        if: always()
+        run: |
+          echo "## MLB Provider Diagnostic Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** GitHub Actions" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Date:** ${{ github.event.inputs.test_date || 'Today (runner clock)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Sources checked:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`statsapi.mlb.com\` game-log (no auth required)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`statsapi.mlb.com\` schedule + boxscore (no auth required)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`api.open-meteo.com\` forecast (no auth required)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`api.bigballsdata.com\` MLB matches (\`BBS_API_KEY\` required — classified (d) if absent)" >> $GITHUB_STEP_SUMMARY

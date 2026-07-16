@@ -1,0 +1,97 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - codex/cloudflare-opennext-proof
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Cloudflare Worker
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # A Cloudflare-level Secret/Var wins over the value OpenNext bakes into the
+      # bundle at build time: .open-next/cloudflare/init.js populateProcessEnv()
+      # applies the Worker's runtime env FIRST, then only fills gaps from the
+      # baked next-env.mjs via `??=`. So a stale Cloudflare Secret silently
+      # overrides a correct build-time key and no redeploy can fix it.
+      # Syncing it here keeps Cloudflare authoritative and correct, and makes key
+      # rotation take effect on deploy instead of requiring a dashboard edit.
+      - name: Sync Supabase secret to Cloudflare Worker
+        run: printf '%s' "$SUPABASE_SECRET_KEY" | npx wrangler@4 secret put SUPABASE_SECRET_KEY
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+      - name: List Cloudflare Worker secrets (names only, for diagnostics)
+        run: npx wrangler@4 secret list
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy to Cloudflare
+        run: pnpm cf:deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+      - name: Deployment success notification
+        if: success()
+        run: |
+          echo "✅ Deployment successful!"
+          echo "Live URL: https://covered-opennext-proof.corey093011.workers.dev"
+          curl -s \
+            -H "Title: Cloudflare deploy succeeded" \
+            -H "Tags: white_check_mark" \
+            -H "Priority: default" \
+            -d "covered-opennext-proof is live. Commit ${{ github.sha }} by ${{ github.actor }}. https://covered-opennext-proof.corey093011.workers.dev" \
+            "https://ntfy.sh/${{ vars.NTFY_TOPIC }}" || true
+
+      - name: Deployment failure notification
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          echo "Check workflow logs for details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s \
+            -H "Title: Cloudflare deploy FAILED" \
+            -H "Tags: x,rotating_light" \
+            -H "Priority: urgent" \
+            -d "covered-opennext-proof deploy failed on commit ${{ github.sha }}. Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "https://ntfy.sh/${{ vars.NTFY_TOPIC }}" || true
+          exit 1

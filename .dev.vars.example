@@ -1,0 +1,3 @@
+NEXTJS_ENV=development
+# Keep Supabase and auth values out of this tracked example file.
+# Put preview-only values in .dev.vars when running Wrangler locally.

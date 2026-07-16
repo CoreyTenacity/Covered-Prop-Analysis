@@ -1,0 +1,28 @@
+name: TEMP WNBA multi-provider diagnostic
+
+# TEMPORARY - SCHEDULED FOR REMOVAL after provider decision is finalized.
+# Read-only network diagnostic. No Supabase writes. No production job invocation.
+# See scripts/TEMP-diagnostic-wnba-multi-provider.mjs for details.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run multi-provider diagnostic
+        run: node scripts/TEMP-diagnostic-wnba-multi-provider.mjs
+        continue-on-error: true

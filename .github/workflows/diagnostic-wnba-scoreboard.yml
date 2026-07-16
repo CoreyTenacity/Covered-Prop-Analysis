@@ -1,0 +1,47 @@
+name: Diagnostic - WNBA Scoreboard Endpoint
+
+on:
+  workflow_dispatch:
+    inputs:
+      league_id:
+        description: League ID (10 for WNBA)
+        required: true
+        type: string
+        default: '10'
+      test_date:
+        description: Date to test (YYYY-MM-DD format, optional)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run WNBA scoreboard diagnostic
+        run: |
+          node scripts/diagnostic-wnba-scoreboard.mjs \
+            "${{ github.event.inputs.league_id }}" \
+            "${{ github.event.inputs.test_date }}"
+
+      - name: Report diagnostic results
+        if: always()
+        run: |
+          echo "## WNBA Scoreboard Diagnostic Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** GitHub Actions" >> $GITHUB_STEP_SUMMARY
+          echo "**League ID:** ${{ github.event.inputs.league_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Date:** ${{ github.event.inputs.test_date || 'Current date' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
