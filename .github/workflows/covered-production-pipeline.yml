@@ -55,8 +55,11 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Manual dispatch always runs. Scheduled runs execute ONLY when the scheduler kill-switch is on.
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.COVERED_GITHUB_SCHEDULER_ENABLED == 'true' }}
+    # NOTE: the scheduler kill-switch is NOT gated here. Environment-scoped variables
+    # (COVERED_GITHUB_SCHEDULER_ENABLED lives in the `production` Environment) are NOT visible in a
+    # job-level `if:` — the environment only resolves after `if:` passes — so gating here would skip
+    # EVERY scheduled run (observed: run 29540597005 skipped). The kill-switch is enforced inside the
+    # "Resolve run parameters" step instead, where environment vars ARE available.
     environment: production
     env:
       SHARPAPI_MAX_REQUESTS_PER_MINUTE: ${{ vars.SHARPAPI_MAX_REQUESTS_PER_MINUTE }}
@@ -78,6 +81,11 @@ jobs:
             SCORING="${{ github.event.inputs.run_scoring }}"
             BOARD="${{ github.event.inputs.run_board }}"
           else
+            # Scheduler kill-switch — enforced HERE (env vars are available to steps, unlike job `if:`).
+            if [ "${COVERED_GITHUB_SCHEDULER_ENABLED}" != "true" ]; then
+              echo "Scheduler disabled (COVERED_GITHUB_SCHEDULER_ENABLED != true); skipping scheduled run."
+              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
             DRY="false"; SCORING="true"; BOARD="true"
             case "$SCHED" in
               "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
