@@ -302,3 +302,34 @@ test("the SharpAPI operational page/component is fully removed from source and t
     }
   }
 });
+
+test("deploy-cloudflare.yml is excluded from the public export, and no account-specific workers.dev hostname appears in any included file", () => {
+  const report = auditPublicExport();
+  const deployWorkflowPath = ".github/workflows/deploy-cloudflare.yml";
+
+  // Cloudflare Workers Builds is the intended deployment mechanism for the public repo; this
+  // GitHub-Actions-driven workflow is a separate, private-repo-only deploy path and must not
+  // ship in the public export (see docs/public-repo-boundary.json's note for the full reasoning).
+  // The file itself is only expected to exist when running against a full private checkout --
+  // an already-exported copy never has it at all, same as the SharpAPI backend-file check above.
+  const isPrivateCheckout = fs.existsSync(path.join(REPO_ROOT, "scoring-engine"));
+  if (isPrivateCheckout) {
+    assert.ok(fs.existsSync(path.join(REPO_ROOT, deployWorkflowPath)), "deploy-cloudflare.yml should still exist in the private repository");
+    assert.ok(report.excluded.includes(deployWorkflowPath), "deploy-cloudflare.yml should be recorded as excluded");
+  }
+  assert.ok(!report.included.includes(deployWorkflowPath), "deploy-cloudflare.yml must not be in the public export");
+
+  // Regression guard for the specific leak this test was written for: no included file may
+  // contain the account-specific workers.dev hostname that was previously hardcoded here.
+  // Built from two parts rather than one literal so this test file's own source text doesn't
+  // match the very pattern it's testing for (this file is itself part of the public export).
+  const accountSpecificHostnameFragment = "corey" + "093011";
+  for (const file of report.included) {
+    const absolutePath = path.join(REPO_ROOT, file);
+    if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) continue;
+    const extension = path.extname(file);
+    if ([".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2"].includes(extension)) continue;
+    const source = fs.readFileSync(absolutePath, "utf8");
+    assert.ok(!source.includes(accountSpecificHostnameFragment), `${file} must not reference the account-specific workers.dev hostname`);
+  }
+});

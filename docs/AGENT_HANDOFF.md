@@ -319,8 +319,9 @@ with `python3 -c "import yaml"` on each):
 
 ## Production state and unrelated continuity
 
-The repository-maintained production status is Cloudflare Workers via OpenNext at
-`https://covered-opennext-proof.corey093011.workers.dev`; Vercel is dormant and retained as fallback.
+The repository-maintained production status is Cloudflare Workers via OpenNext (see `wrangler.jsonc`'s
+`name` field for the Worker identity; the exact `*.workers.dev` hostname is account-specific and intentionally
+not repeated here); Vercel is dormant and retained as fallback.
 Snapshot-first public routes were last verified operational, and cron/admin routes remain intentionally disabled.
 GitHub Actions owns intended background pipeline execution. Do not run live provider jobs, write production data,
 deploy, or enable scheduling without explicit approval.
@@ -695,10 +696,11 @@ Reported separately, as required, rather than collapsed into one GO/NO-GO:
   `events` table has no future events (exactly reproduces the newly-tested `future_event_verification` failure
   mode). Both require an explicit, separately-approved bounded live diagnostic (scopes given above) — neither
   was run.
-- **Deployment readiness:** Unchanged from session 1 — Cloudflare/OpenNext production deployment at
-  `https://covered-opennext-proof.corey093011.workers.dev` remains the documented current production surface;
-  the scoring-engine Worker still needs an approved secret/deployment before serving production traffic; no
-  deploy, scheduler enablement, or production write occurred in this session.
+- **Deployment readiness:** Unchanged from session 1 — Cloudflare/OpenNext production deployment (account-specific
+  `*.workers.dev` hostname intentionally not repeated here; see `wrangler.jsonc`'s `name` field) remains the
+  documented current production surface; the scoring-engine Worker still needs an approved secret/deployment
+  before serving production traffic; no deploy, scheduler enablement, or production write occurred in this
+  session.
 
 ### Exact remaining owner-controlled actions (as of end of session 2 — see session 3 below for what changed)
 
@@ -804,8 +806,8 @@ ran `collectPublicSnapshotPublicationSummaries()`, which — as designed — rec
 `covered-picks` snapshot **across all leagues combined** (it has no per-league scope). Because there were 0
 currently-qualifying rows anywhere (WNBA blocked by `stale_features`, MLB at 0 publishable), this call
 overwrote the live public snapshot from `status: "published", 20 rows` (the stale July-14 data) to `status:
-"fallback", 0 rows`. **Verified via a direct HTTP GET to the live production API
-(`https://covered-opennext-proof.corey093011.workers.dev/api/knowledge/covered-picks`) that this is exactly
+"fallback", 0 rows`. **Verified via a direct HTTP GET to the live production API's `/api/knowledge/covered-picks`
+route (account-specific `*.workers.dev` hostname intentionally not repeated here) that this is exactly
 what the public route now serves.** This is not data loss — nothing was deleted from `scored_props` or
 `current_props`, only the cached snapshot representation changed — and it is arguably a correction rather than
 a regression: the previous "published" status was already misleadingly claiming freshness for two-day-old,
@@ -2524,3 +2526,86 @@ assumed.
 
 No live job, provider call, Supabase write, snapshot publish, scheduler change, migration, or deployment
 occurred this session.
+
+## Session 12 — removed the account-specific workers.dev hostname from durable public source (2026-07-16)
+
+A prior read-only Cloudflare deployment-readiness review found `.github/workflows/deploy-cloudflare.yml`
+hardcoded a full `https://<worker-name>.<account-specific-subdomain>.workers.dev` URL (the account-specific
+`*.workers.dev` hostname intentionally not repeated here) in its success-notification step, twice. This
+session fixes it at the source and reconsiders whether the workflow belongs in the public export at all,
+before the first Cloudflare deployment.
+
+### Fix 1 — the hostname itself, in the private repo's own copy
+
+`.github/workflows/deploy-cloudflare.yml`'s "Deployment success notification" step now reads
+`${{ vars.CLOUDFLARE_WORKER_URL }}` (a repository variable the owner sets, not committed) instead of a
+literal hostname. If the variable is unset, it prints `Live URL: (CLOUDFLARE_WORKER_URL repository variable
+not configured -- skipping URL in notification)` and omits the URL from the ntfy notification body entirely
+— it does not guess or fall back to any hostname. This fixes the private repository's own copy of the
+workflow regardless of the export decision below (it's still used there for the private repo's own Cloudflare
+proof deployment).
+
+### Fix 2 — architecture decision: exclude the workflow from the public export
+
+Per instruction, reconsidered whether this workflow should be retained in the public export at all now that
+Cloudflare Workers Builds (the dashboard's own Git integration, confirmed as the intended mechanism by the
+prior deployment-readiness review) is how the public repo will actually deploy. Decision: **exclude
+`deploy-cloudflare.yml` from the public export** (new `privateOnly` entry in
+`docs/public-repo-boundary.json`, not deleted from the private repository). Reasoning:
+- Its trigger (`push: branches: [codex/cloudflare-opennext-proof]`) is scoped to a branch name that will
+  never exist in the public repo, so it's already permanently inert there as exported — shipping it serves no
+  functional purpose.
+- Keeping a second, GitHub-Actions-driven deploy path in the public export — even an inert one — creates a
+  real future risk the instruction explicitly named: if this workflow's trigger is ever edited to watch
+  `main` (a plausible future change, since that's the public repo's actual default branch), it would become a
+  second, independent deploy mechanism running alongside Cloudflare Workers Builds, with no coordination
+  between the two.
+- The workflow also requires `secrets.CLOUDFLARE_API_TOKEN`/`vars.CLOUDFLARE_ACCOUNT_ID`/
+  `secrets.SUPABASE_SECRET_KEY` that don't exist in a fresh repo, so it would fail immediately if ever
+  triggered there regardless.
+
+Retained in the private repository since it may still have operational value for the private repo's own
+Cloudflare proof deployment — this is a public-export-only exclusion, matching the same pattern already
+applied to `render.yaml` and the other private-only workflows.
+
+### Fix 3 — the same hostname had already leaked into documentation (found by the new regression test)
+
+Sweeping the whole tracked repo for the literal string after fixing the workflow found the **same hostname
+already present in `docs/AGENT_HANDOFF.md` (3 places), `docs/PROJECT_CONTEXT.md`, `docs/CLOUDFLARE_DEPLOYMENT_PLAN.md`
+(3 places), and `docs/PROJECT_STATE.md`** — all from earlier sessions' historical deployment-verification
+notes, none previously caught (this class of leak — a URL, not a filesystem path — wasn't covered by any
+prior `/Users/...`-style sweep). All were redacted to a generic description (e.g., "account-specific
+`*.workers.dev` hostname intentionally not repeated here") while preserving the historical/factual content
+being recorded (that a deployment was verified, what it showed) — none of the underlying evidence was removed,
+only the literal hostname string.
+
+### Regression coverage
+
+New test in `scripts/public-export.test.mjs`: **"deploy-cloudflare.yml is excluded from the public export,
+and no account-specific workers.dev hostname appears in any included file"** — proves (a)
+`deploy-cloudflare.yml` is excluded from the export (environment-agnostic: only asserts the file's on-disk
+presence when run against a full private checkout, since it's correctly absent from an already-exported
+copy); (b) scans **every currently-included file's actual source text** for the literal hostname fragment and
+fails if any contains it — a real, ongoing guard against this exact leak recurring anywhere in the export, not
+just in the one file it was first found in. The fragment is built from two string parts in the test itself so
+the test file doesn't match its own pattern once it ships as part of the export it's checking.
+
+### Validation
+
+| check | result |
+|---|---|
+| `python3 -c "import yaml; yaml.safe_load(...)"` on the edited workflow | valid YAML |
+| `pnpm exec tsc --noEmit` (private repo) | 0 errors |
+| `node --test scripts/public-export.test.mjs` (focused) | 18/18 pass |
+| `pnpm test` (broadest practical suite) | 251 total, 250 pass, 1 pre-existing skip, 0 fail |
+| `node scripts/check-public-repo-boundary.mjs` | 8 public-safe modules checked, 0 violations |
+| `node --experimental-strip-types scripts/public-export.mjs --write` | PASS — **236 included (down from 237), 52 excluded (up from 51)**, 0 violations of any kind |
+| Two independent export runs, `diff -rq` | zero differences (deterministic) |
+| Exported tree: `.git`/symlinks/personal paths/hostname re-scan | none found |
+| Standalone (exported tree, fresh `pnpm install`): `tsc --noEmit` | 0 errors |
+| Standalone: `pnpm test` (temporary local `git init`, discarded afterward) | 161 total, 160 pass, 1 pre-existing skip, 0 fail — genuinely green |
+| Standalone: `pnpm run build` (Next.js) | succeeded |
+| Standalone: `pnpm run cf:build` (Cloudflare/OpenNext) | succeeded |
+
+No live job, provider call, Supabase write, snapshot publish, scheduler change, migration, or deployment
+occurred this session. No Cloudflare Workers Build was triggered.

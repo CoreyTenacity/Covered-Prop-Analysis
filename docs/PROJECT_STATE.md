@@ -181,7 +181,7 @@ auth roundtrip test is still the one open verification item here.
 ## Deployment Status
 
 **Cloudflare/OpenNext Proof:** COMPLETE
-- Live at `https://covered-opennext-proof.corey093011.workers.dev`
+- Live (account-specific `*.workers.dev` hostname intentionally not repeated here; see `wrangler.jsonc`'s `name` field)
 - Public snapshot routes operational
 - Auth routes accessible
 - Admin/cron routes disabled as designed

@@ -1,7 +1,7 @@
 # Cloudflare/OpenNext Deployment Plan
 
 **Status:** Historical proof plan; Cloudflare/OpenNext deployment is the current production path as recorded in `AGENTS.md` and `docs/PROJECT_CONTEXT.md`.
-**Current deployed app:** Cloudflare Workers at `https://covered-opennext-proof.corey093011.workers.dev`
+**Current deployed app:** Cloudflare Workers (account-specific `*.workers.dev` hostname intentionally not repeated here; see `wrangler.jsonc`'s `name` field for the Worker identity)
 **Previous Vercel deployment:** commit `c599ba0`, dormant fallback
 **Last updated:** 2026-07-15 (handoff correction)
 
@@ -216,7 +216,7 @@ Deployment completed 2026-07-14:
 # Deploy executed
 pnpm run cf:deploy
 # ✅ Wrangler uploaded worker bundle successfully
-# Live URL: https://covered-opennext-proof.corey093011.workers.dev
+# Live URL: (account-specific *.workers.dev hostname intentionally not repeated here)
 
 # Verification completed
 # ✅ Cloudflare dashboard shows worker "Active"
@@ -382,7 +382,7 @@ This step is **not applicable** to the current proof. It will be documented sepa
 
 ### Minimal Success (Proof Only) — ALL COMPLETE ✅
 - [x] Cloudflare worker builds without errors ✅
-- [x] Worker deploys successfully to Cloudflare ✅ (Live: https://covered-opennext-proof.corey093011.workers.dev)
+- [x] Worker deploys successfully to Cloudflare ✅ (account-specific `*.workers.dev` hostname intentionally not repeated here)
 - [x] Public snapshot routes return 200 and valid JSON ✅ (covered-picks, parlay-options, model-performance)
 - [x] Disabled routes return 503 (not 500 or 404) ✅ (cron, inngest, admin routes)
 - [x] No regressions in existing Vercel deployment ✅ (Verified)

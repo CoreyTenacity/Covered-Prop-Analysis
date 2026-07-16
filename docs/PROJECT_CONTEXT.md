@@ -2,7 +2,7 @@
 
 Covered is a sports prop analysis app built around reusable stored knowledge, not inline one-off lookups.
 
-## Current handoff state — 2026-07-16 (session 11)
+## Current handoff state — 2026-07-16 (session 12)
 
 The private repository remains the working source repository. The active repair branch is
 `codex/public-repo-repair`; check `git rev-parse HEAD` and `origin/codex/public-repo-repair` for the exact
@@ -13,6 +13,18 @@ changes are prohibited for the current handoff.
 **Public-source verdict: READY FOR OWNER VISIBILITY ACTION** (unchanged, reconfirmed this session). Lint
 remains the one open, non-blocking, evidence-based item: never a functional gate anywhere in this repo's
 history.
+
+**The account-specific Cloudflare `*.workers.dev` hostname is removed from durable public source (session 12).**
+A prior read-only Cloudflare deployment-readiness review found it hardcoded in
+`.github/workflows/deploy-cloudflare.yml`'s success-notification step; fixed by switching to a
+`CLOUDFLARE_WORKER_URL` repository variable that's safely omitted (not guessed) when unset. The same review
+also confirmed Cloudflare Workers Builds — not this GitHub Actions workflow — is the intended deployment
+mechanism for the public repo, so `deploy-cloudflare.yml` is now excluded from the public export entirely
+(236 included, down from 237) to avoid two independent deploy systems both being able to fire in the future.
+Sweeping for the same literal hostname string also found it already leaked into `docs/AGENT_HANDOFF.md`,
+`docs/CLOUDFLARE_DEPLOYMENT_PLAN.md`, and `docs/PROJECT_STATE.md` from earlier sessions' historical notes —
+all redacted to a generic description. A new regression test scans every currently-included export file's
+source text for the hostname fragment. Full detail: `docs/AGENT_HANDOFF.md`'s "Session 12" section.
 
 **The SharpAPI operational page is fully removed, not just unlisted (session 11, superseding session 10).**
 Session 10 removed the `/sharpapi` link from primary navigation only; the pre-push export report showed the
@@ -168,7 +180,7 @@ remain useful provenance; current infrastructure status is recorded in the Infra
 - `0868514` added the tracked `official-injuries-adapter.ts` module and fixed the Vercel missing-module build failure.
 - `c599ba0` removed the upload-only Slip Analyzer while preserving the Manual Analyzer / Parlay Builder route.
 - `c599ba0` was the last Vercel deployment before Vercel became dormant.
-- `332d8a4` updated handoff documentation; the Cloudflare/OpenNext deployment was verified at `https://covered-opennext-proof.corey093011.workers.dev`.
+- `332d8a4` updated handoff documentation; the Cloudflare/OpenNext deployment was verified live (account-specific `*.workers.dev` hostname intentionally not repeated here).
 
 The deployment has been validated:
 - covered-picks route: 20 rows published, snapshot source confirmed
