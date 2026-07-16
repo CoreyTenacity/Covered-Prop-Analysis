@@ -102,6 +102,11 @@ jobs:
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
+        with:
+          # Pinned because the workspace root has no package.json to auto-detect from (only the
+          # PRIVATE repo is checked out, into ./private-covered). Matches the private repo's
+          # packageManager field (pnpm@10.13.1). Bump here if the private repo's pnpm version changes.
+          version: 10.13.1
 
       - name: Set up Node
         uses: actions/setup-node@v4
