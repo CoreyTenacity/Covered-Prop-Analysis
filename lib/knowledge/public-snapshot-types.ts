@@ -28,6 +28,9 @@ export type PublicSnapshotEnvelope<TRow> = {
   status: PublicSnapshotStatus;
 };
 
+/** Which stage a route's publication failed at, when determinable. */
+export type PublicSnapshotPublicationErrorStage = "build" | "write" | "size-limit";
+
 export type PublicSnapshotPublicationSummary = {
   route: PublicSnapshotRouteName;
   snapshotVersion: string;
@@ -40,7 +43,26 @@ export type PublicSnapshotPublicationSummary = {
   fallbackReason?: string | null;
   /** True when this summary describes what publication would do without writing provider_cache. */
   dryRun?: boolean;
+  /**
+   * True once a real write to provider_cache was actually attempted for this route (publish:true
+   * was requested and the route's build step succeeded). False for preview/dry-run calls and for
+   * build failures that never reached the write step.
+   */
+  publicationAttempted?: boolean;
+  /** True only when the write(s) to provider_cache actually completed (both the versioned and :latest keys were written). */
+  publicationCompleted?: boolean;
+  /** Which stage failed, when determinable. Absent/null on success or when publication was never attempted. */
+  errorStage?: PublicSnapshotPublicationErrorStage | null;
+  /**
+   * True when the previously published `:latest` snapshot for this route (if any) remains what
+   * public routes serve -- i.e. this attempt did not overwrite it. False only once a new payload
+   * has actually replaced it.
+   */
+  priorLatestSnapshotRetained?: boolean;
 };
+
+/** Aggregate outcome across all routes for one `collectPublicSnapshotPublicationSummaries()` call. */
+export type PublicSnapshotPublicationOverallStatus = "disabled" | "complete" | "partial" | "failed";
 
 export type PublicSnapshotResponseMeta = {
   schemaVersion: typeof PUBLIC_SNAPSHOT_SCHEMA_VERSION | null;

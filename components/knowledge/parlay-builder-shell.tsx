@@ -10,6 +10,7 @@ import { ParlaySummary } from "@/components/knowledge/parlay-summary";
 import { ParlayWarningList } from "@/components/knowledge/parlay-warning-list";
 import { RiskBadge } from "@/components/knowledge/risk-badge";
 import { ScoreBadge } from "@/components/knowledge/score-badge";
+import { fetchParlayOptions } from "@/components/knowledge/parlay-options-fetch";
 import type { AnalyzedParlay } from "@/lib/knowledge/parlay-analysis";
 import { filterParlayOptionsSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { ParlayOptionRow, ParlayOptionsResponse } from "@/lib/knowledge/read-types";
@@ -131,23 +132,15 @@ export function ParlayBuilderShell() {
     setLoading(true);
     setError("");
 
-    fetch("/api/knowledge/parlay-options", {
-      cache: "force-cache",
-      credentials: "omit",
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Could not load manual parlay options.");
-        return response.json() as Promise<ParlayOptionsResponse>;
-      })
-      .then((payload) => {
-        if (!cancelled) setData(payload);
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load manual parlay options.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    fetchParlayOptions().then((outcome) => {
+      if (cancelled) return;
+      if (outcome.kind === "success") {
+        setData(outcome.data);
+      } else {
+        setError(outcome.message);
+      }
+      setLoading(false);
+    });
 
     return () => {
       cancelled = true;

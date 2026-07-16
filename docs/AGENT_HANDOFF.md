@@ -2609,3 +2609,132 @@ the test file doesn't match its own pattern once it ships as part of the export 
 
 No live job, provider call, Supabase write, snapshot publish, scheduler change, migration, or deployment
 occurred this session. No Cloudflare Workers Build was triggered.
+
+## Session 13 — public-snapshot publication-failure observability (diagnosis-only follow-up, no live publish) (2026-07-16)
+
+### Background: the stale `parlay-options` snapshot diagnosis
+
+A prior read-only diagnostic session (same day) found the live `parlay-options` public snapshot stuck at a
+2026-07-14 publish (`status: "fallback"`, 0 rows), while `covered-picks` had been successfully republished on
+2026-07-16 (`status: "published"`, 14 rows) in what the session-5 governance note above already flagged as an
+ungoverned real publish. Both routes are published together by `collectPublicSnapshotPublicationSummaries()`
+in one call, so the only way `parlay-options` could still show the two-days-older `pipelineRunId` after that
+call is if its own `build()`/write step failed silently that run — `collectRoutePublicSnapshotPublication()`
+catches per-route errors and returns a `"degraded"` summary **without logging anything and without the caller
+ever checking `parlay-options` specifically afterward** (the handoff only verified `covered-picks`). Live
+read-only checks the same day found ~30 future WNBA `current_props` all carrying a `scored_props` row (28
+`publishable`, 2 `candidate`-only) — i.e., a fresh publish today would very likely populate the route. **The
+exact historical exception from that missed 2026-07-16 run is unrecoverable**: it was a local (non-GitHub-Actions)
+run, nothing captured its error text anywhere, and no code change can retroactively reconstruct it. This is
+recorded as a supported inference, not a proven exact historical exception, per instruction.
+
+### What this session implements: observability, not a fix
+
+Explicitly out of scope and not done: no live snapshot publish, no eligibility-rule change, no scoring/ingestion/
+enrichment/grading/board-build run, no Supabase write of any kind. **Restoring the Parlay Builder still requires
+a separate, explicitly owner-approved live publication** — see the proposed (not executed) command at the end of
+this section.
+
+**Changes, all additive/optional-field, in `lib/knowledge/public-snapshots.ts` and
+`lib/knowledge/public-snapshot-types.ts`:**
+
+- `PublicSnapshotPublicationSummary` gained four new optional fields: `publicationAttempted` (a real write to
+  provider_cache was actually attempted -- `publish: true` was requested and `build()` succeeded),
+  `publicationCompleted` (the write(s) actually completed), `errorStage` (`"build" | "write" | "size-limit" |
+  null`, distinguishing which stage failed), and `priorLatestSnapshotRetained` (true whenever the `:latest`
+  alias readers actually serve was not overwritten by this attempt -- covers the previously-ambiguous case
+  where a versioned write succeeds but the `:latest` pointer write fails, which used to report generically as
+  `"degraded"` with no way to tell which alias state a reader would actually see).
+- `publishPublicSnapshot()` now sets these four fields on every one of its five return paths (oversized payload,
+  preview/dry-run, versioned-write-failed, latest-write-failed, full success) instead of only setting
+  `status`/`fallbackReason`/`dryRun` as before.
+- `collectRoutePublicSnapshotPublication()`'s two failure paths (build throws; the publish call itself throws
+  after a successful build) now each emit **exactly one** `console.error("[public-snapshot][publication-failed]
+  route=<route> stage=<build|write> reason=<sanitized>")` line -- previously these catches returned a summary
+  object silently, with no log at all, which is how the `parlay-options` divergence went unnoticed for two days.
+  The logged reason reuses the existing `sanitizeSnapshotError()` redaction (strips URLs and
+  `sb_secret_`/`sb_publishable_`-shaped keys, truncates to 240 chars) -- the same sanitization already applied
+  to the summary's own `fallbackReason`, and `error.stack` is never read or logged by either path.
+- `collectPublicSnapshotPublicationSummaries()`'s return value gained a new sibling key, `overallStatus:
+  "disabled" | "complete" | "partial" | "failed"` (`"disabled"` whenever `publish: true` wasn't requested,
+  regardless of any route's outcome; otherwise `"complete"`/`"partial"`/`"failed"` based on how many of the three
+  routes came back `"degraded"`). Existing consumers that index by route name (`result["covered-picks"]`, etc.)
+  are unaffected; this is a new field, not a shape change.
+- `lib/ops/github-actions-pipeline.ts`'s board-report now forwards `publicationAttempted`/`publicationCompleted`/
+  `errorStage` into each route's entry under `board.publicSnapshots`, and adds a sibling
+  `board.publicSnapshotsOverallStatus` field **outside** the `publicSnapshots` object on purpose --
+  `formatGitHubActionsPipelineSummary()` iterates `Object.entries(board.publicSnapshots)` generically, treating
+  every entry as a per-route result, so an aggregate field has to live outside that object rather than as a
+  fourth entry inside it.
+- Both existing publication gates are untouched: `publishPublicSnapshot()` still requires `publish: true`
+  (opt-in, default preview-only); `runGitHubActionsPipeline()` still requires its independent
+  `publishPublicSnapshots: true` input to forward `publish: true` at all. No alternate publish path was added.
+
+**Tests added to `lib/ops/public-snapshots.test.ts`** (all construct in-memory fixtures via dependency injection;
+none touch production data or real Supabase):
+1. One route's `build()` throws -> that route reports `status: "degraded"`, `publicationAttempted: false`,
+   `errorStage: "build"`; its injected `publishPublicSnapshot` is never called (proven by tracking call routes);
+   the other two routes complete normally; `overallStatus: "partial"`; exactly one `console.error` call, matching
+   `route=covered-picks` and `stage=build`.
+2. One route's `publish()` call throws (after its `build()` succeeded) -> reports `errorStage: "write"`,
+   `publicationAttempted: true`, `publicationCompleted: false`, `priorLatestSnapshotRetained: true` (the prior
+   `:latest` alias is not falsely reported as replaced); other routes unaffected; one `console.error` matching
+   `stage=write`.
+3. All three routes succeed -> `overallStatus: "complete"`, every route `publicationCompleted: true`,
+   `errorStage: null`, no `fallbackReason`.
+4. No `publish: true` passed -> `overallStatus: "disabled"`, every route `dryRun: true`,
+   `publicationAttempted: false`, `publicationCompleted: false`, and a `globalThis.fetch` spy proves zero network
+   calls (reusing the existing pattern from the prior opt-in-gate tests).
+5. A thrown error containing a URL and a short (`sb_secret_abc123`, deliberately under the public-export secret
+   scanner's 10-char threshold so the test fixture itself doesn't trip `scripts/public-export.mjs`'s own secret
+   scan) Supabase-key-shaped string -> both the returned `fallbackReason` and the captured `console.error`
+   argument are asserted to contain `[redacted-url]`/`[redacted-key]` and never the raw URL or key substring.
+6. All pre-existing publication-gate and no-bypass tests (opt-in `publish: true`, the two-level pipeline gate,
+   dry-run-never-writes) re-verified green, unchanged.
+
+`lib/ops/github-actions-pipeline.test.ts`'s two hand-built mock summary objects
+(`mockPublicSnapshots`/`mockDegradedPublicSnapshots`) needed one added field each (`overallStatus`) to satisfy
+the now-stricter `PublicSnapshotPublicationSummary`-derived return type; no assertions changed.
+
+### Validation
+
+| check | result |
+|---|---|
+| `pnpm exec tsc --noEmit` (private repo) | 0 errors |
+| `node --test lib/ops/public-snapshots.test.ts` (focused) | 22/22 pass (6 new + 16 pre-existing) |
+| `node --test lib/ops/github-actions-pipeline.test.ts` (focused) | 29/29 pass |
+| `pnpm test` (full private suite) | 256 total, 255 pass, 1 pre-existing skip, 0 fail |
+| `node scripts/check-public-repo-boundary.mjs` | 8 public-safe modules checked, 0 violations |
+| `node scripts/public-export.mjs` (dry run) | 236 included / 52 excluded, 0 secret findings, 0 violations, PASS |
+| Two independent `--write` export runs, `diff -rq` | zero differences (deterministic) |
+| Standalone (exported tree, fresh `pnpm install`, temporary local `git init`, discarded afterward): `tsc --noEmit` | 0 errors |
+| Standalone: `pnpm test` | 166 total, 165 pass, 1 pre-existing skip, 0 fail |
+| Standalone: `pnpm run build` (Next.js) | succeeded |
+| Standalone: `pnpm run cf:build` (Cloudflare/OpenNext) | succeeded |
+
+The five changed files (`lib/knowledge/public-snapshots.ts`, `lib/knowledge/public-snapshot-types.ts`,
+`lib/ops/github-actions-pipeline.ts`, and their two test files) are all public-safe/included, confirmed
+byte-identical to the exported copy both before writing this section's changes and after.
+
+### Restoring the Parlay Builder still needs separate owner approval
+
+This session did not publish anything. The proposed command for a future, explicitly owner-approved live
+publication (shown here, **not executed**):
+
+```
+node --env-file=.env.local --experimental-strip-types --loader ./scripts/ts-path-loader.mjs -e '
+import { collectPublicSnapshotPublicationSummaries } from "./lib/knowledge/public-snapshots.ts";
+const result = await collectPublicSnapshotPublicationSummaries({ publish: true });
+console.log(JSON.stringify(result, null, 2));
+'
+```
+
+After running it (only with explicit approval), verify with a read-only GET to
+`/api/knowledge/parlay-options` on the live Cloudflare deployment for `status: "published"` and `count > 0`,
+and re-check the `public-snapshot:parlay-options:latest` `provider_cache` row for a fresh `pipelineRunId`. If a
+route fails again, this session's new `console.error` line and the returned `errorStage`/`publicationAttempted`/
+`publicationCompleted`/`priorLatestSnapshotRetained` fields now make the failure and its stage immediately
+visible, instead of requiring a multi-day diagnostic to notice.
+
+No snapshot, production data, scheduler, deployment, provider, or scoring action occurred this session. No
+Cloudflare Workers Build was triggered.

@@ -366,17 +366,35 @@ async function latestScoredLiteByCurrentProp(currentPropIds: string[]) {
   return map;
 }
 
+// PostgREST encodes an `in.(...)` filter as literal UUIDs in the request URL/header line. An
+// unbounded id list here (getParlayOptions can pass up to ~500 current_prop_ids when no
+// league/sport filter narrows the base current_props read) produces a request undici's HTTP
+// client cannot parse, which surfaces only as a generic `TypeError: fetch failed` -- the real
+// cause (`UND_ERR_HEADERS_OVERFLOW`) is in `error.cause`, one layer deeper than callers read.
+// Batching keeps every request comfortably bounded regardless of how many ids are passed in.
+const SCORED_PROPS_LOOKUP_BATCH_SIZE = 100;
+
+function chunkIds(ids: string[], size: number) {
+  const batches: string[][] = [];
+  for (let index = 0; index < ids.length; index += size) {
+    batches.push(ids.slice(index, index + size));
+  }
+  return batches;
+}
+
 async function latestScoredCompactByCurrentProp(currentPropIds: string[]) {
   if (!currentPropIds.length) return new Map<string, ScoredPropParlayRow>();
-  const rows = await selectRows<ScoredPropParlayRow>("scored_props", {
-    select: "id,current_prop_id,covered_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishability_reasons,updated_at",
-    filters: [{ column: "current_prop_id", operator: "in", value: currentPropIds }],
-    orderBy: "updated_at.desc",
-    limit: Math.min(currentPropIds.length * 4, 1000),
-  });
   const map = new Map<string, ScoredPropParlayRow>();
-  for (const row of rows) {
-    if (!map.has(row.current_prop_id)) map.set(row.current_prop_id, row);
+  for (const batch of chunkIds(currentPropIds, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<ScoredPropParlayRow>("scored_props", {
+      select: "id,current_prop_id,covered_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishability_reasons,updated_at",
+      filters: [{ column: "current_prop_id", operator: "in", value: batch }],
+      orderBy: "updated_at.desc",
+      limit: Math.min(batch.length * 4, 1000),
+    });
+    for (const row of rows) {
+      if (!map.has(row.current_prop_id)) map.set(row.current_prop_id, row);
+    }
   }
   return map;
 }
@@ -907,6 +925,12 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
     ...(query.marketType ? [{ column: "market_type", value: query.marketType }] : []),
     ...(query.onlyMatched ? [{ column: "match_status", operator: "in" as const, value: ["matched", "strongly_resolved"] }] : []),
     { column: "active", value: true },
+    // Matches isFutureStartTime()'s own semantics (null start_time or strictly in the future).
+    // Without this, `active=true` rows that are days past their start_time (never deactivated)
+    // sort first under start_time.asc and can consume the entire scanLimit budget, starving out
+    // every genuinely-eligible future row before the JS-level isFutureStartTime() filter below
+    // ever sees them -- this is a query-bound fix, not a change to which props are eligible.
+    { raw: `or=(start_time.is.null,start_time.gt.${encodeURIComponent(new Date().toISOString())})` },
   ];
 
   const currentProps = await selectRows<CurrentPropRow>("current_props", {

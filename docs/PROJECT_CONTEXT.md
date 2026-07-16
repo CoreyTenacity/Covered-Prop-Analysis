@@ -2,7 +2,23 @@
 
 Covered is a sports prop analysis app built around reusable stored knowledge, not inline one-off lookups.
 
-## Current handoff state — 2026-07-16 (session 12)
+## Current handoff state — 2026-07-16 (session 13)
+
+**Public-snapshot publication failures are now immediately observable (session 13, diagnosis-only, no live
+publish).** A same-day read-only diagnostic found the live `parlay-options` snapshot stuck at a 2026-07-14
+publish (`fallback`, 0 rows) while `covered-picks` had been republished 2026-07-16 in the same nominal
+orchestrator call -- meaning `parlay-options`'s own build/write step silently failed that run, with no log and
+no one having checked that specific route afterward. The exact historical exception is unrecoverable (it was
+an unlogged local run). This session adds structured failure reporting
+(`publicationAttempted`/`publicationCompleted`/`errorStage`/`priorLatestSnapshotRetained` on each route's
+publication summary, a single sanitized `console.error` per route failure, and an aggregate `overallStatus` on
+`collectPublicSnapshotPublicationSummaries()`) so a future occurrence is caught immediately instead of days
+later. **No snapshot was published and no eligibility rule changed; restoring the Parlay Builder still requires
+a separate, explicitly owner-approved live publication** (proposed command recorded, not run, in
+`docs/AGENT_HANDOFF.md`'s "Session 13" section). Both existing publication gates (`publish: true`,
+`publishPublicSnapshots: true`) are unchanged.
+
+## Prior handoff state — 2026-07-16 (session 12)
 
 The private repository remains the working source repository. The active repair branch is
 `codex/public-repo-repair`; check `git rev-parse HEAD` and `origin/codex/public-repo-repair` for the exact

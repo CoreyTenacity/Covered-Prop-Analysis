@@ -204,6 +204,277 @@ test("snapshot miss falls back exactly once and marks the response as fallback",
   assert.equal(result.payload.snapshot_source, "relational-fallback");
 });
 
+test("route build failure: reported clearly, no write attempted for that route, other routes stay isolated and can complete", async () => {
+  const errorSpy = mock.method(console, "error", () => {});
+  const publishCalls: string[] = [];
+  try {
+    const result = await collectPublicSnapshotPublicationSummaries({
+      publish: true,
+      dependencies: {
+        coveredPicks: async () => {
+          throw new Error("covered-picks build blew up");
+        },
+        parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
+        modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
+        publishPublicSnapshot: async (input) => {
+          publishCalls.push(input.route);
+          return {
+            route: input.route,
+            snapshotVersion: `${input.route}:test`,
+            snapshotKey: `public-snapshot:${input.route}:v${input.route}:test`,
+            rowCount: input.rows.length,
+            serializedBytes: 12,
+            maxBytes: input.maxBytes ?? 256 * 1024,
+            status: input.rows.length ? ("published" as const) : ("fallback" as const),
+            publishedAt: "2026-07-16T00:00:00.000Z",
+            publicationAttempted: true,
+            publicationCompleted: true,
+            errorStage: null,
+            priorLatestSnapshotRetained: false,
+          };
+        },
+      },
+    });
+
+    assert.equal(result["covered-picks"].status, "degraded");
+    assert.equal(result["covered-picks"].publicationAttempted, false, "a build failure must never reach the write step");
+    assert.equal(result["covered-picks"].publicationCompleted, false);
+    assert.equal(result["covered-picks"].errorStage, "build");
+    assert.equal(result["covered-picks"].priorLatestSnapshotRetained, true);
+    assert.match(result["covered-picks"].fallbackReason ?? "", /covered-picks/i);
+    assert.deepEqual(publishCalls.sort(), ["model-performance", "parlay-options"], "the failing route's publish function must never be invoked");
+
+    assert.equal(result["parlay-options"].status, "published");
+    assert.equal(result["parlay-options"].publicationCompleted, true);
+    assert.equal(result["model-performance"].status, "published");
+    assert.equal(result["model-performance"].publicationCompleted, true);
+
+    assert.equal(result.overallStatus, "partial");
+
+    assert.equal(errorSpy.mock.callCount(), 1, "exactly one server-side log for the one route failure");
+    const loggedLine = String(errorSpy.mock.calls[0]?.arguments[0] ?? "");
+    assert.match(loggedLine, /route=covered-picks/);
+    assert.match(loggedLine, /stage=build/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("route write failure: reported as a write-stage failure, prior latest alias is not falsely reported as newly published, other routes stay isolated", async () => {
+  const errorSpy = mock.method(console, "error", () => {});
+  try {
+    const result = await collectPublicSnapshotPublicationSummaries({
+      publish: true,
+      dependencies: {
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
+        modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
+        publishPublicSnapshot: async (input) => {
+          if (input.route === "parlay-options") {
+            throw new Error("provider_cache write failed for parlay-options");
+          }
+          return {
+            route: input.route,
+            snapshotVersion: `${input.route}:test`,
+            snapshotKey: `public-snapshot:${input.route}:v${input.route}:test`,
+            rowCount: input.rows.length,
+            serializedBytes: 12,
+            maxBytes: input.maxBytes ?? 256 * 1024,
+            status: "published" as const,
+            publishedAt: "2026-07-16T00:00:00.000Z",
+            publicationAttempted: true,
+            publicationCompleted: true,
+            errorStage: null,
+            priorLatestSnapshotRetained: false,
+          };
+        },
+      },
+    });
+
+    assert.equal(result["parlay-options"].status, "degraded");
+    assert.equal(result["parlay-options"].errorStage, "write");
+    assert.equal(result["parlay-options"].publicationAttempted, true, "the write was genuinely attempted (build succeeded)");
+    assert.equal(result["parlay-options"].publicationCompleted, false);
+    assert.equal(result["parlay-options"].priorLatestSnapshotRetained, true, "the prior :latest snapshot must not be reported as replaced");
+    assert.match(result["parlay-options"].fallbackReason ?? "", /parlay-options/i);
+
+    assert.equal(result["covered-picks"].status, "published");
+    assert.equal(result["covered-picks"].publicationCompleted, true);
+    assert.equal(result["model-performance"].status, "published");
+    assert.equal(result["model-performance"].publicationCompleted, true);
+
+    assert.equal(result.overallStatus, "partial");
+
+    assert.equal(errorSpy.mock.callCount(), 1);
+    const loggedLine = String(errorSpy.mock.calls[0]?.arguments[0] ?? "");
+    assert.match(loggedLine, /route=parlay-options/);
+    assert.match(loggedLine, /stage=write/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("all routes succeed: aggregate result indicates complete success", async () => {
+  const result = await collectPublicSnapshotPublicationSummaries({
+    publish: true,
+    dependencies: {
+      coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+      parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
+      modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
+      publishPublicSnapshot: async (input) => ({
+        route: input.route,
+        snapshotVersion: `${input.route}:test`,
+        snapshotKey: `public-snapshot:${input.route}:v${input.route}:test`,
+        rowCount: input.rows.length,
+        serializedBytes: 12,
+        maxBytes: input.maxBytes ?? 256 * 1024,
+        status: "published" as const,
+        publishedAt: "2026-07-16T00:00:00.000Z",
+        publicationAttempted: true,
+        publicationCompleted: true,
+        errorStage: null,
+        priorLatestSnapshotRetained: false,
+      }),
+    },
+  });
+
+  assert.equal(result.overallStatus, "complete");
+  for (const route of ["covered-picks", "parlay-options", "model-performance"] as const) {
+    assert.equal(result[route].status, "published");
+    assert.equal(result[route].publicationCompleted, true);
+    assert.equal(result[route].errorStage, null);
+    assert.equal(result[route].fallbackReason ?? null, null);
+  }
+});
+
+test("publication disabled (no publish:true): no writes occur and the result cannot be confused with an actual publication", async () => {
+  const fetchSpy = mock.method(globalThis, "fetch", async () => {
+    throw new Error("fetch must not be called when publication is disabled");
+  });
+  try {
+    const result = await collectPublicSnapshotPublicationSummaries({
+      dependencies: {
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
+        modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
+      },
+    });
+
+    assert.equal(result.overallStatus, "disabled");
+    for (const route of ["covered-picks", "parlay-options", "model-performance"] as const) {
+      assert.equal(result[route].dryRun, true);
+      assert.equal(result[route].publicationAttempted, false);
+      assert.equal(result[route].publicationCompleted, false);
+    }
+    assert.equal(fetchSpy.mock.callCount(), 0, "no route may write provider_cache while publication is disabled");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("error sanitization: secrets and sensitive raw error properties are not surfaced in the summary or the server log", async () => {
+  const errorSpy = mock.method(console, "error", () => {});
+  try {
+    const result = await collectPublicSnapshotPublicationSummaries({
+      publish: true,
+      dependencies: {
+        coveredPicks: async () => {
+          throw new Error(
+            // Short on purpose (fewer than 10 chars after the prefix): long enough to exercise
+            // sanitizeSnapshotError's redaction regex, short enough to stay below the public-export
+            // secret scanner's {10,}-char threshold so this fixture itself never trips that scan.
+            "connect ECONNREFUSED https://abcd1234.supabase.co/rest/v1/scored_props -- key sb_secret_abc123 rejected",
+          );
+        },
+        parlayOptions: async () => ({ rows: [] } as any),
+        modelPerformance: async () => ({ rows: [], count: 0 } as any),
+        publishPublicSnapshot: async (input) => ({
+          route: input.route,
+          snapshotVersion: `${input.route}:test`,
+          snapshotKey: `public-snapshot:${input.route}:v${input.route}:test`,
+          rowCount: input.rows.length,
+          serializedBytes: 12,
+          maxBytes: input.maxBytes ?? 256 * 1024,
+          status: "fallback" as const,
+          publishedAt: "2026-07-16T00:00:00.000Z",
+          publicationAttempted: true,
+          publicationCompleted: true,
+          errorStage: null,
+          priorLatestSnapshotRetained: false,
+        }),
+      },
+    });
+
+    const reason = result["covered-picks"].fallbackReason ?? "";
+    assert.doesNotMatch(reason, /supabase\.co/i);
+    assert.doesNotMatch(reason, /sb_secret_/);
+    assert.match(reason, /\[redacted-url\]/);
+    assert.match(reason, /\[redacted-key\]/);
+
+    assert.equal(errorSpy.mock.callCount(), 1);
+    const loggedLine = String(errorSpy.mock.calls[0]?.arguments[0] ?? "");
+    assert.doesNotMatch(loggedLine, /supabase\.co/i);
+    assert.doesNotMatch(loggedLine, /sb_secret_/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("a native fetch TypeError with an UND_ERR_HEADERS_OVERFLOW cause (the exact 2026-07-16 parlay-options failure shape) is reported as a clean build-stage failure, not a generic unclassifiable error", async () => {
+  const errorSpy = mock.method(console, "error", () => {});
+  try {
+    const result = await collectPublicSnapshotPublicationSummaries({
+      publish: true,
+      dependencies: {
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        parlayOptions: async () => {
+          // Mirrors the real error shape observed live: selectRows()/fetch() throws a native
+          // TypeError("fetch failed") whose real diagnostic detail lives one layer deeper, in
+          // `.cause`, exactly as Node's undici surfaces an oversized-request header failure.
+          const cause = new Error("Headers Overflow Error");
+          (cause as unknown as { code: string }).code = "UND_ERR_HEADERS_OVERFLOW";
+          throw new TypeError("fetch failed", { cause });
+        },
+        modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
+        publishPublicSnapshot: async (input) => ({
+          route: input.route,
+          snapshotVersion: `${input.route}:test`,
+          snapshotKey: `public-snapshot:${input.route}:v${input.route}:test`,
+          rowCount: input.rows.length,
+          serializedBytes: 12,
+          maxBytes: input.maxBytes ?? 256 * 1024,
+          status: "published" as const,
+          publishedAt: "2026-07-16T00:00:00.000Z",
+          publicationAttempted: true,
+          publicationCompleted: true,
+          errorStage: null,
+          priorLatestSnapshotRetained: false,
+        }),
+      },
+    });
+
+    assert.equal(result["parlay-options"].status, "degraded");
+    assert.equal(result["parlay-options"].errorStage, "build");
+    assert.equal(result["parlay-options"].publicationAttempted, false);
+    assert.equal(result["parlay-options"].publicationCompleted, false);
+    assert.equal(result["parlay-options"].priorLatestSnapshotRetained, true, "the stale prior :latest alias must not be falsely reported as replaced");
+    assert.match(result["parlay-options"].fallbackReason ?? "", /parlay-options/i);
+    assert.match(result["parlay-options"].fallbackReason ?? "", /fetch failed/);
+
+    assert.equal(result["covered-picks"].status, "published");
+    assert.equal(result["model-performance"].status, "published");
+    assert.equal(result.overallStatus, "partial");
+
+    assert.equal(errorSpy.mock.callCount(), 1);
+    const loggedLine = String(errorSpy.mock.calls[0]?.arguments[0] ?? "");
+    assert.match(loggedLine, /route=parlay-options/);
+    assert.match(loggedLine, /stage=build/);
+    assert.match(loggedLine, /fetch failed/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
 test("public snapshot collection isolates route failures and preserves successful routes", async () => {
   const publishSummary = async (route: "covered-picks" | "parlay-options" | "model-performance", rows: unknown[], maxBytes: number) => ({
     route,

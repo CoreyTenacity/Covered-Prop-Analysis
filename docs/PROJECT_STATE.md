@@ -143,9 +143,18 @@ decision is made to expose them in the UI.
 
 ### Issue 3: Parlay Save Functionality Verification
 
-**Status (UPDATED 2026-07-15):** Empty parlay builder ROOT-CAUSED to the stale snapshot (scheduler off), NOT a
-code bug: live `getParlayOptions('wnba')` returns 3 rows while the published snapshot has 0. The user save POST
-routes (`/api/me/parlays`, `/api/me/picks`) exist and are wired in `parlay-builder-shell.tsx`; a live Cloudflare
+**Status (UPDATED 2026-07-15, refined 2026-07-16):** Empty parlay builder ROOT-CAUSED to the stale snapshot, NOT
+a code bug: live `getParlayOptions('wnba')` returns rows while the published snapshot has 0. **Refinement
+(2026-07-16, read-only diagnosis):** "scheduler off" alone is no longer the full picture -- `covered-picks` WAS
+successfully republished on 2026-07-16 (14 rows) in what appears to be the same nominal orchestrator call that
+left `parlay-options` still at its 2026-07-14 publish, meaning `parlay-options`'s own build/write step most
+likely failed silently during that run. The exact historical exception is unrecoverable (an unlogged local
+run); this is a supported inference, not a proven exact exception. `lib/knowledge/public-snapshots.ts` now
+emits a structured, logged failure per route (`errorStage`, `publicationAttempted`, `publicationCompleted`,
+`priorLatestSnapshotRetained`, one `console.error` line) so a future occurrence is caught immediately -- see
+`docs/AGENT_HANDOFF.md`'s "Session 13". **Restoring the Parlay Builder still requires a separate,
+explicitly owner-approved live publication; none occurred in session 13.** The user save POST routes
+(`/api/me/parlays`, `/api/me/picks`) exist and are wired in `parlay-builder-shell.tsx`; a live Cloudflare
 auth roundtrip test is still the one open verification item here.
 
 **Severity:** Medium (auth-dependent feature; display path root-caused to config)

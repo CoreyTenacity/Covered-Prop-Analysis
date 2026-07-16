@@ -16,6 +16,8 @@ import type {
 import {
   type PublicSnapshotEnvelope,
   type PublicSnapshotFilterScope,
+  type PublicSnapshotPublicationErrorStage,
+  type PublicSnapshotPublicationOverallStatus,
   type PublicSnapshotPublicationSummary,
   type PublicSnapshotRouteName,
   type PublicSnapshotSource,
@@ -274,6 +276,10 @@ export async function publishPublicSnapshot<T>(input: {
       publishedAt,
       fallbackReason: `Snapshot for ${route} exceeded ${maxBytes} bytes (${serializedBytes} bytes).`,
       ...(input.publish !== true ? { dryRun: true as const } : {}),
+      publicationAttempted: input.publish === true,
+      publicationCompleted: false,
+      errorStage: "size-limit" as const,
+      priorLatestSnapshotRetained: true,
     } satisfies PublicSnapshotPublicationSummary;
   }
 
@@ -288,6 +294,10 @@ export async function publishPublicSnapshot<T>(input: {
       status: payload.status,
       publishedAt,
       dryRun: true,
+      publicationAttempted: false,
+      publicationCompleted: false,
+      errorStage: null,
+      priorLatestSnapshotRetained: true,
     } satisfies PublicSnapshotPublicationSummary;
   }
 
@@ -310,6 +320,10 @@ export async function publishPublicSnapshot<T>(input: {
       status: "degraded" as const,
       publishedAt,
       fallbackReason: `Snapshot for ${route} could not be written at versioned key ${publicSnapshotCacheKey(route, snapshotVersion)}.`,
+      publicationAttempted: true,
+      publicationCompleted: false,
+      errorStage: "write" as const,
+      priorLatestSnapshotRetained: true,
     } satisfies PublicSnapshotPublicationSummary;
   }
 
@@ -334,6 +348,12 @@ export async function publishPublicSnapshot<T>(input: {
       status: "degraded" as const,
       publishedAt,
       fallbackReason: `Snapshot for ${route} was written at the versioned key but the latest pointer could not be updated.`,
+      publicationAttempted: true,
+      publicationCompleted: false,
+      // The `:latest` alias is what public routes actually read -- it was not updated, so the
+      // prior snapshot (if any) is still what they serve even though a new versioned entry exists.
+      errorStage: "write" as const,
+      priorLatestSnapshotRetained: true,
     } satisfies PublicSnapshotPublicationSummary;
   }
 
@@ -346,6 +366,10 @@ export async function publishPublicSnapshot<T>(input: {
     maxBytes,
     status: payload.status,
     publishedAt,
+    publicationAttempted: true,
+    publicationCompleted: true,
+    errorStage: null,
+    priorLatestSnapshotRetained: false,
   } satisfies PublicSnapshotPublicationSummary;
 }
 
@@ -384,6 +408,8 @@ async function collectRoutePublicSnapshotPublication<T>(input: {
         publish: input.shouldPublish,
       });
     } catch (error) {
+      const sanitized = sanitizeSnapshotError(error);
+      console.error(`[public-snapshot][publication-failed] route=${input.route} stage=write reason=${sanitized}`);
       return {
         route: input.route,
         snapshotVersion: input.snapshotVersion,
@@ -398,10 +424,16 @@ async function collectRoutePublicSnapshotPublication<T>(input: {
         maxBytes: input.maxBytes,
         status: "degraded" as const,
         publishedAt: currentPublishedAt(),
-        fallbackReason: `Snapshot publication for ${input.route} failed: ${sanitizeSnapshotError(error)}.`,
+        fallbackReason: `Snapshot publication for ${input.route} failed: ${sanitized}.`,
+        publicationAttempted: input.shouldPublish === true,
+        publicationCompleted: false,
+        errorStage: "write" as const satisfies PublicSnapshotPublicationErrorStage,
+        priorLatestSnapshotRetained: true,
       } satisfies PublicSnapshotPublicationSummary;
     }
   } catch (error) {
+    const sanitized = sanitizeSnapshotError(error);
+    console.error(`[public-snapshot][publication-failed] route=${input.route} stage=build reason=${sanitized}`);
     return {
       route: input.route,
       snapshotVersion: input.snapshotVersion,
@@ -411,7 +443,11 @@ async function collectRoutePublicSnapshotPublication<T>(input: {
       maxBytes: input.maxBytes,
       status: "degraded" as const,
       publishedAt: currentPublishedAt(),
-      fallbackReason: `Snapshot collection for ${input.route} failed: ${sanitizeSnapshotError(error)}.`,
+      fallbackReason: `Snapshot collection for ${input.route} failed: ${sanitized}.`,
+      publicationAttempted: false,
+      publicationCompleted: false,
+      errorStage: "build" as const satisfies PublicSnapshotPublicationErrorStage,
+      priorLatestSnapshotRetained: true,
     } satisfies PublicSnapshotPublicationSummary;
   }
 }
@@ -867,10 +903,23 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
     }),
   ]);
 
+  const routeSummaries = [coveredPicksSnapshot, parlayOptionsSnapshot, modelPerformanceSnapshot];
+  const degradedCount = routeSummaries.filter((summary) => summary.status === "degraded").length;
+  // Disabled takes priority regardless of per-route outcomes: if publish:true was never
+  // requested, no route wrote anything, and no caller should read this as a real publication.
+  const overallStatus: PublicSnapshotPublicationOverallStatus = input.publish !== true
+    ? "disabled"
+    : degradedCount === 0
+      ? "complete"
+      : degradedCount === routeSummaries.length
+        ? "failed"
+        : "partial";
+
   return {
     "covered-picks": coveredPicksSnapshot,
     "parlay-options": parlayOptionsSnapshot,
     "model-performance": modelPerformanceSnapshot,
+    overallStatus,
   } as const;
 }
 
