@@ -1,15 +1,11 @@
-# STAGED DELIVERABLE — Candidate F production pipeline for the PUBLIC repo
-# (CoreyTenacity/Covered-Prop-Analysis). Place at .github/workflows/covered-production-pipeline.yml
-# in the PUBLIC repo ONLY AFTER completing the owner-only prerequisites documented in
-# docs/AGENT_HANDOFF.md "Session 18" (read-only checkout credential, `production` Environment +
-# secrets, `main` branch protection, and the COVERED_PRIVATE_PIPELINE_SHA variable).
+# Candidate F production pipeline — PUBLIC repo (CoreyTenacity/Covered-Prop-Analysis).
+# Runs on a free public standard runner, checks out the pinned PRIVATE Covered SHA into a temp dir
+# via a read-only credential, and runs the existing pipeline. Private source never enters the public
+# repo/artifacts/caches/logs. Proven live: WNBA run 29535784558, MLB run 29536975916.
 #
-# This workflow runs in the PUBLIC repo (free standard-runner minutes), checks out the PRIVATE
-# Covered repo at a pinned reviewed SHA into a temporary directory, and runs the existing pipeline
-# from there. Private SOURCE never enters the public repo, artifacts, caches, or logs.
-#
-# NOTE: `schedule:` is intentionally OMITTED here — this is workflow_dispatch-only until both MLB and
-# WNBA real proof runs pass and the live UI is verified (then add the staggered cron per Session 18).
+# SCHEDULING SAFETY: scheduled runs are gated by the job-level `if:` on COVERED_GITHUB_SCHEDULER_ENABLED,
+# so this file is SAFE TO MERGE while that var is `false` — no scheduled run executes until it flips to
+# `true`. Manual workflow_dispatch always runs regardless.
 
 name: Covered Production Pipeline
 
@@ -27,7 +23,7 @@ on:
         type: boolean
         default: true
       config_limit:
-        description: SharpAPI configs this run (WNBA 6-10, MLB 8-12; do not exceed provider margin)
+        description: SharpAPI configs this run (WNBA ~8, MLB ~10; provider margin protected by spacing)
         required: true
         type: string
         default: "1"
@@ -41,14 +37,16 @@ on:
         required: true
         type: boolean
         default: true
+  schedule:
+    # UTC. July 2026 = EDT (UTC-4). Game-window gating lives INSIDE the pipeline (it skips fast when no
+    # game qualifies), so these windows are bounded to game hours to avoid needless overnight runs.
+    # Staggered by 10 min so WNBA and MLB never fire on the same minute (shared concurrency also serializes).
+    - cron: "0,20,40 22,23,0,1,2,3,4 * * *"       # WNBA — every 20 min, ~6:00pm–1:00am ET
+    - cron: "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"  # MLB — every 20 min, ~12:10pm–1:00am ET
 
-# Least privilege: the job only needs to read the public checkout; the private checkout uses the
-# Environment secret, not GITHUB_TOKEN.
 permissions:
   contents: read
 
-# Shared across ALL SharpAPI production execution so MLB and WNBA never pull the shared key at the
-# same time. Queue (do NOT cancel) so an in-flight ingestion is never severed mid-run.
 concurrency:
   group: covered-production-sharpapi
   cancel-in-progress: false
@@ -57,19 +55,46 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Binds Environment secrets + the main-only deployment-branch restriction to this job.
+    # Manual dispatch always runs. Scheduled runs execute ONLY when the scheduler kill-switch is on.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.COVERED_GITHUB_SCHEDULER_ENABLED == 'true' }}
     environment: production
     env:
-      # Non-sensitive controls come from public repo Variables.
       SHARPAPI_MAX_REQUESTS_PER_MINUTE: ${{ vars.SHARPAPI_MAX_REQUESTS_PER_MINUTE }}
       SHARPAPI_REQUEST_SPACING_MS: ${{ vars.SHARPAPI_REQUEST_SPACING_MS }}
-      SHARPAPI_CONFIGS_PER_RUN: ${{ github.event.inputs.config_limit }}
       KNOWLEDGE_LOW_EGRESS_MODE: ${{ vars.KNOWLEDGE_LOW_EGRESS_MODE }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
       COVERED_GITHUB_SCHEDULER_ENABLED: ${{ vars.COVERED_GITHUB_SCHEDULER_ENABLED }}
       WNBA_INGESTION_ENABLED: ${{ vars.WNBA_INGESTION_ENABLED }}
     steps:
+      - name: Resolve run parameters (dispatch inputs, or map schedule cron -> league)
+        id: params
+        env:
+          SCHED: ${{ github.event.schedule }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            LEAGUE="${{ github.event.inputs.league }}"
+            DRY="${{ github.event.inputs.dry_run }}"
+            CFG="${{ github.event.inputs.config_limit }}"
+            SCORING="${{ github.event.inputs.run_scoring }}"
+            BOARD="${{ github.event.inputs.run_board }}"
+          else
+            DRY="false"; SCORING="true"; BOARD="true"
+            case "$SCHED" in
+              "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
+              "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
+              *) echo "::error::Unrecognized schedule cron: $SCHED"; exit 1 ;;
+            esac
+            # WNBA-specific gate for scheduled runs; manual dispatch is unaffected.
+            if [ "$LEAGUE" = "WNBA" ] && [ "${WNBA_INGESTION_ENABLED}" != "true" ]; then
+              echo "WNBA scheduled ingestion disabled (WNBA_INGESTION_ENABLED != true); skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          { echo "league=$LEAGUE"; echo "dry_run=$DRY"; echo "config_limit=$CFG";
+            echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
+
       - name: Fail closed if the pinned private SHA is missing/malformed
+        if: steps.params.outputs.skip != 'true'
         env:
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA }}
         run: |
@@ -80,6 +105,7 @@ jobs:
           echo "Pinned private SHA present (value not printed)."
 
       - name: Check out PRIVATE Covered repo at the pinned SHA (into ./private-covered)
+        if: steps.params.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: CoreyTenacity/Covered
@@ -90,6 +116,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify checkout is exactly the approved SHA
+        if: steps.params.outputs.skip != 'true'
         working-directory: private-covered
         run: |
           GOT="$(git rev-parse HEAD)"
@@ -101,24 +128,27 @@ jobs:
           echo "Private checkout pinned correctly."
 
       - name: Set up pnpm
+        if: steps.params.outputs.skip != 'true'
         uses: pnpm/action-setup@v4
         with:
-          # Pinned because the workspace root has no package.json to auto-detect from (only the
-          # PRIVATE repo is checked out, into ./private-covered). Matches the private repo's
-          # packageManager field (pnpm@10.13.1). Bump here if the private repo's pnpm version changes.
+          # Pinned because the workspace root has no package.json to auto-detect from (only the PRIVATE
+          # repo is checked out, into ./private-covered). Matches the private packageManager (pnpm@10.13.1).
           version: 10.13.1
 
       - name: Set up Node
+        if: steps.params.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           # Intentionally NO `cache: pnpm` — never cache the private tree's dependencies publicly.
 
       - name: Install (private checkout, from lockfile)
+        if: steps.params.outputs.skip != 'true'
         working-directory: private-covered
         run: pnpm install --frozen-lockfile
 
       - name: Run production pipeline
+        if: steps.params.outputs.skip != 'true'
         working-directory: private-covered
         env:
           # Production credentials — main-restricted `production` Environment secrets. Auto-masked in logs.
@@ -127,16 +157,17 @@ jobs:
           SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
           BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SHARPAPI_CONFIGS_PER_RUN: ${{ steps.params.outputs.config_limit }}
         run: |
           # No `set -x`, no `env` dump, no verbose HTTP debug — public logs are world-readable.
           pnpm run cron:run -- github-actions \
             --trigger "${GITHUB_EVENT_NAME}" \
-            --league "${{ github.event.inputs.league }}" \
+            --league "${{ steps.params.outputs.league }}" \
             --configLimit "${SHARPAPI_CONFIGS_PER_RUN}" \
-            --runScoring "${{ github.event.inputs.run_scoring }}" \
-            --runBoard "${{ github.event.inputs.run_board }}" \
-            --dryRun "${{ github.event.inputs.dry_run }}" \
-            --publishPublicSnapshots "${{ github.event.inputs.run_board }}" \
+            --runScoring "${{ steps.params.outputs.run_scoring }}" \
+            --runBoard "${{ steps.params.outputs.run_board }}" \
+            --dryRun "${{ steps.params.outputs.dry_run }}" \
+            --publishPublicSnapshots "${{ steps.params.outputs.run_board }}" \
             --pregameWindowHours "6" \
             --pregameCloseBufferMinutes "5" \
             --enabled "true"
