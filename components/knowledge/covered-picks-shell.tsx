@@ -19,7 +19,10 @@ const sports = [
   { label: "Basketball", value: "basketball" },
 ];
 
-const confidenceOptions = ["", "High Confidence", "Solid Confidence", "Limited Confidence", "Low Confidence"];
+// Must match the labels produced by confidenceLabelFor() in lib/knowledge/adapters/base.ts
+// (High/Medium/Low Confidence + Data Limited). The prior "Solid"/"Limited" options never
+// matched any scored row, and "Medium Confidence" — the most common real label — was missing.
+const confidenceOptions = ["", "High Confidence", "Medium Confidence", "Low Confidence", "Data Limited"];
 const riskOptions = ["", "Low Risk", "Moderate Risk", "Elevated Risk", "High Risk"];
 
 function easternToday() {
@@ -50,7 +53,7 @@ export function CoveredPicksShell() {
   const [date, setDate] = useState(easternToday());
   const [marketType, setMarketType] = useState("");
   const [sportsbook, setSportsbook] = useState("");
-  const [minimumCoveredScore, setMinimumCoveredScore] = useState("50");
+  const [minimumCoveredScore, setMinimumCoveredScore] = useState("70");
   const [confidenceLabel, setConfidenceLabel] = useState("");
   const [riskLabel, setRiskLabel] = useState("");
   const [savingPickId, setSavingPickId] = useState<string | null>(null);
