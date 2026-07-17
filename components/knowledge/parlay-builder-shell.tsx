@@ -221,7 +221,12 @@ export function ParlayBuilderShell() {
       includeVariantBooks: false,
     });
 
-    const collapsed = collapseManualCatalog(filtered);
+    // `onlyScored` only guarantees a linked scored_props row exists; some props have a scored
+    // row that never finished computing (null covered_score / candidate state). Those render with
+    // no score and read as "incomplete scoring", so exclude them from the manual builder catalog.
+    const scoredOnly = filtered.filter((row) => row.covered_score != null);
+
+    const collapsed = collapseManualCatalog(scoredOnly);
     const sorted = [...collapsed];
     sorted.sort((left, right) => {
       if (sortBy === "start") {
