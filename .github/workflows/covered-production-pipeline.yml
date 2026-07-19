@@ -41,6 +41,11 @@ on:
         required: true
         type: boolean
         default: true
+      publish_public_snapshots:
+        description: Publish public snapshots, including standalone Model Performance
+        required: true
+        type: boolean
+        default: true
   schedule:
     # UTC. July 2026 = EDT (UTC-4). Game-window gating lives INSIDE the pipeline (it skips fast when no
     # game qualifies), so these windows are bounded to game hours to avoid needless overnight runs.
@@ -84,13 +89,14 @@ jobs:
             CFG="${{ github.event.inputs.config_limit }}"
             SCORING="${{ github.event.inputs.run_scoring }}"
             BOARD="${{ github.event.inputs.run_board }}"
+            PUBLISH="${{ github.event.inputs.publish_public_snapshots }}"
           else
             # Scheduler kill-switch — enforced HERE (env vars are available to steps, unlike job `if:`).
             if [ "${COVERED_GITHUB_SCHEDULER_ENABLED}" != "true" ]; then
               echo "Scheduler disabled (COVERED_GITHUB_SCHEDULER_ENABLED != true); skipping scheduled run."
               echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            DRY="false"; SCORING="true"; BOARD="true"
+            DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
             case "$SCHED" in
               "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
               "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
@@ -103,7 +109,7 @@ jobs:
             fi
           fi
           { echo "league=$LEAGUE"; echo "dry_run=$DRY"; echo "config_limit=$CFG";
-            echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
+            echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "publish_public_snapshots=$PUBLISH"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
 
       - name: Fail closed if the pinned private SHA is missing/malformed
         if: steps.params.outputs.skip != 'true'
@@ -179,7 +185,7 @@ jobs:
             --runScoring "${{ steps.params.outputs.run_scoring }}" \
             --runBoard "${{ steps.params.outputs.run_board }}" \
             --dryRun "${{ steps.params.outputs.dry_run }}" \
-            --publishPublicSnapshots "${{ steps.params.outputs.run_board }}" \
+            --publishPublicSnapshots "${{ steps.params.outputs.publish_public_snapshots }}" \
             --pregameWindowHours "6" \
             --pregameCloseBufferMinutes "5" \
             --enabled "true"
