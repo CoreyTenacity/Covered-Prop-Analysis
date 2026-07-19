@@ -3,6 +3,10 @@
 # via a read-only credential, and runs the existing pipeline. Private source never enters the public
 # repo/artifacts/caches/logs. Proven live: WNBA run 29535784558, MLB run 29536975916.
 #
+# PIN NAMESPACE: COVERED_PRIVATE_PIPELINE_SHA_V2 is the active production pin. The legacy
+# COVERED_PRIVATE_PIPELINE_SHA variable is intentionally retired so an unrecoverable queued
+# workflow from the pre-cutover generation fails closed before private checkout.
+#
 # SCHEDULING SAFETY: scheduled runs are gated by the job-level `if:` on COVERED_GITHUB_SCHEDULER_ENABLED,
 # so this file is SAFE TO MERGE while that var is `false` — no scheduled run executes until it flips to
 # `true`. Manual workflow_dispatch always runs regardless.
@@ -104,10 +108,10 @@ jobs:
       - name: Fail closed if the pinned private SHA is missing/malformed
         if: steps.params.outputs.skip != 'true'
         env:
-          PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA }}
+          PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
         run: |
           if ! printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::COVERED_PRIVATE_PIPELINE_SHA is missing or not a full 40-char SHA. Refusing to run."
+            echo "::error::COVERED_PRIVATE_PIPELINE_SHA_V2 is missing or not a full 40-char SHA. Refusing to run."
             exit 1
           fi
           echo "Pinned private SHA present (value not printed)."
@@ -117,7 +121,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: CoreyTenacity/Covered
-          ref: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA }}
+          ref: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
           token: ${{ secrets.COVERED_PRIVATE_REPO_TOKEN }}   # read-only, single-repo, Contents:read
           path: private-covered
           persist-credentials: false
@@ -128,7 +132,7 @@ jobs:
         working-directory: private-covered
         run: |
           GOT="$(git rev-parse HEAD)"
-          EXP="${{ vars.COVERED_PRIVATE_PIPELINE_SHA }}"
+          EXP="${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}"
           if [ "$GOT" != "$EXP" ]; then
             echo "::error::Private checkout HEAD does not match the approved SHA."
             exit 1
