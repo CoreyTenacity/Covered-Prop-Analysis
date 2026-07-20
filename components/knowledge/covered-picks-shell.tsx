@@ -105,7 +105,10 @@ export function CoveredPicksShell() {
     setError("");
 
     fetch("/api/knowledge/covered-picks", {
-      cache: "force-cache",
+      // force-cache can preserve an old empty response indefinitely in the browser. The API
+      // remains snapshot-first and keeps its bounded shared-edge Cache-Control policy, so this
+      // only removes the browser's private stale copy without adding raw-table reads or writes.
+      cache: "no-store",
       credentials: "omit",
     })
       .then(async (response) => {
