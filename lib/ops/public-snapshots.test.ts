@@ -266,7 +266,7 @@ test("route write failure: reported as a write-stage failure, prior latest alias
     const result = await collectPublicSnapshotPublicationSummaries({
       publish: true,
       dependencies: {
-        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z", covered_score: 72, current_prop_id: "cp-1" }] } as any),
         parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
         modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
         publishPublicSnapshot: async (input) => {
@@ -318,7 +318,7 @@ test("all routes succeed: aggregate result indicates complete success", async ()
   const result = await collectPublicSnapshotPublicationSummaries({
     publish: true,
     dependencies: {
-      coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+      coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z", covered_score: 72, current_prop_id: "cp-1" }] } as any),
       parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
       modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
       publishPublicSnapshot: async (input) => ({
@@ -347,6 +347,87 @@ test("all routes succeed: aggregate result indicates complete success", async ()
   }
 });
 
+test("covered-picks publication keeps row-level eligible rows even when a league is marked held", async () => {
+  const rows = (values: Array<[string, number]>) => values.map(([league, covered_score], index) => ({
+    league,
+    covered_score,
+    current_prop_id: `${league}-${index}`,
+    start_time: "2026-07-20T18:00:00.000Z",
+    last_updated: "2026-07-20T17:00:00.000Z",
+  }));
+  const publish = async (input: { route: string; rows: unknown[] }) => {
+    if (input.route === "covered-picks") publishedCoveredRows.push(input.rows);
+    return {
+      route: input.route,
+      snapshotVersion: `${input.route}:test`,
+      snapshotKey: `public-snapshot:${input.route}:vtest`,
+      rowCount: input.rows.length,
+      serializedBytes: 1,
+      maxBytes: 256 * 1024,
+      status: input.rows.length ? "published" as const : "fallback" as const,
+      publishedAt: "2026-07-20T17:00:00.000Z",
+      publicationAttempted: true,
+      publicationCompleted: true,
+      errorStage: null,
+      priorLatestSnapshotRetained: false,
+    };
+  };
+  let publishedCoveredRows: unknown[][] = [];
+  const collect = async (values: Array<[string, number]>, heldRoutes: string[] = [], excludeLeagues: string[] = []) => {
+    publishedCoveredRows = [];
+    await collectPublicSnapshotPublicationSummaries({
+      publish: true,
+      heldRoutes: heldRoutes as any,
+      excludeLeagues,
+      dependencies: {
+        coveredPicks: async () => ({ rows: rows(values) } as any),
+        parlayOptions: async () => ({ rows: [] } as any),
+        modelPerformance: async () => ({ rows: [], count: 0 } as any),
+        publishPublicSnapshot: publish as any,
+      },
+    });
+    return (publishedCoveredRows[0] ?? []) as Array<{ league: string; covered_score: number }>;
+  };
+
+  assert.deepEqual((await collect([["mlb", 73], ["wnba", 74]], ["covered-picks"], ["mlb"])).map((row) => row.league), ["wnba", "mlb"]);
+  assert.deepEqual((await collect([["mlb", 73], ["wnba", 74]], ["covered-picks"], ["wnba"])).map((row) => row.league), ["wnba", "mlb"]);
+  assert.deepEqual((await collect([["mlb", 73], ["wnba", 30]], ["covered-picks"], ["wnba"])).map((row) => row.league), ["mlb"]);
+  assert.deepEqual((await collect([["mlb", 30], ["wnba", 74]], ["covered-picks"], ["mlb"])).map((row) => row.league), ["wnba"]);
+  assert.deepEqual(await collect([["mlb", 30], ["wnba", 69]], ["covered-picks"], ["mlb", "wnba"]), []);
+  assert.ok((await collect([["mlb", 69], ["wnba", 70]])).every((row) => row.covered_score >= 70));
+});
+
+test("covered-picks writes its versioned snapshot before advancing :latest", async () => {
+  const originalUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const originalRunId = process.env.GITHUB_RUN_ID;
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "eyJtest";
+  process.env.GITHUB_RUN_ID = "league-isolation-version-order";
+  const cacheKeys: string[] = [];
+  const fetchSpy = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { cache_key?: string };
+    cacheKeys.push(body.cache_key ?? "");
+    return new Response("", { status: 200 });
+  });
+  try {
+    const result = await publishPublicSnapshot({
+      route: "covered-picks",
+      rows: [{ covered_score: 74 }],
+      publish: true,
+    });
+    assert.equal(result.publicationCompleted, true);
+    assert.match(cacheKeys[0] ?? "", /:vcovered-picks:league-isolation-version-order$/);
+    assert.equal(cacheKeys[1], "public-snapshot:covered-picks:latest");
+    assert.equal(fetchSpy.mock.callCount(), 2);
+  } finally {
+    mock.restoreAll();
+    if (originalUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL; else process.env.NEXT_PUBLIC_SUPABASE_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+    if (originalRunId === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = originalRunId;
+  }
+});
+
 test("publication disabled (no publish:true): no writes occur and the result cannot be confused with an actual publication", async () => {
   const fetchSpy = mock.method(globalThis, "fetch", async () => {
     throw new Error("fetch must not be called when publication is disabled");
@@ -354,7 +435,7 @@ test("publication disabled (no publish:true): no writes occur and the result can
   try {
     const result = await collectPublicSnapshotPublicationSummaries({
       dependencies: {
-        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z", covered_score: 72, current_prop_id: "cp-1" }] } as any),
         parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
         modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
       },
@@ -426,7 +507,7 @@ test("a native fetch TypeError with an UND_ERR_HEADERS_OVERFLOW cause (the exact
     const result = await collectPublicSnapshotPublicationSummaries({
       publish: true,
       dependencies: {
-        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z", covered_score: 72, current_prop_id: "cp-1" }] } as any),
         parlayOptions: async () => {
           // Mirrors the real error shape observed live: selectRows()/fetch() throws a native
           // TypeError("fetch failed") whose real diagnostic detail lives one layer deeper, in
@@ -568,7 +649,7 @@ test("collectPublicSnapshotPublicationSummaries defaults to preview-only across 
     // single-league (WNBA-only) view of covered-picks, with no publish flag at all.
     const result = await collectPublicSnapshotPublicationSummaries({
       dependencies: {
-        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z" }] } as any),
+        coveredPicks: async () => ({ rows: [{ league: "wnba", start_time: "2026-07-16T23:00:00.000Z", last_updated: "2026-07-16T00:00:00.000Z", covered_score: 72, current_prop_id: "cp-1" }] } as any),
         parlayOptions: async () => ({ rows: [{ start_time: "2026-07-16T23:00:00.000Z" }] } as any),
         modelPerformance: async () => ({ rows: [{ graded_at: "2026-07-16T00:00:00.000Z" }], count: 1 } as any),
       },

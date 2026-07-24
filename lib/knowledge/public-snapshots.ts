@@ -29,6 +29,7 @@ import {
 import { PUBLIC_SNAPSHOT_FILTER_SCOPES, PUBLIC_SNAPSHOT_LIMITS } from "@/lib/knowledge/public-snapshot-types";
 export { PUBLIC_SNAPSHOT_FILTER_SCOPES, PUBLIC_SNAPSHOT_LIMITS } from "@/lib/knowledge/public-snapshot-types";
 import type { ProviderId } from "@/lib/providers/provider-contracts";
+import { enforceCoveredPicksFloor, validateCoveredPicksFloor, COVERED_PICKS_MIN_SCORE } from "@/lib/knowledge/pipeline/board-invariant";
 
 const PUBLIC_SNAPSHOT_PROVIDER: ProviderId = "the-odds-api";
 const DEFAULT_MODEL_PERFORMANCE_DATE_FROM = "2026-01-01";
@@ -835,11 +836,25 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
    * publish -- e.g. the real GitHub Actions pipeline's scheduled/dispatched run.
    */
   publish?: boolean;
+  /**
+   * Routes to HOLD this run: the route is computed (preview) but not written, so
+   * its prior known-good snapshot is retained. Set by the pipeline health gate
+   * when a route partition is pipeline-degraded, so a degraded run never
+   * overwrites a good board. Holding one route never affects the others.
+   */
+  heldRoutes?: PublicSnapshotRouteName[];
+  /** Exclude the degraded league while allowing healthy league rows to advance scored routes. */
+  excludeLeagues?: string[];
 } = {}) {
   const publishPublicSnapshotImpl = input.dependencies?.publishPublicSnapshot ?? publishPublicSnapshot;
   const coveredPicksReader = input.dependencies?.coveredPicks ?? getCoveredPicksOfTheDay;
   const parlayOptionsReader = input.dependencies?.parlayOptions ?? getParlayOptions;
   const modelPerformanceReader = input.dependencies?.modelPerformance ?? getModelPerformance;
+  const held = new Set(input.heldRoutes ?? []);
+  const excludedLeagues = new Set((input.excludeLeagues ?? []).map(normalizeText).filter(Boolean));
+  const leagueScopedRoutes = new Set<PublicSnapshotRouteName>(["covered-picks", "parlay-options"]);
+  const mayPublish = (route: PublicSnapshotRouteName) => input.publish === true
+    && (!held.has(route) || (excludedLeagues.size > 0 && leagueScopedRoutes.has(route)));
 
   const [coveredPicksSnapshot, parlayOptionsSnapshot, modelPerformanceSnapshot] = await Promise.all([
     collectRoutePublicSnapshotPublication<PublicCoveredPickSnapshotRow>({
@@ -847,7 +862,7 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
       snapshotVersion: snapshotVersionFromTrace("covered-picks"),
       maxBytes: PUBLIC_SNAPSHOT_LIMITS["covered-picks"],
       publish: publishPublicSnapshotImpl,
-      shouldPublish: input.publish,
+      shouldPublish: mayPublish("covered-picks"),
       build: async () => {
         const coveredPicks = await coveredPicksReader({
           limit: 100,
@@ -855,11 +870,28 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
           includeGrading: false,
           includeVariantBooks: true,
         });
+        // Covered Picks is row-level gated. League-level health can still be
+        // degraded, but a healthy 70+ row from any league must not disappear
+        // just because unrelated rows in that league are incomplete. The
+        // publishability gate already excluded blocked rows upstream; here we
+        // apply only the Covered Picks floor and deterministic deduplication.
+        const boardRows = enforceCoveredPicksFloor(
+          coveredPicks.rows,
+          (row) => row.covered_score,
+          (row) => row.current_prop_id,
+        );
+        // Defense in depth: a snapshot must NOT contain any sub-floor row. If one
+        // slipped through, reject the build so the prior good snapshot is
+        // retained rather than publishing a floor-violating board.
+        const floorCheck = validateCoveredPicksFloor(boardRows, (row) => row.covered_score);
+        if (!floorCheck.ok) {
+          throw new Error(`covered-picks floor violation: ${floorCheck.offending} row(s) below ${COVERED_PICKS_MIN_SCORE}`);
+        }
         return {
-          rows: coveredPicks.rows.map(coveredPicksSourceRow),
-          dataThrough: coveredPicks.rows[0]?.start_time ?? null,
-          sourceRefreshedAt: coveredPicks.rows[0]?.last_updated ?? null,
-          status: coveredPicks.rows.length ? "published" : "fallback",
+          rows: boardRows.map(coveredPicksSourceRow),
+          dataThrough: boardRows[0]?.start_time ?? null,
+          sourceRefreshedAt: boardRows[0]?.last_updated ?? null,
+          status: boardRows.length ? "published" : "fallback",
         };
       },
     }),
@@ -868,17 +900,18 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
       snapshotVersion: snapshotVersionFromTrace("parlay-options"),
       maxBytes: PUBLIC_SNAPSHOT_LIMITS["parlay-options"],
       publish: publishPublicSnapshotImpl,
-      shouldPublish: input.publish,
+      shouldPublish: mayPublish("parlay-options"),
       build: async () => {
         const parlayOptions = await parlayOptionsReader({
           limit: 250,
           includeVariantBooks: true,
         });
+        const rows = parlayOptions.rows.filter((row) => !excludedLeagues.has(normalizeText(row.league)));
         return {
-          rows: parlayOptions.rows,
-          dataThrough: parlayOptions.rows[0]?.start_time ?? null,
-          sourceRefreshedAt: parlayOptions.rows[0]?.start_time ?? null,
-          status: parlayOptions.rows.length ? "published" : "fallback",
+          rows,
+          dataThrough: rows[0]?.start_time ?? null,
+          sourceRefreshedAt: rows[0]?.start_time ?? null,
+          status: rows.length ? "published" : "fallback",
         };
       },
     }),
@@ -887,7 +920,7 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
       snapshotVersion: snapshotVersionFromTrace("model-performance"),
       maxBytes: PUBLIC_SNAPSHOT_LIMITS["model-performance"],
       publish: publishPublicSnapshotImpl,
-      shouldPublish: input.publish,
+      shouldPublish: mayPublish("model-performance"),
       build: async () => {
         const modelPerformance = await modelPerformanceReader({
           dateFrom: input.modelPerformanceDateFrom ?? DEFAULT_MODEL_PERFORMANCE_DATE_FROM,
