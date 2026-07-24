@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { PickCard } from "@/components/knowledge/pick-card";
+import { coveredPicksScoreFilterOptions } from "@/lib/knowledge/pipeline/board-invariant";
 import { filterCoveredPicksSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { CoveredPickRow, CoveredPicksResponse } from "@/lib/knowledge/read-types";
 
@@ -244,10 +245,12 @@ export function CoveredPicksShell() {
         <select value={league} onChange={(event) => setLeague(event.target.value)}>{leagues.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <select value={marketType} onChange={(event) => setMarketType(event.target.value)}>{marketOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <select value={sportsbook} onChange={(event) => setSportsbook(event.target.value)}>{sportsbookOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
+        {/* Covered Picks hard floor: the board only ever contains covered_score >= 70,
+            so the score filter cannot select a value below 70 (options are floor-and-up). */}
         <select value={minimumCoveredScore} onChange={(event) => setMinimumCoveredScore(event.target.value)}>
-          <option value="50">50+ Covered Score</option>
-          <option value="60">60+ Covered Score</option>
-          <option value="70">70+ Covered Score</option>
+          {coveredPicksScoreFilterOptions().map((value) => (
+            <option key={value} value={String(value)}>{value}+</option>
+          ))}
         </select>
         <select value={confidenceLabel} onChange={(event) => setConfidenceLabel(event.target.value)}>{confidenceOptions.map((option) => <option key={option} value={option}>{option || "Any confidence"}</option>)}</select>
         <select value={riskLabel} onChange={(event) => setRiskLabel(event.target.value)}>{riskOptions.map((option) => <option key={option} value={option}>{option || "Any risk"}</option>)}</select>
@@ -255,7 +258,7 @@ export function CoveredPicksShell() {
 
       {loading ? <div className="empty-state"><strong>Loading Covered Picks of the Day…</strong><span>Pulling the latest ranked scored props from the backend read layer.</span></div> : null}
       {!loading && error ? <div className="empty-state"><strong>Couldn’t load Covered Picks of the Day.</strong><span>{error}</span></div> : null}
-      {!loading && !error && !displayedRows.length ? <div className="empty-state"><strong>No Covered Picks are available right now.</strong><span>Scored props may already exist, but nothing has cleared the current public board floor yet. Try widening the filters or lowering the minimum Covered Score.</span></div> : null}
+      {!loading && !error && !displayedRows.length ? <div className="empty-state"><strong>No Covered Picks are available right now.</strong><span>Scored props may already exist, but none have cleared the 70+ Covered Score board floor yet. The board publishes fewer picks rather than lowering the floor. Try widening the other filters.</span></div> : null}
 
       {!loading && !error && displayedRows.length ? (
         <section className="opportunity-grid" aria-live="polite">

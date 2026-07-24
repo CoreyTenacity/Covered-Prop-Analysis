@@ -11,8 +11,8 @@ import { ParlayWarningList } from "@/components/knowledge/parlay-warning-list";
 import { RiskBadge } from "@/components/knowledge/risk-badge";
 import { ScoreBadge } from "@/components/knowledge/score-badge";
 import { fetchParlayOptions } from "@/components/knowledge/parlay-options-fetch";
+import { buildManualCatalogRows, manualScoreBandOptions, manualSortOptions, type ManualScoreBandValue, type ManualSortValue } from "@/components/knowledge/parlay-builder-catalog";
 import type { AnalyzedParlay } from "@/lib/knowledge/parlay-analysis";
-import { filterParlayOptionsSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { ParlayOptionRow, ParlayOptionsResponse } from "@/lib/knowledge/read-types";
 
 const leagues = [
@@ -22,15 +22,6 @@ const leagues = [
   { label: "NBA", value: "nba" },
 ] as const;
 
-const manualSortOptions = [
-  { label: "Best score", value: "score" },
-  { label: "Earliest start", value: "start" },
-  { label: "Highest match confidence", value: "match" },
-  { label: "Player A–Z", value: "player" },
-] as const;
-
-type ManualSortValue = (typeof manualSortOptions)[number]["value"];
-
 function easternToday() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
@@ -38,60 +29,6 @@ function easternToday() {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
-}
-
-function manualCatalogGroupingKey(option: ParlayOptionRow) {
-  const dateKey = option.start_time
-    ? new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date(option.start_time))
-    : "date:unknown";
-  return [
-    option.league,
-    option.event_id ?? option.event_display_name ?? "event:unknown",
-    option.participant_id ?? option.participant_display_name,
-    option.market_type,
-    dateKey,
-  ].join("|");
-}
-
-function collapseManualCatalog(rows: ParlayOptionRow[]) {
-  const grouped = new Map<string, ParlayOptionRow[]>();
-  for (const row of rows) {
-    const key = manualCatalogGroupingKey(row);
-    const bucket = grouped.get(key) ?? [];
-    bucket.push(row);
-    grouped.set(key, bucket);
-  }
-
-  return [...grouped.values()].map((bucket) => {
-    const representative = [...bucket].sort((left, right) =>
-      Number(right.covered_score ?? -Infinity) - Number(left.covered_score ?? -Infinity)
-      || Number(right.match_confidence ?? 0) - Number(left.match_confidence ?? 0)
-      || new Date(left.start_time ?? 0).getTime() - new Date(right.start_time ?? 0).getTime()
-    )[0];
-
-    const sportsbookMap = new Map(
-      bucket
-        .flatMap((row) => row.sportsbooks?.length ? row.sportsbooks : row.sportsbook ? [row.sportsbook] : [])
-        .map((book) => [book.id, book]),
-    );
-
-    return {
-      ...representative,
-      sportsbooks: [...sportsbookMap.values()],
-      sportsbook_count: sportsbookMap.size,
-      grouped_variant_count: bucket.length,
-    };
-  }).sort((left, right) =>
-    Number(right.covered_score ?? -Infinity) - Number(left.covered_score ?? -Infinity)
-    || Number(right.match_confidence ?? 0) - Number(left.match_confidence ?? 0)
-    || new Date(left.start_time ?? 0).getTime() - new Date(right.start_time ?? 0).getTime()
-    || left.participant_display_name.localeCompare(right.participant_display_name)
-  );
 }
 
 function sportsbookSummary(option: ParlayOptionRow) {
@@ -117,6 +54,7 @@ export function ParlayBuilderShell() {
   const [date, setDate] = useState(easternToday());
   const [league, setLeague] = useState("");
   const [marketType, setMarketType] = useState("");
+  const [scoreBand, setScoreBand] = useState<ManualScoreBandValue>("");
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<ManualSortValue>("score");
   const [optionsSelected, setOptionsSelected] = useState<ParlayOptionRow[]>([]);
@@ -205,48 +143,16 @@ export function ParlayBuilderShell() {
   }, [data]);
 
   const manualCatalogRows = useMemo(() => {
-    const filtered = filterParlayOptionsSnapshotRows(data?.rows ?? [], {
+    return buildManualCatalogRows(data?.rows ?? [], {
       date,
-      sport: null,
       league,
-      eventId: null,
       marketType,
-      sportsbook: null,
-      participantSearch: search,
-      onlyScored: true,
-      onlyMatched: false,
-      excludeStaleOdds: false,
-      excludeLowConfidenceMatches: false,
-      limit: 100,
-      includeVariantBooks: false,
+      search,
+      scoreBand,
+      sortBy,
+      limit: 25,
     });
-
-    // `onlyScored` only guarantees a linked scored_props row exists; some props have a scored
-    // row that never finished computing (null covered_score / candidate state). Those render with
-    // no score and read as "incomplete scoring", so exclude them from the manual builder catalog.
-    const scoredOnly = filtered.filter((row) => row.covered_score != null);
-
-    const collapsed = collapseManualCatalog(scoredOnly);
-    const sorted = [...collapsed];
-    sorted.sort((left, right) => {
-      if (sortBy === "start") {
-        return new Date(left.start_time ?? 0).getTime() - new Date(right.start_time ?? 0).getTime()
-          || Number(right.covered_score ?? -Infinity) - Number(left.covered_score ?? -Infinity);
-      }
-      if (sortBy === "match") {
-        return Number(right.match_confidence ?? 0) - Number(left.match_confidence ?? 0)
-          || Number(right.covered_score ?? -Infinity) - Number(left.covered_score ?? -Infinity);
-      }
-      if (sortBy === "player") {
-        return left.participant_display_name.localeCompare(right.participant_display_name)
-          || new Date(left.start_time ?? 0).getTime() - new Date(right.start_time ?? 0).getTime();
-      }
-      return Number(right.covered_score ?? -Infinity) - Number(left.covered_score ?? -Infinity)
-        || Number(right.match_confidence ?? 0) - Number(left.match_confidence ?? 0)
-        || new Date(left.start_time ?? 0).getTime() - new Date(right.start_time ?? 0).getTime();
-    });
-    return sorted.slice(0, 10);
-  }, [data?.rows, date, league, marketType, search, sortBy]);
+  }, [data?.rows, date, league, marketType, scoreBand, search, sortBy]);
 
   const [analysis, setAnalysis] = useState<AnalyzedParlay | null>(null);
   const [analysisError, setAnalysisError] = useState("");
@@ -417,6 +323,9 @@ export function ParlayBuilderShell() {
         <select value={marketType} onChange={(event) => setMarketType(event.target.value)}>
           {marketOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
+        <select value={scoreBand} onChange={(event) => setScoreBand(event.target.value as ManualScoreBandValue)}>
+          {manualScoreBandOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
         <select value={sortBy} onChange={(event) => setSortBy(event.target.value as ManualSortValue)}>
           {manualSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
@@ -427,7 +336,7 @@ export function ParlayBuilderShell() {
         <div className="knowledge-builder__catalog">
           {loading ? <div className="empty-state"><strong>Loading parlay options…</strong><span>Pulling selectable props from the current prop read layer.</span></div> : null}
           {!loading && error ? <div className="empty-state"><strong>Couldn’t load parlay options.</strong><span>{error}</span></div> : null}
-          {!loading && !error && !manualCatalogRows.length ? <div className="empty-state"><strong>No scored props are available for the current filters.</strong><span>Try a different date, league, market, or player search. The manual builder now stays focused on scored props only.</span></div> : null}
+          {!loading && !error && !manualCatalogRows.length ? <div className="empty-state"><strong>No scored props are available for the current filters.</strong><span>Try a different date, league, market, score band, or player search. The manual builder now stays focused on scored props only.</span></div> : null}
           {!loading && !error && manualCatalogRows.length ? (
             <div className="knowledge-list">
               {manualCatalogRows.map((option) => (

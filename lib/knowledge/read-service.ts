@@ -1,4 +1,5 @@
 import { selectRows, type SupabaseFilter } from "@/lib/db/supabase-server";
+import { clampCoveredPicksFloor } from "@/lib/knowledge/pipeline/board-invariant";
 import { confidenceLabelFor, riskLabelFor } from "@/lib/knowledge/adapters/base";
 import { derivePlayerHeadshotUrl, deriveTeamLogoUrl } from "@/lib/knowledge/media";
 import { calculateEdge } from "@/lib/scoring/covered-score";
@@ -524,11 +525,14 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
   const scanLimit = KNOWLEDGE_LOW_EGRESS_MODE
     ? Math.min(Math.max(limit * 4, 24), 80)
     : Math.min(Math.max(limit * 8, 80), 500);
+  // Covered Picks hard invariant at board candidate selection: the covered_score
+  // floor is always applied and can only be raised above 70, never lowered.
+  const coveredFloor = clampCoveredPicksFloor(query.minimumCoveredScore);
   const baseFilters: SupabaseFilter[] = [
     ...(query.sport ? [{ column: "sport_id", value: query.sport }] : []),
     ...(query.league ? [{ column: "league_id", value: query.league }] : []),
     { column: "publishable", value: true },
-    ...(typeof query.minimumCoveredScore === "number" ? [{ column: "covered_score", operator: "gte" as const, value: query.minimumCoveredScore }] : []),
+    { column: "covered_score", operator: "gte" as const, value: coveredFloor },
     ...(typeof query.minimumConfidenceScore === "number" ? [{ column: "confidence_score", operator: "gte" as const, value: query.minimumConfidenceScore }] : []),
   ];
 
