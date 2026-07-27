@@ -357,6 +357,57 @@ test("getCoveredPicksOfTheDay includes today/tomorrow-late-night events but excl
   });
 });
 
+test("getCoveredPicksOfTheDay: a league with fewer/older-but-eligible rows is not starved out of the scan by another league's larger, more-recently-updated pool", async () => {
+  await withE2eEnv(async () => {
+    // Reproduces the real production shape: each league's own cron window updates its own
+    // scored_props independently, so at any moment one league can have far more recently-
+    // touched rows than another. A single combined scan ordered by updated_at.desc with a
+    // small scanLimit would let the larger/fresher league (mlb here) fill the entire scan
+    // before the smaller/older-but-still-eligible league (wnba) is ever read.
+    const now = Date.now();
+    const mlbUpdatedAt = new Date(now).toISOString(); // most recent
+    const wnbaUpdatedAt = new Date(now - 60 * 60 * 1000).toISOString(); // an hour older, still eligible
+    const futureStart = new Date(now + 6 * 60 * 60 * 1000).toISOString();
+
+    const mlbCount = 40; // fills a small scanLimit entirely on its own
+    const currentProps: FixtureRow[] = [];
+    const participants: FixtureRow[] = [];
+    const players: FixtureRow[] = [];
+    const scoredProps: FixtureRow[] = [];
+
+    for (let i = 0; i < mlbCount; i += 1) {
+      currentProps.push({ ...buildProp(i, futureStart), league_id: "mlb", sport_id: "baseball", market_type: "pitcher_strikeouts" });
+      participants.push({ id: `participant-${i}`, display_name: `MLB Player ${i}`, participant_type: "player", player_id: `player-${i}`, team_id: "team-1", image_url: null, external_ids: {} });
+      players.push({ id: `player-${i}`, display_name: `MLB Player ${i}`, canonical_name: `MLB Player ${i}`, headshot_url: null, external_ids: {} });
+      scoredProps.push({ id: `scored-mlb-${i}`, current_prop_id: `prop-${i}`, sport_id: "baseball", league_id: "mlb", covered_score: 75, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: mlbUpdatedAt });
+    }
+
+    const wnbaIndex = 9000;
+    currentProps.push({ ...buildProp(wnbaIndex, futureStart), league_id: "wnba" });
+    participants.push({ id: `participant-${wnbaIndex}`, display_name: "WNBA Player", participant_type: "player", player_id: `player-${wnbaIndex}`, team_id: "team-1", image_url: null, external_ids: {} });
+    players.push({ id: `player-${wnbaIndex}`, display_name: "WNBA Player", canonical_name: "WNBA Player", headshot_url: null, external_ids: {} });
+    // Deliberately the highest score of any row in the fixture: if the WNBA row is
+    // scanned at all it must rank #1 and appear in even a small top-N slice --
+    // isolating "was it scanned" from "did it rank highly enough afterward".
+    scoredProps.push({ id: "scored-wnba-1", current_prop_id: `prop-${wnbaIndex}`, sport_id: "basketball", league_id: "wnba", covered_score: 90, confidence_score: 70, data_quality_score: 80, recommendation: "Elite", risk_flags: [], prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: wnbaUpdatedAt });
+
+    createSupabaseFixture({
+      current_props: currentProps,
+      participants,
+      players,
+      scored_props: scoredProps,
+      ...sharedFixtureTables(),
+    });
+
+    // A small explicit limit keeps scanLimit small (KNOWLEDGE_LOW_EGRESS_MODE:
+    // min(max(limit*4,24),250)) so the 40 MLB rows alone would fill a single
+    // combined scan before the older WNBA row is ever read.
+    const result = await getCoveredPicksOfTheDay({ limit: 10, includeVariantBooks: true, includeDetails: false, includeGrading: false });
+    const ids = result.rows.map((row) => row.current_prop_id);
+    assert.ok(ids.includes(`prop-${wnbaIndex}`), "the WNBA row must not be starved out of the scan by MLB's larger, fresher pool");
+  });
+});
+
 test("getParlayOptions includes today/tomorrow-late-night events but excludes a day-after-tomorrow-or-later row", async () => {
   await withE2eEnv(async () => {
     const { todayIso, tomorrowLateNightIso, dayAfterTomorrowIso } = preparedSlateProbeTimes();

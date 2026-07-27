@@ -616,6 +616,17 @@ function uniqueSportsbooks(rows: Array<{ sportsbook: { id: string; code: string;
   return [...seen.values()];
 }
 
+// Leagues Covered Picks currently draws from. When a combined (all-league) board
+// is requested, the initial scored_props scan is split fairly across these
+// rather than run as one query ordered by updated_at.desc -- a single combined
+// scan lets whichever league's rows were touched most recently (which tracks
+// each league's own, non-overlapping cron window, not score quality) fill the
+// entire scanLimit and starve every other league out of the candidate pool
+// before the score-based ranking below ever sees them. Each league still only
+// contributes rows that pass the exact same publishable/floor gate -- this
+// changes which eligible rows get *scanned*, not which rows are *eligible*.
+const COVERED_PICKS_LEAGUES = ["mlb", "wnba"] as const;
+
 export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
   const limit = Math.min(Math.max(query.limit ?? 250, 1), 250);
   const scanLimit = KNOWLEDGE_LOW_EGRESS_MODE
@@ -624,20 +635,34 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
   // Covered Picks hard invariant at board candidate selection: the covered_score
   // floor is always applied and can only be raised above 70, never lowered.
   const coveredFloor = clampCoveredPicksFloor(query.minimumCoveredScore);
-  const baseFilters: SupabaseFilter[] = [
+  const sharedFilters: SupabaseFilter[] = [
     ...(query.sport ? [{ column: "sport_id", value: query.sport }] : []),
-    ...(query.league ? [{ column: "league_id", value: query.league }] : []),
     { column: "publishable", value: true },
     { column: "covered_score", operator: "gte" as const, value: coveredFloor },
     ...(typeof query.minimumConfidenceScore === "number" ? [{ column: "confidence_score", operator: "gte" as const, value: query.minimumConfidenceScore }] : []),
   ];
 
-  const scoredRows = await selectRows<ScoredPropListRow>("scored_props", {
-    select: "id,current_prop_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at",
-    filters: baseFilters,
-    orderBy: "updated_at.desc",
-    limit: scanLimit,
-  });
+  const scoredRowsSelect = "id,current_prop_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at";
+
+  const scoredRows: ScoredPropListRow[] = query.league
+    ? await selectRows<ScoredPropListRow>("scored_props", {
+        select: scoredRowsSelect,
+        filters: [...sharedFilters, { column: "league_id", value: query.league }],
+        orderBy: "updated_at.desc",
+        limit: scanLimit,
+      })
+    : (
+        await Promise.all(
+          COVERED_PICKS_LEAGUES.map((league) =>
+            selectRows<ScoredPropListRow>("scored_props", {
+              select: scoredRowsSelect,
+              filters: [...sharedFilters, { column: "league_id", value: league }],
+              orderBy: "updated_at.desc",
+              limit: Math.max(Math.ceil(scanLimit / COVERED_PICKS_LEAGUES.length), 12),
+            }),
+          ),
+        )
+      ).flat();
 
   const latestByCurrent = new Map<string, ScoredPropListRow>();
   for (const row of scoredRows) {
