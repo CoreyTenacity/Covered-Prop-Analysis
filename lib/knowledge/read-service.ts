@@ -3,6 +3,7 @@ import { clampCoveredPicksFloor } from "@/lib/knowledge/pipeline/board-invariant
 import { confidenceLabelFor, riskLabelFor } from "@/lib/knowledge/adapters/base";
 import { derivePlayerHeadshotUrl, deriveTeamLogoUrl } from "@/lib/knowledge/media";
 import { calculateEdge } from "@/lib/scoring/covered-score";
+import { preparedSlateEventWindow } from "@/lib/knowledge/prepared-slate-window";
 import type { Confidence, Direction, Opportunity, Sport } from "@/lib/types";
 
 type BaseRow = Record<string, unknown>;
@@ -323,8 +324,103 @@ function isFutureStartTime(isoTime: string | null | undefined) {
   return timestamp > Date.now();
 }
 
+/**
+ * Public pregame output must never surface an event at day-after-tomorrow or
+ * later, Eastern -- isFutureStartTime above only proves a game hasn't
+ * started yet, with no upper bound at all. A scored_props/current_props row
+ * for a far-future event can genuinely exist (e.g. from a manual/diagnostic
+ * scoring dispatch that didn't pass eventIds, or simply persisting from an
+ * earlier day) and, without this check, would be picked up by any of
+ * getCoveredPicksOfTheDay/getBoardOpportunities/getParlayOptions --
+ * including their public snapshot-build and relational-fallback callers --
+ * regardless of what the private pipeline scoped THIS run to.
+ *
+ * Deliberately narrow: only rejects a row that HAS a start_time beyond the
+ * boundary. A null/unparseable start_time is left to isFutureStartTime's
+ * existing (unchanged) handling -- this function does not alter that
+ * behavior, only adds the missing upper bound.
+ */
+function isBeforePreparedSlateUpperBound(isoTime: string | null | undefined, now: Date = new Date()) {
+  if (!isoTime) return true;
+  const timestamp = new Date(isoTime).getTime();
+  if (!Number.isFinite(timestamp)) return true;
+  return timestamp < preparedSlateEventWindow(now).endMs;
+}
+
 function parseIdList(rows: Array<{ id: string | null | undefined }>) {
   return [...new Set(rows.map((row) => row.id).filter((value): value is string => Boolean(value)))];
+}
+
+function teamById(id: string | null | undefined, teams: Map<string, TeamRow>) {
+  if (!id) return null;
+  return teams.get(id) ?? null;
+}
+
+function collectTeamIdsFromCurrentProps(
+  rows: CurrentPropRow[],
+  events: Map<string, EventRow>,
+  participants: Map<string, ParticipantRow>,
+) {
+  const teamIds = new Set<string>();
+  for (const current of rows) {
+    if (current.team_id) teamIds.add(current.team_id);
+    if (current.opponent_team_id) teamIds.add(current.opponent_team_id);
+
+    const participant = current.participant_id ? participants.get(current.participant_id) : null;
+    if (participant?.team_id) teamIds.add(participant.team_id);
+
+    const event = current.event_id ? events.get(current.event_id) : null;
+    if (event?.home_team_id) teamIds.add(event.home_team_id);
+    if (event?.away_team_id) teamIds.add(event.away_team_id);
+  }
+
+  return [...teamIds];
+}
+
+function resolveTeamDisplayContext(input: {
+  current: CurrentPropRow;
+  event?: EventRow;
+  participant?: ParticipantRow;
+  teams: Map<string, TeamRow>;
+}) {
+  const participantTeamId = input.participant?.team_id ?? null;
+  const eventHomeTeam = teamById(input.event?.home_team_id, input.teams);
+  const eventAwayTeam = teamById(input.event?.away_team_id, input.teams);
+
+  let team = teamById(input.current.team_id ?? participantTeamId, input.teams);
+  let opponentTeam = teamById(input.current.opponent_team_id, input.teams);
+
+  if (!team && input.current.opponent_team_id && input.event) {
+    if (input.current.opponent_team_id === input.event.home_team_id) team = eventAwayTeam;
+    else if (input.current.opponent_team_id === input.event.away_team_id) team = eventHomeTeam;
+  }
+
+  if (!team && participantTeamId && input.event) {
+    if (participantTeamId === input.event.home_team_id) team = eventHomeTeam;
+    else if (participantTeamId === input.event.away_team_id) team = eventAwayTeam;
+  }
+
+  if (!opponentTeam && team && input.event) {
+    if (team.id === input.event.home_team_id) opponentTeam = eventAwayTeam;
+    else if (team.id === input.event.away_team_id) opponentTeam = eventHomeTeam;
+  }
+
+  if (!team && opponentTeam && input.event) {
+    if (opponentTeam.id === input.event.home_team_id) team = eventAwayTeam;
+    else if (opponentTeam.id === input.event.away_team_id) team = eventHomeTeam;
+  }
+
+  return {
+    team,
+    opponentTeam,
+    teamDisplayName: team?.name ?? input.current.team_name ?? null,
+    opponentDisplayName: opponentTeam?.name ?? input.current.opponent_name ?? null,
+    eventDisplayName:
+      input.event?.display_name
+      ?? (eventAwayTeam?.name && eventHomeTeam?.name ? `${eventAwayTeam.name} at ${eventHomeTeam.name}` : null)
+      ?? input.current.opponent_name
+      ?? null,
+  };
 }
 
 async function loadMap<T extends { id: string }>(table: string, ids: string[], select: string) {
@@ -521,10 +617,10 @@ function uniqueSportsbooks(rows: Array<{ sportsbook: { id: string; code: string;
 }
 
 export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
-  const limit = Math.min(Math.max(query.limit ?? 25, 1), 100);
+  const limit = Math.min(Math.max(query.limit ?? 250, 1), 250);
   const scanLimit = KNOWLEDGE_LOW_EGRESS_MODE
-    ? Math.min(Math.max(limit * 4, 24), 80)
-    : Math.min(Math.max(limit * 8, 80), 500);
+    ? Math.min(Math.max(limit * 4, 24), 250)
+    : Math.min(Math.max(limit * 8, 80), 1000);
   // Covered Picks hard invariant at board candidate selection: the covered_score
   // floor is always applied and can only be raised above 70, never lowered.
   const coveredFloor = clampCoveredPicksFloor(query.minimumCoveredScore);
@@ -565,29 +661,37 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
   const eventIds = parseIdList(currentProps.map((row) => ({ id: row.event_id })));
   const participantIds = parseIdList(currentProps.map((row) => ({ id: row.participant_id })));
   const playerIds = parseIdList(currentProps.map((row) => ({ id: row.player_id })));
-  const teamIds = parseIdList(currentProps.flatMap((row) => [{ id: row.team_id }, { id: row.opponent_team_id }]));
   const marketIds = parseIdList(currentProps.map((row) => ({ id: row.market_id })));
   const sportsbookIds = parseIdList(currentProps.map((row) => ({ id: row.sportsbook_id })));
 
-  const [events, participants, players, teams, markets, sportsbooks] = await Promise.all([
+  const [events, participants, players, markets, sportsbooks] = await Promise.all([
     loadMap<EventRow>("events", eventIds, "id,display_name,scheduled_date,start_time,status,home_team_id,away_team_id"),
     loadMap<ParticipantRow>("participants", participantIds, "id,display_name,participant_type,player_id,team_id,image_url,external_ids"),
     loadMap<PlayerRow>("players", playerIds, "id,display_name,canonical_name,headshot_url,external_ids"),
-    loadMap<TeamRow>("teams", teamIds, "id,name,abbreviation,logo_url,external_ids"),
     loadMap<MarketRow>("markets", marketIds, "id,market_type,display_name"),
     loadMap<SportsbookRow>("sportsbooks", sportsbookIds, "id,code,display_name"),
   ]);
+  const teams = await loadMap<TeamRow>(
+    "teams",
+    collectTeamIdsFromCurrentProps(currentProps, events, participants),
+    "id,name,abbreviation,logo_url,external_ids",
+  );
 
   const rows = latestScored.flatMap((score) => {
     const current = currentById.get(score.current_prop_id);
     if (!current) return [];
     if (!isFutureStartTime(current.start_time)) return [];
+    if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
     const explanation = explanationMap.get(score.id);
     const event = current.event_id ? events.get(current.event_id) : undefined;
     const participant = current.participant_id ? participants.get(current.participant_id) : undefined;
     const player = current.player_id ? players.get(current.player_id) : undefined;
-    const team = current.team_id ? teams.get(current.team_id) : undefined;
-    const opponentTeam = current.opponent_team_id ? teams.get(current.opponent_team_id) : undefined;
+    const { team, opponentTeam, teamDisplayName, opponentDisplayName, eventDisplayName } = resolveTeamDisplayContext({
+      current,
+      event,
+      participant,
+      teams,
+    });
     const market = current.market_id ? markets.get(current.market_id) : undefined;
     const sportsbook = current.sportsbook_id ? sportsbooks.get(current.sportsbook_id) : undefined;
 
@@ -639,11 +743,11 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
       player_display_name: participantDisplayName,
       participant_image_url: participantImageUrl,
       player_headshot_url: player?.headshot_url ?? participantImageUrl,
-      team_display_name: team?.name ?? current.team_name,
+      team_display_name: teamDisplayName,
       team_logo_url: teamLogoUrl,
-      opponent_display_name: opponentTeam?.name ?? current.opponent_name,
+      opponent_display_name: opponentDisplayName,
       opponent_logo_url: opponentLogoUrl,
-      event_display_name: event?.display_name ?? current.opponent_name,
+      event_display_name: eventDisplayName,
       sport: score.sport_id,
       league: score.league_id,
       market_type: current.market_type,
@@ -818,6 +922,7 @@ export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Pro
   const activePairs = latestScored.flatMap((score) => {
     const current = currentById.get(score.current_prop_id);
     if (!current || !isFutureStartTime(current.start_time)) return [];
+    if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
     return [{ score, current }];
   });
   if (!activePairs.length) return [];
@@ -950,27 +1055,35 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
   const eventIds = parseIdList(currentProps.map((row) => ({ id: row.event_id })));
   const participantIds = parseIdList(currentProps.map((row) => ({ id: row.participant_id })));
   const playerIds = parseIdList(currentProps.map((row) => ({ id: row.player_id })));
-  const teamIds = parseIdList(currentProps.flatMap((row) => [{ id: row.team_id }, { id: row.opponent_team_id }]));
   const marketIds = parseIdList(currentProps.map((row) => ({ id: row.market_id })));
   const sportsbookIds = parseIdList(currentProps.map((row) => ({ id: row.sportsbook_id })));
 
-  const [events, participants, players, teams, markets, sportsbooks] = await Promise.all([
+  const [events, participants, players, markets, sportsbooks] = await Promise.all([
     loadMap<EventRow>("events", eventIds, "id,display_name,scheduled_date,start_time,status,home_team_id,away_team_id"),
     loadMap<ParticipantRow>("participants", participantIds, "id,display_name,participant_type,player_id,team_id,image_url,external_ids"),
     loadMap<PlayerRow>("players", playerIds, "id,display_name,canonical_name,headshot_url,external_ids"),
-    loadMap<TeamRow>("teams", teamIds, "id,name,abbreviation,logo_url,external_ids"),
     loadMap<MarketRow>("markets", marketIds, "id,market_type,display_name"),
     loadMap<SportsbookRow>("sportsbooks", sportsbookIds, "id,code,display_name"),
   ]);
+  const teams = await loadMap<TeamRow>(
+    "teams",
+    collectTeamIdsFromCurrentProps(currentProps, events, participants),
+    "id,name,abbreviation,logo_url,external_ids",
+  );
 
   const rows = currentProps.flatMap((current) => {
     if (!isFutureStartTime(current.start_time)) return [];
+    if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
     const score = latestScored.get(current.id) ?? null;
     const event = current.event_id ? events.get(current.event_id) : undefined;
     const participant = current.participant_id ? participants.get(current.participant_id) : undefined;
     const player = current.player_id ? players.get(current.player_id) : undefined;
-    const team = current.team_id ? teams.get(current.team_id) : undefined;
-    const opponentTeam = current.opponent_team_id ? teams.get(current.opponent_team_id) : undefined;
+    const { team, opponentTeam, teamDisplayName, opponentDisplayName, eventDisplayName } = resolveTeamDisplayContext({
+      current,
+      event,
+      participant,
+      teams,
+    });
     const market = current.market_id ? markets.get(current.market_id) : undefined;
     const sportsbook = current.sportsbook_id ? sportsbooks.get(current.sportsbook_id) : undefined;
 
@@ -1021,19 +1134,19 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
         marketDisplayName: market?.display_name ?? current.market_type,
         side: current.side ?? current.direction,
         line: current.line,
-        eventDisplayName: event?.display_name ?? current.opponent_name ?? "Event TBD",
+        eventDisplayName: eventDisplayName ?? "Event TBD",
         startTime: current.start_time,
         sportsbook: sportsbook?.display_name ?? null,
       }),
       sport: current.sport_id,
       league: current.league_id,
-      event_display_name: event?.display_name ?? current.opponent_name,
+      event_display_name: eventDisplayName,
       participant_display_name: participantDisplayName,
       participant_image_url: participantImageUrl,
       player_headshot_url: player?.headshot_url ?? participantImageUrl,
-      team_display_name: team?.name ?? current.team_name,
+      team_display_name: teamDisplayName,
       team_logo_url: teamLogoUrl,
-      opponent_display_name: opponentTeam?.name ?? current.opponent_name,
+      opponent_display_name: opponentDisplayName,
       opponent_logo_url: opponentLogoUrl,
       market_type: current.market_type,
       sportsbook: sportsbook ? { id: sportsbook.id, code: sportsbook.code, display_name: sportsbook.display_name } : null,
@@ -1156,20 +1269,28 @@ export async function getCoveredPickDetails(scoredPropId: string) {
 
   if (!current) return null;
 
-  const [eventMap, participantMap, playerMap, teamMap, marketMap, sportsbookMap] = await Promise.all([
+  const [eventMap, participantMap, playerMap, marketMap, sportsbookMap] = await Promise.all([
     loadMap<EventRow>("events", current.event_id ? [current.event_id] : [], "id,display_name,scheduled_date,start_time,status,home_team_id,away_team_id"),
     loadMap<ParticipantRow>("participants", current.participant_id ? [current.participant_id] : [], "id,display_name,participant_type,player_id,team_id,image_url,external_ids"),
     loadMap<PlayerRow>("players", current.player_id ? [current.player_id] : [], "id,display_name,canonical_name,headshot_url,external_ids"),
-    loadMap<TeamRow>("teams", [current.team_id, current.opponent_team_id].filter((value): value is string => Boolean(value)), "id,name,abbreviation,logo_url,external_ids"),
     loadMap<MarketRow>("markets", current.market_id ? [current.market_id] : [], "id,market_type,display_name"),
     loadMap<SportsbookRow>("sportsbooks", current.sportsbook_id ? [current.sportsbook_id] : [], "id,code,display_name"),
   ]);
+  const teamMap = await loadMap<TeamRow>(
+    "teams",
+    collectTeamIdsFromCurrentProps([current], eventMap, participantMap),
+    "id,name,abbreviation,logo_url,external_ids",
+  );
 
   const event = current.event_id ? eventMap.get(current.event_id) : undefined;
   const participant = current.participant_id ? participantMap.get(current.participant_id) : undefined;
   const player = current.player_id ? playerMap.get(current.player_id) : undefined;
-  const team = current.team_id ? teamMap.get(current.team_id) : undefined;
-  const opponentTeam = current.opponent_team_id ? teamMap.get(current.opponent_team_id) : undefined;
+  const { team, opponentTeam, teamDisplayName, opponentDisplayName, eventDisplayName } = resolveTeamDisplayContext({
+    current,
+    event,
+    participant,
+    teams: teamMap,
+  });
   const market = current.market_id ? marketMap.get(current.market_id) : undefined;
   const sportsbook = current.sportsbook_id ? sportsbookMap.get(current.sportsbook_id) : undefined;
 
@@ -1204,11 +1325,11 @@ export async function getCoveredPickDetails(scoredPropId: string) {
     player_display_name: participantDisplayName,
     participant_image_url: participantImageUrl,
     player_headshot_url: player?.headshot_url ?? participantImageUrl,
-    team_display_name: team?.name ?? current.team_name,
+    team_display_name: teamDisplayName,
     team_logo_url: teamLogoUrl,
-    opponent_display_name: opponentTeam?.name ?? current.opponent_name,
+    opponent_display_name: opponentDisplayName,
     opponent_logo_url: opponentLogoUrl,
-    event_display_name: event?.display_name ?? current.opponent_name,
+    event_display_name: eventDisplayName,
     sport: score.sport_id,
     league: score.league_id,
     market_type: current.market_type,

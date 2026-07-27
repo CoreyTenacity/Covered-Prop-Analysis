@@ -26,13 +26,14 @@ test("never exceeds the configured total cost", () => {
   assert.equal(plan.maximumCost, 2);
 });
 
-test("does not spend today's prop budget on the next Eastern calendar day", () => {
-  const lateNow = new Date("2026-07-05T20:00:00Z");
+test("uses a rolling 24-hour discovery window across midnight", () => {
+  const lateNow = new Date("2026-07-05T23:30:00Z");
   const plan = buildPropRefreshPlan([
-    { id: "today", sportKey: "baseball_mlb", commenceTime: "2026-07-05T23:00:00Z", homeTeam: "H1", awayTeam: "A1" },
-    { id: "tomorrow", sportKey: "baseball_mlb", commenceTime: "2026-07-06T23:00:00Z", homeTeam: "H2", awayTeam: "A2" },
-  ], { now: lateNow, maximumTotalCost: 2 });
-  assert.deepEqual([...new Set(plan.requests.map((request) => request.eventId))], ["today"]);
+    { id: "past", sportKey: "baseball_mlb", commenceTime: "2026-07-05T23:29:00Z", homeTeam: "H0", awayTeam: "A0" },
+    { id: "within-24h", sportKey: "baseball_mlb", commenceTime: "2026-07-06T23:29:00Z", homeTeam: "H1", awayTeam: "A1" },
+    { id: "beyond-24h", sportKey: "baseball_mlb", commenceTime: "2026-07-06T23:31:00Z", homeTeam: "H2", awayTeam: "A2" },
+  ], { now: lateNow, maximumTotalCost: 3 });
+  assert.deepEqual([...new Set(plan.requests.map((request) => request.eventId))], ["within-24h"]);
 });
 
 test("automatically weights the daily credit split by each league's available games", () => {

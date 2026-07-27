@@ -1,6 +1,8 @@
 import { filterParlayOptionsSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { ParlayOptionRow } from "@/lib/knowledge/read-types";
 
+type DateOptionSourceRow = { start_time?: string | null };
+
 export const manualSortOptions = [
   { label: "Best score", value: "score" },
   { label: "Earliest start", value: "start" },
@@ -28,6 +30,54 @@ function easternDateKey(value: string | null | undefined) {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(value));
+}
+
+function nextEasternDateKey(value: string) {
+  const date = new Date(`${value}T12:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return easternDateKey(date.toISOString());
+}
+
+function manualDateLabel(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(`${value}T12:00:00.000Z`));
+}
+
+function buildDateOptions(
+  rows: DateOptionSourceRow[],
+  options: {
+    includeAllAvailable: boolean;
+    includeSpecificDates: boolean;
+  },
+) {
+  const today = easternDateKey(new Date().toISOString());
+  const tomorrow = today ? nextEasternDateKey(today) : null;
+  const dates = [...new Set(rows.flatMap((row) => row.start_time ? [easternDateKey(row.start_time)] : []).filter((value): value is string => Boolean(value)))];
+  dates.sort();
+
+  const out: Array<{ label: string; value: string }> = [];
+  if (options.includeAllAvailable) out.push({ label: "All available", value: "" });
+  if (today) out.push({ label: `Today (${manualDateLabel(today)})`, value: today });
+  if (tomorrow && tomorrow !== today) out.push({ label: `Tomorrow (${manualDateLabel(tomorrow)})`, value: tomorrow });
+  if (options.includeSpecificDates) {
+    out.push(...dates
+      .filter((value) => value !== today && value !== tomorrow)
+      .map((value) => ({ label: manualDateLabel(value), value })));
+  }
+
+  return out;
+}
+
+export function manualDateOptions(rows: DateOptionSourceRow[]) {
+  return buildDateOptions(rows, { includeAllAvailable: true, includeSpecificDates: true });
+}
+
+export function coveredPicksDateOptions(rows: DateOptionSourceRow[]) {
+  return buildDateOptions(rows, { includeAllAvailable: true, includeSpecificDates: false });
 }
 
 export function manualScoreBandMatches(score: number | null | undefined, band: ManualScoreBandValue) {
@@ -89,7 +139,7 @@ function collapseManualCatalog(rows: ParlayOptionRow[]) {
 export function buildManualCatalogRows(
   rows: ParlayOptionRow[],
   options: {
-    date: string;
+    date?: string | null;
     league: string;
     marketType: string;
     search: string;

@@ -11,7 +11,7 @@ import { ParlayWarningList } from "@/components/knowledge/parlay-warning-list";
 import { RiskBadge } from "@/components/knowledge/risk-badge";
 import { ScoreBadge } from "@/components/knowledge/score-badge";
 import { fetchParlayOptions } from "@/components/knowledge/parlay-options-fetch";
-import { buildManualCatalogRows, manualScoreBandOptions, manualSortOptions, type ManualScoreBandValue, type ManualSortValue } from "@/components/knowledge/parlay-builder-catalog";
+import { buildManualCatalogRows, manualDateOptions, manualScoreBandOptions, manualSortOptions, type ManualScoreBandValue, type ManualSortValue } from "@/components/knowledge/parlay-builder-catalog";
 import type { AnalyzedParlay } from "@/lib/knowledge/parlay-analysis";
 import type { ParlayOptionRow, ParlayOptionsResponse } from "@/lib/knowledge/read-types";
 
@@ -21,15 +21,6 @@ const leagues = [
   { label: "WNBA", value: "wnba" },
   { label: "NBA", value: "nba" },
 ] as const;
-
-function easternToday() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
 
 function sportsbookSummary(option: ParlayOptionRow) {
   const books = option.sportsbooks ?? (option.sportsbook ? [option.sportsbook] : []);
@@ -51,12 +42,13 @@ export function ParlayBuilderShell() {
   const [authUser, setAuthUser] = useState<{ id: string; displayName: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [date, setDate] = useState(easternToday());
+  const [date, setDate] = useState("");
   const [league, setLeague] = useState("");
   const [marketType, setMarketType] = useState("");
   const [scoreBand, setScoreBand] = useState<ManualScoreBandValue>("");
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<ManualSortValue>("score");
+  const [manualVisibleCount, setManualVisibleCount] = useState(10);
   const [optionsSelected, setOptionsSelected] = useState<ParlayOptionRow[]>([]);
   const [selectionWarning, setSelectionWarning] = useState("");
   const [savingSinglePickId, setSavingSinglePickId] = useState<string | null>(null);
@@ -142,17 +134,28 @@ export function ParlayBuilderShell() {
     return values;
   }, [data]);
 
+  const dateOptions = useMemo(() => manualDateOptions(data?.rows ?? []), [data?.rows]);
+
   const manualCatalogRows = useMemo(() => {
     return buildManualCatalogRows(data?.rows ?? [], {
-      date,
+      date: date || null,
       league,
       marketType,
       search,
       scoreBand,
       sortBy,
-      limit: 25,
+      limit: 250,
     });
   }, [data?.rows, date, league, marketType, scoreBand, search, sortBy]);
+
+  useEffect(() => {
+    setManualVisibleCount(10);
+  }, [date, league, marketType, scoreBand, search, sortBy, data?.rows]);
+
+  const visibleManualCatalogRows = useMemo(
+    () => manualCatalogRows.slice(0, manualVisibleCount),
+    [manualCatalogRows, manualVisibleCount],
+  );
 
   const [analysis, setAnalysis] = useState<AnalyzedParlay | null>(null);
   const [analysisError, setAnalysisError] = useState("");
@@ -310,13 +313,16 @@ export function ParlayBuilderShell() {
       </header>
 
       <section className="knowledge-filter-bar">
-        <input
-          type="date"
+        <select
           value={date}
           onChange={(event) => setDate(event.target.value)}
           aria-label="Parlay date"
           className="knowledge-search"
-        />
+        >
+          {dateOptions.map((option) => (
+            <option key={option.value || "all"} value={option.value}>{option.label}</option>
+          ))}
+        </select>
         <select value={league} onChange={(event) => setLeague(event.target.value)}>
           {leagues.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
@@ -338,8 +344,12 @@ export function ParlayBuilderShell() {
           {!loading && error ? <div className="empty-state"><strong>Couldn’t load parlay options.</strong><span>{error}</span></div> : null}
           {!loading && !error && !manualCatalogRows.length ? <div className="empty-state"><strong>No scored props are available for the current filters.</strong><span>Try a different date, league, market, score band, or player search. The manual builder now stays focused on scored props only.</span></div> : null}
           {!loading && !error && manualCatalogRows.length ? (
-            <div className="knowledge-list">
-              {manualCatalogRows.map((option) => (
+            <div className="knowledge-builder__catalog-stack">
+              <p className="knowledge-builder__catalog-summary">
+                Showing {visibleManualCatalogRows.length} of {manualCatalogRows.length} scored props.
+              </p>
+              <div className="knowledge-list">
+              {visibleManualCatalogRows.map((option) => (
                 <ParlayLegSelector
                   key={option.current_prop_id}
                   option={option}
@@ -347,6 +357,16 @@ export function ParlayBuilderShell() {
                   onToggle={toggleOption}
                 />
               ))}
+              </div>
+              {visibleManualCatalogRows.length < manualCatalogRows.length ? (
+                <button
+                  type="button"
+                  className="save-button"
+                  onClick={() => setManualVisibleCount((current) => Math.min(current + 10, manualCatalogRows.length))}
+                >
+                  Show 10 more
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>

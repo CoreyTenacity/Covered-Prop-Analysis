@@ -11,6 +11,7 @@ import {
   filterCoveredPicksSnapshotRows,
   filterModelPerformanceFacts,
   filterParlayOptionsSnapshotRows,
+  parlayOptionsSnapshotHasLeagueRows,
   publicSnapshotCacheProfile,
   publicSnapshotFallbackEnabled,
   publishPublicSnapshot,
@@ -68,6 +69,15 @@ test("public snapshot filter scopes are bounded and route-specific", () => {
   assert.ok(PUBLIC_SNAPSHOT_LIMITS["covered-picks"] > 0);
   assert.ok(PUBLIC_SNAPSHOT_LIMITS["parlay-options"] > PUBLIC_SNAPSHOT_LIMITS["covered-picks"]);
   assert.ok(PUBLIC_SNAPSHOT_LATEST_RETENTION_DAYS >= 30);
+});
+
+test("parlay snapshot league coverage can force the relational fallback only when the published snapshot lacks that league", () => {
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }], "mlb"), true);
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }], "wnba"), false);
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }, { league: "wnba" }], "wnba"), true);
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }], ["mlb", "wnba"]), false);
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }, { league: "wnba" }], ["mlb", "wnba"]), true);
+  assert.equal(parlayOptionsSnapshotHasLeagueRows([{ league: "mlb" }], null), true);
 });
 
 test("snapshot hit reads only the published snapshot and skips fallback", async () => {
@@ -202,6 +212,185 @@ test("snapshot miss falls back exactly once and marks the response as fallback",
   assert.equal(result.cacheStatus, "snapshot-fallback");
   assert.equal(result.snapshotSource, "relational-fallback");
   assert.equal(result.payload.snapshot_source, "relational-fallback");
+});
+
+test("a published `:latest` snapshot with zero rows is treated as a miss and falls back to the bounded relational read", async () => {
+  let snapshotReads = 0;
+  let fallbackReads = 0;
+  const emptySnapshot: PublicSnapshotEnvelope<unknown> = {
+    schemaVersion: 1,
+    snapshotVersion: "covered-picks:30180156105.1",
+    publishedAt: "2026-07-25T23:53:03.396Z",
+    dataThrough: null,
+    sourceRefreshedAt: null,
+    count: 0,
+    rows: [],
+    effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
+    pipelineRunId: "30180156105.1",
+    status: "fallback",
+  };
+
+  const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
+    route: "covered-picks",
+    // null snapshotVersion == the mutable `:latest` alias, not an explicit pinned request.
+    snapshotVersion: null,
+    canUseSnapshot: true,
+    readSnapshot: async () => {
+      snapshotReads += 1;
+      return emptySnapshot;
+    },
+    buildSnapshotResponse: () => ({ snapshot_source: "published" }),
+    buildFallbackResponse: async () => {
+      fallbackReads += 1;
+      return { snapshot_source: "relational-fallback" };
+    },
+    buildUnavailableResponse: () => ({ snapshot_source: "unavailable" }),
+  });
+
+  assert.equal(snapshotReads, 1);
+  assert.equal(fallbackReads, 1);
+  assert.equal(result.cacheStatus, "snapshot-fallback");
+  assert.equal(result.snapshotSource, "relational-fallback");
+  assert.equal(result.payload.snapshot_source, "relational-fallback");
+});
+
+test("a published `:latest` snapshot with rows is served as-is and never triggers the relational fallback", async () => {
+  let fallbackReads = 0;
+  const populatedSnapshot: PublicSnapshotEnvelope<{ id: string }> = {
+    schemaVersion: 1,
+    snapshotVersion: "covered-picks:test-nonempty",
+    publishedAt: "2026-07-13T00:00:00.000Z",
+    dataThrough: null,
+    sourceRefreshedAt: null,
+    count: 1,
+    rows: [{ id: "row-1" }],
+    effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
+    pipelineRunId: "run-1",
+    status: "published",
+  };
+
+  const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
+    route: "covered-picks",
+    snapshotVersion: null,
+    canUseSnapshot: true,
+    readSnapshot: async () => populatedSnapshot,
+    buildSnapshotResponse: () => ({ snapshot_source: "published" }),
+    buildFallbackResponse: async () => {
+      fallbackReads += 1;
+      return { snapshot_source: "relational-fallback" };
+    },
+    buildUnavailableResponse: () => ({ snapshot_source: "unavailable" }),
+  });
+
+  assert.equal(fallbackReads, 0);
+  assert.equal(result.cacheStatus, "snapshot-hit");
+  assert.equal(result.snapshotSource, "published");
+});
+
+test("a zero-row `:latest` snapshot with fallback disabled returns unavailable and never performs a relational read", async () => {
+  const originalEnv = process.env.KNOWLEDGE_PUBLIC_SNAPSHOT_FALLBACK_ENABLED;
+  process.env.KNOWLEDGE_PUBLIC_SNAPSHOT_FALLBACK_ENABLED = "false";
+  try {
+    let fallbackReads = 0;
+    const emptySnapshot: PublicSnapshotEnvelope<unknown> = {
+      schemaVersion: 1,
+      snapshotVersion: "parlay-options:test-empty",
+      publishedAt: "2026-07-25T23:53:02.696Z",
+      dataThrough: null,
+      sourceRefreshedAt: null,
+      count: 0,
+      rows: [],
+      effectiveFilterScope: { route: "parlay-options", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
+      pipelineRunId: "run-empty",
+      status: "fallback",
+    };
+
+    const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
+      route: "parlay-options",
+      snapshotVersion: null,
+      canUseSnapshot: true,
+      readSnapshot: async () => emptySnapshot,
+      buildSnapshotResponse: () => ({ snapshot_source: "published" }),
+      buildFallbackResponse: async () => {
+        fallbackReads += 1;
+        return { snapshot_source: "relational-fallback" };
+      },
+      buildUnavailableResponse: () => ({ snapshot_source: "unavailable" }),
+    });
+
+    assert.equal(fallbackReads, 0);
+    assert.equal(result.cacheStatus, "snapshot-unavailable");
+    assert.equal(result.snapshotSource, "unavailable");
+    assert.equal(result.payload.snapshot_source, "unavailable");
+  } finally {
+    if (originalEnv === undefined) delete process.env.KNOWLEDGE_PUBLIC_SNAPSHOT_FALLBACK_ENABLED;
+    else process.env.KNOWLEDGE_PUBLIC_SNAPSHOT_FALLBACK_ENABLED = originalEnv;
+  }
+});
+
+test("an explicitly pinned/versioned empty snapshot is served as-is (immutable historical read), not swapped for live fallback", async () => {
+  let fallbackReads = 0;
+  const emptyVersionedSnapshot: PublicSnapshotEnvelope<unknown> = {
+    schemaVersion: 1,
+    snapshotVersion: "covered-picks:v1",
+    publishedAt: "2026-07-13T00:00:00.000Z",
+    dataThrough: null,
+    sourceRefreshedAt: null,
+    count: 0,
+    rows: [],
+    effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
+    pipelineRunId: "run-v1",
+    status: "published",
+  };
+  const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
+    route: "covered-picks",
+    // A caller-supplied snapshotVersion means "give me exactly this historical
+    // version," even if it happens to have zero rows.
+    snapshotVersion: "covered-picks:v1",
+    canUseSnapshot: true,
+    readSnapshot: async () => emptyVersionedSnapshot,
+    buildSnapshotResponse: () => ({ snapshot_source: "published" }),
+    buildFallbackResponse: async () => {
+      fallbackReads += 1;
+      return { snapshot_source: "relational-fallback" };
+    },
+    buildUnavailableResponse: () => ({ snapshot_source: "unavailable" }),
+  });
+  assert.equal(fallbackReads, 0);
+  assert.equal(result.cacheProfile, "public-snapshot-versioned");
+  assert.equal(result.snapshotSource, "published");
+});
+
+test("a pinned/versioned snapshot containing a day-after-tomorrow-or-later row is served exactly as published -- the new prepared-slate upper bound is applied only inside the live relational readers, never as a re-filter over an already-published snapshot", async () => {
+  let buildSnapshotResponseCalls = 0;
+  const dayAfterTomorrow = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const pinnedSnapshotWithFarFutureRow: PublicSnapshotEnvelope<{ current_prop_id: string; start_time: string }> = {
+    schemaVersion: 1,
+    snapshotVersion: "covered-picks:v-old",
+    publishedAt: "2026-07-01T00:00:00.000Z",
+    dataThrough: null,
+    sourceRefreshedAt: null,
+    count: 1,
+    // This row would fail today's prepared-slate upper bound if it were ever
+    // re-derived through getCoveredPicksOfTheDay -- but a pinned/versioned
+    // read must never do that; it serves the stored payload verbatim.
+    rows: [{ current_prop_id: "prop-far-future", start_time: dayAfterTomorrow }],
+    effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
+    pipelineRunId: "run-old",
+    status: "published",
+  };
+  const result = await resolvePublicSnapshotRoute<{ rows: unknown[] }>({
+    route: "covered-picks",
+    snapshotVersion: "covered-picks:v-old",
+    canUseSnapshot: true,
+    readSnapshot: async () => pinnedSnapshotWithFarFutureRow,
+    buildSnapshotResponse: (snapshot) => { buildSnapshotResponseCalls += 1; return { rows: (snapshot as typeof pinnedSnapshotWithFarFutureRow).rows }; },
+    buildFallbackResponse: async () => { throw new Error("fallback must not run for a pinned version"); },
+    buildUnavailableResponse: () => ({ rows: [] }),
+  });
+  assert.equal(buildSnapshotResponseCalls, 1);
+  assert.equal(result.cacheProfile, "public-snapshot-versioned");
+  assert.deepEqual(result.payload.rows, [{ current_prop_id: "prop-far-future", start_time: dayAfterTomorrow }]);
 });
 
 test("route build failure: reported clearly, no write attempted for that route, other routes stay isolated and can complete", async () => {
@@ -720,14 +909,18 @@ test("collectPublicSnapshotPublicationSummaries without publish preserves the in
 });
 
 test("the latest snapshot remains readable even when its publication is older than six hours", async () => {
-  const oldSnapshot: PublicSnapshotEnvelope<unknown> = {
+  // This test is about AGE tolerance (a scheduler outage should not expire a
+  // still-good latest alias), not about row count -- it must use a populated
+  // snapshot so it doesn't collide with the separate empty-snapshot-as-miss
+  // behavior covered by its own dedicated tests above.
+  const oldSnapshot: PublicSnapshotEnvelope<{ id: string }> = {
     schemaVersion: 1,
     snapshotVersion: "covered-picks:old",
     publishedAt: "2026-07-12T00:00:00.000Z",
     dataThrough: "2026-07-12T00:00:00.000Z",
     sourceRefreshedAt: "2026-07-12T00:00:00.000Z",
-    count: 0,
-    rows: [],
+    count: 1,
+    rows: [{ id: "old-row-1" }],
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-old",
     status: "published",

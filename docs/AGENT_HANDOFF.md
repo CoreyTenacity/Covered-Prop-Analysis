@@ -80,7 +80,7 @@ server-side status and cached request counts. The manifest now classifies `provi
 All previously-conditional modules have been resolved to `publicSafe` or `privateOnly` in
 `docs/public-repo-boundary.json` (manifest version 2). The conditional list is now empty. The boundary
 checker (`scripts/check-public-repo-boundary.mjs`) reports **0 violations** and **0 conditional modules**.
-Repository visibility has not changed; the public repository has still not been created.
+Repository visibility has not changed for the PRIVATE repo. (Update, session 14: the separate PUBLIC repository `CoreyTenacity/Covered-Prop-Analysis` DOES now exist and is synced current — see the Session 14 section at the end of this file. This older line is retained for provenance.)
 
 | Category | Current modules |
 |---|---|
@@ -2738,3 +2738,2279 @@ visible, instead of requiring a multi-day diagnostic to notice.
 
 No snapshot, production data, scheduler, deployment, provider, or scoring action occurred this session. No
 Cloudflare Workers Build was triggered.
+
+## Session 14 — public repository synced current; deployment + production automation BLOCKED (2026-07-16)
+
+This session verified live state, synced the public repository to the current repairs, and then hit two
+genuine blockers that require an owner decision. Verdict (updated): **DEPLOYMENT COMPLETE — PRODUCTION AUTOMATION BLOCKED**. The public
+sync and Cloudflare deploy of the repairs are done and verified live; only the recurring production scheduler
+remains blocked (Blocker 2).
+
+### Corrections to stale handoff claims (verified against GitHub this session)
+- The earlier claim "the public repository has still not been created" (this file, ~line 83) is **STALE/WRONG**.
+  The public repository **exists**: `CoreyTenacity/Covered-Prop-Analysis` (PUBLIC, default branch `main`). Before
+  this session it was at `b8df24c Update Cloudflare public deployment boundary` / `07988e3 Initial public release`.
+- The private repair branch, `origin/main`, and repair commits are all exactly as the prior handoff recorded:
+  private repair tip `b12ca11`, backend reader repair `f4beb9e`, `origin/main` `23f665955b55a9e862f7f2efa8205538c5426013`.
+
+### Completed this session
+1. **Verified private + public Git state** (see corrections above). Private tree clean except untracked
+   `.claude/launch.json` (local tooling; not committed).
+2. **Verified both repairs are present in the committed code** (`f4beb9e` batching + future-time filter;
+   `b12ca11` Parlay Builder `cache:"no-store"`, credential-free, no polling; 7 tests wired into `pnpm test`).
+3. **Regenerated the deterministic public export** from `b12ca11` (239 included / 52 excluded, 0 boundary
+   violations, 0 secret findings, PASS).
+4. **Synced the public repository** `CoreyTenacity/Covered-Prop-Analysis` `main`: `b8df24c` -> **`593781c`**.
+   Diff was exactly the three repair commits' public-safe changes (12 files: 9 modified, 3 new), no deletions,
+   no surprises. A real-length secret scan of every changed file found nothing (the only `sb_secret_`/service-role
+   matches are the deliberate short test fixtures `sb_secret_abc123`/`eyJtest` and prose describing scan patterns).
+
+### BLOCKER 1 — RESOLVED (Cloudflare Workers Builds auto-deployed the public repo)
+**Update, later in session 14:** Cloudflare Workers Builds IS connected to the PUBLIC repo and auto-deploys its
+`main`. The public sync push (`593781c`) triggered an automatic deploy of `covered-opennext-proof`. **Verified
+by inspecting the deployed JS bundle**: chunk `/_next/static/chunks/3w4lnb3o852_p.js` contains the exact repaired
+fetch `fetch("/api/knowledge/parlay-options",{cache:"no-store",credentials:"omit"})` (0 `force-cache`, 3
+`no-store`) -- i.e. the `b12ca11` client-cache fix is now LIVE. Post-deploy route checks: `/today` 200;
+`/api/knowledge/covered-picks` 200 published/15; `/api/knowledge/parlay-options` 200 published/**33**;
+`/api/knowledge/model-performance` 200 fallback/0 (legit, no graded rows); `/api/cron/*`, `/api/admin/*`,
+`/api/inngest` all 503 (correctly blocked). No snapshot republication was needed for the deploy. The paragraph
+below is retained for provenance (it was written before the auto-deploy was verified); the local-CF-token and
+divergent-`codex/cloudflare-opennext-proof`-branch facts remain true but are moot now that Workers Builds is the
+confirmed live mechanism -- **do not use the private `deploy-cloudflare.yml` branch path going forward; the public
+repo `main` is the deploy trigger.**
+
+#### (Provenance) original Blocker-1 write-up before the auto-deploy was confirmed
+- The established deploy is the PRIVATE workflow `.github/workflows/deploy-cloudflare.yml`, triggered ONLY by
+  `push:` to branch `codex/cloudflare-opennext-proof`, using the private repo's `CLOUDFLARE_API_TOKEN` secret to
+  `wrangler deploy` the `covered-opennext-proof` worker. No `workflow_dispatch`. Last 5 runs all succeeded
+  (2026-07-14/15), last on branch tip `9537924`.
+- That deploy branch `9537924` is **51 commits behind and 80 files divergent** from `b12ca11` (still contains the
+  stray `lib/ops/github-actions-pipeline 2.ts`, predates all repair + observability + SharpAPI-page-removal work).
+  Merging `b12ca11` into it to deploy would be a large, risky reconciliation that could deploy an unintended state.
+- No `CLOUDFLARE_API_TOKEN` is available locally (not in env, `.env.local`, or `.dev.vars`), so a local
+  `wrangler deploy` is not possible.
+- Whether Cloudflare Workers Builds is connected to the public repo (auto-deploy on push) is **unverifiable via
+  CLI**; the docs call it "the intended mechanism for the public repo" but it was never confirmed active. If it IS
+  connected, this session's public push (`593781c`) may auto-deploy the repairs — owner should verify in the CF dashboard.
+- **Owner decision needed:** either (a) confirm/trigger Workers Builds from the public repo, or (b) direct how to
+  reconcile the `codex/cloudflare-opennext-proof` deploy branch to current before pushing to it. Deployment was
+  NOT performed this session.
+
+### BLOCKER 2 — Production automation cannot run "from the public repository" as specified
+The objective "GitHub Actions in the public repository = the sole recurring production scheduler" running full
+ingestion -> scoring -> board -> snapshot publication is **architecturally impossible** with the current, deliberate
+public/private split:
+- The production pipeline workflow `covered-live-pipeline.yml` is in `privateOnly` (excluded from the public export).
+- Its scoring phase runs `pnpm run cron:run` -> `scoreCurrentProps()` -> private-only adapters
+  (`lib/knowledge/scoring-service.ts`, `adapters/basketball.ts`, `adapters/mlb.ts`, `scoring-engine/**`), all in
+  `privateOnly`. The `cron:run` script itself is stripped from the exported `package.json`.
+- The public repo has **zero Actions secrets and zero variables** and contains only 3 diagnostic workflows
+  (`diagnostic-mlb-providers.yml`, `diagnostic-wnba-scoreboard.yml`, `TEMP-diagnostic-wnba-multi-provider.yml`).
+- Making the public repo run production would require exporting the private scoring "secret sauce" and/or putting
+  the production service-role + SharpAPI secrets into a public repo — both prohibited (no exposing private material,
+  no making private public, no exposing secrets). Meanwhile the prompt also forbids enabling the PRIVATE repo's
+  scheduler. Both paths are closed.
+- **Owner decision needed:** where should the recurring production scheduler actually live given scoring is
+  permanently private? Realistic options: keep the scheduler in the PRIVATE repo (it already has the code + all
+  secrets; only `COVERED_GITHUB_SCHEDULER_ENABLED=false` gates it) — but that contradicts "public repo = sole
+  scheduler"; or run a private-only self-hosted/job runner. This is an architecture decision, not a code fix.
+
+### NOT done this session (blocked/withheld)
+No snapshot publication, no ingestion/enrichment/scoring/grading/board generation, no provider calls, no Supabase
+writes, no migrations, no scheduler enablement (public or private), no Cloudflare deploy, no secret exposure, no
+credential/paid-service changes, no push to private `main`, no force-push, no history rewrite. Did NOT commit
+`.claude/launch.json`. The existing live `parlay-options` snapshot (33 rows, `local-20260716141046313`) is untouched.
+
+### Exact next actions for the next session/owner
+1. Decide the deployment mechanism (Workers Builds from public repo vs. reconcile the deploy branch) and deploy
+   `b12ca11`'s app (public equivalent now at `593781c`). Then verify the live Parlay Builder renders fresh rows.
+2. Decide where the recurring production scheduler lives given scoring is private, then activate accordingly.
+3. The public repo needs its Actions secrets/variables provisioned before ANY production workflow can run there.
+
+## Session 15 — GitHub Actions public-minutes cost strategy documented + free-tier validation (2026-07-16)
+
+Owner's refined goal: shift the **bulk of recurring production GitHub Actions minutes to the PUBLIC repo**
+(free unlimited standard-runner minutes), keeping private-repo production Actions usage near zero and far under
+the GitHub Free 2,000 min/month cap ("some private is fine, nowhere near the cap"). This dissolves the cost
+blocker that keeps `COVERED_GITHUB_SCHEDULER_ENABLED=false` (re-enabling in the private repo would cost
+~4,800 min/mo ≈ 2.4× cap; the same minutes in the public repo cost $0). Scoring stays a private Cloudflare
+Worker (`scoring-engine`), so it consumes zero GitHub minutes anywhere.
+
+**Free-tier impact validation (answering "will this shift hurt Supabase/Cloudflare free limits?"): NO.** The
+shift only changes *where minutes are billed*, not the work done. Supabase egress/storage/requests are identical
+whether the runner is public or private (NEUTRAL). The Cloudflare app Worker and Workers Builds are unaffected
+(app traffic unchanged; builds run on push, not on schedule). The only new load is `scoring-engine` Worker
+invocations per scheduled run — a few hundred req/day at a ~20-min cadence vs. the 100k req/day Workers free
+tier, i.e. trivial. **The real lever is run frequency/per-run egress (unchanged by the shift), which stays
+bounded by design** (~20-min game-window cadence, `KNOWLEDGE_LOW_EGRESS_MODE=TRUE`, snapshot-first reads). Two
+items need quantitative confirmation in the deferred scoping pass: (a) which pipeline stages
+(`sharp-matching.ts`/`matching.ts`) are public-safe vs private-coupled; (b) per-run Supabase egress + scoring
+Worker CPU against current baselines. Full strategy + validation: `docs/GHA_PUBLIC_MINUTES_STRATEGY.md`.
+
+**No code, workflow, scheduler, deploy, or production action this session — documentation only.** Next step
+(deferred at owner's request until after this validation): the read-only pipeline-stage public-safety scoping pass.
+
+## Session 16 — Public-runner architecture scoping (read-only; no impl/deploy/schedule) (2026-07-16)
+
+Bounded read-only scoping of "can recurring production Actions run from the PUBLIC repo while keeping scoring
+private?" **Verdict: not with a small split today — the blocker is a CLASSIFICATION decision, not a technical
+impossibility.** No code/deploy/schedule/production action taken. State unchanged: private repair `f919581`,
+`origin/main` `23f6659…`, public `593781c`, schedulers off, secrets private-only.
+
+### VERIFIED — the existing scoring Worker does NOT contain production scoring
+`scoring-engine/` = Worker `covered-scoring-engine` (`workers_dev`, `SCORING_ENGINE_SECRET` bearer auth,
+`cache-control:no-store`). Endpoints: `POST /score-opportunities` (body `{inputs:[]}`, **max 500**, returns
+`{scores}`) and `POST /analyze-parlay`. **Stateless — no Supabase read/write.** It implements the *generic*
+`scoreOpportunities` (`score-opportunities.ts`), currently called ONLY by legacy `lib/providers/live-board.ts`
+and `app/api/parlay-analysis/route.ts` (+ client `lib/knowledge/scoring-engine-client.ts`). It is **NOT** the
+production scorer. Verified: production `scoreCurrentProps()` (`lib/knowledge/scoring-service.ts:1051`) calls
+`adapterForLeague()` → `adapter.buildScore(prop, context)` **in-process**, importing the private
+`@/lib/knowledge/adapters` (`basketball.ts`/`mlb.ts`). So there is currently NO Worker/HTTP boundary that exposes
+production scoring.
+
+### VERIFIED — stage classification (public-repo-boundary.json), production pipeline
+| Stage | Key module(s) | Classification |
+|---|---|---|
+| Raw SharpAPI client | `lib/providers/sharpapi.ts` | **public-safe** |
+| Sharp ingestion | `lib/knowledge/sharp-ingestion-job.ts`, `sharp-ingestion.ts`, `sharp-odds-ingestion.ts` | **private-only** |
+| Identity matching | `lib/knowledge/sharp-matching.ts`, `matching.ts` | **private-only** (audit called these "borderline / data-cleaning, not scoring judgment") |
+| Enrichment/features | `lib/knowledge/enrichment/jobs.ts` | **private-only** |
+| Scoring | `scoring-service.ts`, `adapters/basketball.ts`, `adapters/mlb.ts` | **private-only** (true secret sauce) |
+| Runner / orchestrator | `scripts/run-covered-job.mjs`, `lib/ops/github-actions-pipeline.ts` | **private-only** |
+| Provider policy | `lib/providers/request-policy.ts`, `sharpapi-refresh.ts` | **private-only** |
+
+**Load-bearing conclusion (verified):** the migration classified nearly the ENTIRE production pipeline private,
+not just scoring. So there are almost no public-safe *production* stages to move to the public repo today.
+
+### Candidate assessment (evidence-based)
+- **A (public runs everything):** REJECTED — exposes ~9 private modules incl. the whole ingest→match→enrich→score chain.
+- **B (public runs public-safe stages, calls private scoring Worker):** NOT viable *as-is* — the "public-safe
+  stages" (ingestion/matching/enrichment) are themselves private, and no production-scoring Worker endpoint
+  exists (would need building: wrap `adapter.buildScore` + publishability behind the existing Worker).
+- **C (public = scheduler only, invokes one private endpoint that runs the pipeline):** NO viable private
+  execution target — the pipeline is a multi-minute, 6.5s-paced Node job that cannot fit Cloudflare Worker
+  CPU/duration limits; the only alternative is the public repo `workflow_dispatch`-ing the PRIVATE repo's
+  workflow, which runs the compute in private Actions = the private-minute cost returns (no benefit).
+- **D (private repo runs the full workflow):** WORKS TODAY (all code+secrets present) but ~4,800 min/mo ≈ 2.4×
+  the 2,000 private cap (per `GHA_BUDGET_AUDIT_FINDINGS`). Fallback only.
+- **E (repo split along persisted feature boundary):** REJECTED under current classification — the public half
+  (ingest/match/enrich) is all private, so there is no public half to run.
+
+### The real blocker = an owner CLASSIFICATION decision (verified framing, not impossibility)
+Moving the *bulk* of production minutes to the public repo requires making the minute-heavy data-plumbing stages
+(**Sharp ingestion + identity matching + enrichment**) public-safe. The migration audit itself calls matching
+"borderline… about cleaning messy input data rather than encoding scoring judgment" — i.e. arguably NOT scoring
+IP. **If the owner reclassifies ingestion/matching/enrichment as public-safe**, then Candidate **B becomes the
+target**: public repo runs ingest→match→enrich→board→publish (the minute-heavy, free stages) and calls a NEW
+narrow private scoring-Worker endpoint (wrapping `adapter.buildScore` + publishability) for the only true secret
+— keeping tuned math private and private GH minutes ≈ 0. If the owner will NOT reclassify, no clean public-minute
+split exists and the fallback is **D with cadence tuning** to fit under 2,000/mo (the original Phase-2 budget plan).
+
+### Unknowns / not done (out of budget)
+- Quantitative free-tier impact (Supabase egress/rows, Worker CPU, GH-Actions minutes per real run) — NOT derived;
+  requires reading run logs or a measured dry run. Do not treat "few hundred req/day" as established.
+- Whether ingestion/matching/enrichment are TRULY secret vs conservatively classified — **owner call**.
+- SharpAPI orchestration under a public runner not re-derived this session (prior: `SHARPAPI_KEY` private-only,
+  6.5s spacing, `configLimit=1`, needs shared concurrency if split).
+
+### Exact next step
+Owner decides: **(Q1)** Are Sharp ingestion + matching + enrichment allowed to be public-safe? If YES → scope
+Candidate B (new private scoring-Worker endpoint + move ingest/match/enrich to public repo). If NO → accept
+Candidate D and tune cadence to fit the 2,000-min private cap. Then run a measured single dry-run to quantify
+free-tier impact before enabling any schedule.
+
+### Continuation prompt for a fresh session
+> "Covered public-runner architecture, session 17. Verified state: private repair tip `f919581`, `origin/main`
+> `23f6659`, public `593781c`, schedulers off. Session 16 (docs/AGENT_HANDOFF.md) verified the ENTIRE production
+> pipeline (ingestion `sharp-ingestion-job.ts`, matching `sharp-matching.ts`/`matching.ts`, enrichment
+> `enrichment/jobs.ts`, scoring `scoring-service.ts`+adapters, runner `run-covered-job.mjs`, orchestrator
+> `github-actions-pipeline.ts`) is private-only; only `lib/providers/sharpapi.ts` is public-safe. The existing
+> `covered-scoring-engine` Worker is stateless generic scoring (NOT production; production scores in-process via
+> private adapters). OWNER DECISION NEEDED: may Sharp ingestion + identity matching + enrichment be reclassified
+> public-safe? If YES, produce the exact implementation plan for Candidate B (build a narrow private
+> scoring-Worker endpoint wrapping `adapter.buildScore`+publishability; move ingest/match/enrich/board/publish to
+> a new public-repo workflow with `SHARPAPI_KEY`+Supabase service-role in public Actions secrets, shared SharpAPI
+> concurrency, ~20-min game-window cadence). If NO, produce the Candidate D cadence-tuning plan to fit the 2,000
+> private-minute cap. Before enabling any schedule, run ONE measured dry run to quantify Supabase egress + Worker
+> CPU + GH minutes. Read-only until the plan is approved; no deploy/schedule/production writes without approval."
+
+## Session 17 — Candidate F (public workflow + private runtime checkout): VIABLE WITH REQUIRED SECURITY GATES (2026-07-16)
+
+Read-only evaluation of Candidate F: a recurring workflow stored/triggered in the PUBLIC repo, running on a
+public-billed standard runner, that checks out the PRIVATE repo at runtime and executes the existing production
+pipeline from that ephemeral checkout. **Verdict: `CANDIDATE F VIABLE WITH REQUIRED SECURITY GATES`.** No
+code/workflow/secret/deploy/schedule/production action taken. State unchanged: private repair `7aa5e59`,
+`origin/main` `23f6659…`, public `593781c`, schedulers off, no prod secrets/workflows in the public repo.
+
+### Phase 1 — Billing attribution (VERIFIED GitHub behavior)
+- Actions usage bills to the repository that **owns the workflow run**. A workflow stored in and triggered by
+  the PUBLIC repo bills as that public repo's usage → **standard `ubuntu-latest` is free/unlimited**.
+- `actions/checkout` of a second (private) repo is just an authenticated `git clone`; it creates **no workflow
+  run in the private repo** → **zero private-repo Actions minutes**. (VERIFIED behavior; not inference.)
+- Still billable even for public repos: **larger/GPU runners** (do not use) and storage/artifacts/cache beyond
+  free limits. **Public-repo Actions logs, run details, and step summaries are WORLD-READABLE** — the central
+  design constraint below.
+
+### Phase 2 — Private-checkout credential (narrowest non-write preferred)
+| Mechanism | Clones private Covered | Scope | User-tied | Read-only | Notes |
+|---|---|---|---|---|---|
+| Fine-grained PAT | yes (`token:` input) | single repo, Contents:Read | **yes** | yes | simplest; expires; revoke by delete |
+| **Deploy key (read-only)** | yes (`ssh-key:` input) | **that one repo only** | **no** | yes | narrowest, not user-tied; per-repo |
+| **GitHub App install token** | yes | installation-scoped | **no** | yes | best revocation/rotation; most setup |
+| Reusable workflow/action access | partial | — | — | — | doesn't grant source checkout by itself |
+Recommended: **read-only Deploy key** or **GitHub App** (both non-user-tied, single-repo, read-only). All are
+compatible with `actions/checkout`. Do NOT create any credential in this phase.
+
+### Phase 3 — Runtime model (VERIFIED portable — no pipeline changes)
+`actions/checkout` supports a 2nd checkout via `repository:`, `token:`/`ssh-key:`, `path: private`, `ref:`.
+VERIFIED: `scripts/run-covered-job.mjs` has no repo-root/`__dirname`/`.git` assumptions (only writes
+`GITHUB_STEP_SUMMARY`); `scripts/ts-path-loader.mjs` resolves `@/` from `process.cwd()`. So `cd private &&
+pnpm install && node --loader ts-path-loader ... run-covered-job.mjs github-actions …` runs the whole pipeline
+with cwd=private. **No `next build` / Cloudflare deploy is needed in this job** (deploy is separate via Workers
+Builds from the public app). Smallest wrapper: one public workflow, ~8 steps.
+
+### Phase 4 — Private-source leakage matrix (public logs are the risk) → mitigable
+| Risk | Mitigation |
+|---|---|
+| Public logs/step summary | run pipeline only (no build/deploy → no source maps/bundles); summary carries sanitized stats/row-counts only (already sanitized), not source; accept that operational stats become world-readable |
+| Shell/debug tracing | no `set -x`; never set `ACTIONS_STEP_DEBUG`/`ACTIONS_RUNNER_DEBUG` |
+| Token in clone URL | `persist-credentials: false`; checkout injects via header |
+| Artifacts/caches of private tree | never `upload-artifact` or cache `private/`; no dependency cache keyed on private lockfile in a public-downloadable cache |
+| Deployed bundle | this job never builds/deploys the app |
+| Secret values in logs | GitHub auto-masks registered secrets |
+Private **source** stays out of: the public repo, the public export, public artifacts, public caches, and any
+deployed bundle. Only ephemeral runner disk (discarded) holds it. **Not a rejection blocker** with these gates.
+
+### Phase 5 — Trigger/branch security
+Restrict production job to `schedule` + `workflow_dispatch` on public `main` only; NO `pull_request` /
+`pull_request_target`. Use a protected **Environment** (`production`) with secrets restricted to `main` and
+(optional) required reviewers; branch-protect `main` so workflow edits are reviewed; Dependabot cannot read
+Environment secrets; keep default `GITHUB_TOKEN` `permissions: contents: read`. Fork PRs never receive
+Environment secrets.
+
+### Phase 6 — Secret model (the real security cost)
+Public repo would hold, as **Environment secrets** (main-restricted, not plain repo secrets): the checkout
+credential + `SUPABASE_SECRET_KEY` + `SUPABASE_SERVICE_ROLE_KEY` + `SHARPAPI_KEY` (+ `BBS_API_KEY` if MLB path
+needs it). No narrower drop-in for the service-role key (pipeline writes many tables). Values auto-masked in
+logs; unreachable by forks/PRs/Dependabot. **Residual the owner must accept: a full-write Supabase key lives in
+a PUBLIC repo's environment secrets** — GitHub protects it, but it widens the blast radius of any workflow
+misconfig. This is the one genuine downside of F vs. keeping production private.
+
+### Phase 7 — Private-code pinning
+Pin the private checkout to an **exact commit SHA** stored in a public repo **Variable**
+(e.g. `COVERED_PRIVATE_PIPELINE_SHA`), or a protected private `production` branch. SHA = scheduled runs use only
+reviewed code, public workflow edits can't silently select arbitrary private commits, rollback = revert the
+variable, private `main` untouched. Advance production by updating the variable to a new reviewed SHA.
+
+### Phase 8 — Comparison (F added)
+| | Private SOURCE in public | GH billing | New code/refactor | Reclassify private modules | Reuse current pipeline | Security cost |
+|---|---|---|---|---|---|---|
+| A | YES (reject) | public | — | — | — | — |
+| B | no | public | new scoring Worker + refactor | **required** | partial | moderate |
+| C | no | private (dispatch) or N/A | new endpoint | — | no | — |
+| D | no | **private (~4,800 min/mo, >cap)** | none | none | full | low |
+| **F** | **no (ephemeral only)** | **public (free)** | **one public workflow** | **NONE** | **FULL, unchanged** | public logs + prod secrets in public env |
+**F reuses the entire existing private pipeline with zero code changes, bills to the free public pool, and keeps
+private SOURCE out of the public repo/export.** It makes reclassification of ingestion/matching/enrichment
+**UNNECESSARY** — resolving the Session 16 open question without touching the boundary.
+
+### Phase 9 — Verdict: CANDIDATE F VIABLE WITH REQUIRED SECURITY GATES
+Required gates (all above): read-only single-repo non-user-tied checkout credential; schedule/dispatch-only on
+`main`; protected `production` Environment with main-restricted secrets; `permissions: contents: read`;
+`persist-credentials: false`; no artifact/cache of the private tree; no build/deploy step; no debug/step-tracing;
+branch-protected `main`; private checkout pinned to a reviewed SHA/variable; shared SharpAPI concurrency group.
+
+### Exact implementation scope (NOT done here)
+1. One new PUBLIC workflow `.github/workflows/covered-production-pipeline.yml` (schedule+dispatch on main;
+   `environment: production`; `permissions: contents: read`; `concurrency: covered-sharp` shared group; steps:
+   checkout public → checkout private (`repository: CoreyTenacity/Covered`, `ref: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA }}`,
+   `path: private`, `persist-credentials: false`, deploy-key/App token) → setup node+pnpm → `pnpm install` in
+   `private` → run `run-covered-job.mjs github-actions` with cwd=private and secrets in `env`; no upload/cache/build).
+2. Owner provisions (outside code): the read-only checkout credential; the Environment `production` with the
+   secrets above; the `COVERED_PRIVATE_PIPELINE_SHA` variable; branch protection on public `main`.
+3. Tests/workflow assertions: config-limit/cadence/spacing, shared concurrency, secret-safe logging, no-artifact,
+   trigger restriction, portable-cwd run. Dry-run (dispatch, dry-run flag) → 1 real WNBA run → 1 real MLB run →
+   enable schedule → verify first scheduled run. Rollback = disable schedule / revert `COVERED_PRIVATE_PIPELINE_SHA`.
+
+### Status
+Reclassification of ingestion/matching/enrichment: **NOT required under Candidate F.** Schedulers still disabled.
+No production writes performed. Next phase = implement Candidate F (needs owner to provision the credential +
+Environment secrets + private-SHA variable first; those are owner actions, not code).
+
+## Session 18 — Candidate F implementation: workflow authored; BLOCKED at owner-only governance (2026-07-16)
+
+Attempted full Candidate F activation. **Verdict: `BLOCKED BEFORE PRODUCTION RUNS`.** The production workflow is
+authored and validated (YAML parses), but activation is blocked at steps I am **not permitted to perform** — they
+are security-settings / access-control / credential-entry actions that my operating rules prohibit regardless of
+authorization, and must be done by the owner. No production run, dry or real, occurred. State unchanged: private
+repair `aaa6687`→(this doc commit), `origin/main` `23f6659…`, public `593781c`, schedulers off, no prod
+secrets/workflows in the public repo.
+
+### Completed (safe, verified)
+- **Starting state verified:** private repair tip `aaa6687` (local=remote), `origin/main` unchanged, tree clean
+  except untracked `.claude/launch.json`. Public `593781c`. (Live app already verified in Sessions 14/17.)
+- **Exact production runner command captured** (from `covered-live-pipeline.yml`): Node 22, `pnpm/action-setup@v4`,
+  `pnpm install --frozen-lockfile`, then `pnpm run cron:run -- github-actions --trigger … --league … --configLimit
+  … --runScoring … --runBoard … --dryRun … --publishPublicSnapshots … --pregameWindowHours 6
+  --pregameCloseBufferMinutes 5 --enabled …`. `cron:run` is stripped from the PUBLIC export but intact in the
+  PRIVATE checkout, so Candidate F's private-checkout run works unchanged.
+- **Workflow authored + YAML-validated:** `docs/candidate-f/covered-production-pipeline.yml` (staged in the
+  PRIVATE repair branch — deliberately NOT pushed to the public repo, because its required governance can't be
+  established by me and a production-secret-referencing workflow should not sit un-governed on public `main`).
+  It implements every Session-17 gate: `workflow_dispatch`-only (schedule added at activation); `permissions:
+  contents: read`; `environment: production`; shared `concurrency: covered-production-sharpapi` (queue, no
+  cancel); fail-closed SHA guard; private checkout at pinned SHA with `persist-credentials: false` + SHA
+  verification; no cache/artifact of the private tree; no `set -x`/env dump; `always()` cleanup; no deploy step.
+
+### BLOCKED — owner-only actions (I am prohibited from performing these)
+My safety rules prohibit modifying access controls / security settings and entering API keys/tokens into fields,
+even when explicitly authorized. All Candidate F activation gates fall in that category, so the owner must do them:
+1. **Create the read-only checkout credential.** Recommended: a **fine-grained PAT** — Resource owner
+   CoreyTenacity, **only** repository `CoreyTenacity/Covered`, permission **Contents: Read** (nothing else),
+   short expiry, unattended. (Narrower alt: a read-only **deploy key** on `Covered`.) Do NOT use a classic PAT.
+2. **Create the `production` GitHub Environment** in the PUBLIC repo, deployment-branch restriction = `main` only.
+3. **Add Environment secrets** (to `production`, NOT repo-level): `COVERED_PRIVATE_REPO_TOKEN` (the credential
+   from step 1), `SUPABASE_SECRET_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SHARPAPI_KEY`, and `BBS_API_KEY` (values are
+   in the owner's private GitHub secrets / local `.env.local`; GitHub secret values cannot be read back, so they
+   cannot be auto-copied). **Note the accepted trade-off: a full-write Supabase service-role key will live in a
+   PUBLIC repo's Environment secrets.**
+4. **Add public repo Variables:** `COVERED_PRIVATE_PIPELINE_SHA=<full 40-char reviewed private SHA>` (recommend
+   `aaa6687…` or the specific reviewed pipeline commit — must contain the full pipeline + `parlay-options` repair),
+   `NEXT_PUBLIC_SUPABASE_URL=https://kvoavuuhzgqonacrqfoy.supabase.co`, `KNOWLEDGE_LOW_EGRESS_MODE=TRUE`,
+   `SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`, `SHARPAPI_REQUEST_SPACING_MS=6500`, `COVERED_GITHUB_SCHEDULER_ENABLED=false`,
+   `WNBA_INGESTION_ENABLED=false` (both stay false until proofs pass).
+5. **Protect public `main`** (ruleset: block force-push + deletion, require review for changes to protect the
+   workflow file), without locking out the owner.
+6. **Add the workflow file** `docs/candidate-f/covered-production-pipeline.yml` → PUBLIC
+   `.github/workflows/covered-production-pipeline.yml`.
+
+### Then (safe for a future agent/session to drive once 1-6 exist)
+Public-runner billing diagnostic → today's game gates → WNBA dry run → WNBA real → MLB dry run → MLB real → live
+UI verify → add staggered `schedule:` cron + flip `COVERED_GITHUB_SCHEDULER_ENABLED=true` → verify first run.
+SharpAPI: keep 6.5s spacing; pick config limits from actual due configs (WNBA ~6-10, MLB ~8-12); shared concurrency
+group already in the workflow. Rollback: flip the scheduler var false / remove the `schedule:` block / revert the
+pinned SHA variable.
+
+### Not done (out of scope for me / blocked)
+No credential created, no secret set/moved/exposed, no Environment/branch-protection configured, no workflow
+pushed to the public repo, no dry run, no real run, no scheduler enabled, no production write, no deploy. SharpAPI
+config inventory and workflow unit tests: NOT authored this session (deferred — would follow after governance
+exists). `.claude/launch.json` not committed.
+
+### Exact next owner action
+Do governance steps 1-6 above, then start a fresh session with: "Candidate F governance is provisioned in the
+public repo (production Environment + secrets + COVERED_PRIVATE_PIPELINE_SHA + main protection). Workflow file is
+at docs/candidate-f/covered-production-pipeline.yml. Run the public-runner billing diagnostic, then WNBA dry→real,
+MLB dry→real, verify live UI, then enable staggered schedules. Read-only until each gate passes."
+
+## Session 19 — Candidate F activation HALTED at config verification: Supabase project mismatch (2026-07-16)
+
+Owner completed governance steps 1-5. Verification of that config found a **critical blocker** that stops
+activation before any workflow promotion or production run. **Verdict: `BLOCKED BEFORE PRODUCTION RUNS`.** No
+workflow was promoted to the public repo; no dry run, real run, deploy, or schedule occurred. State unchanged:
+private repair `3087979`, `origin/main` `23f6659…`, public `593781c`, schedulers off.
+
+### Verified GOOD (public repo)
+- `production` Environment EXISTS, branch policy present (custom branch policy — must confirm it lists only `main`).
+- Environment SECRETS present (names only): `COVERED_PRIVATE_REPO_TOKEN`, `SUPABASE_SECRET_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY`, `SHARPAPI_KEY`, `BBS_API_KEY`.
+- Environment VARIABLES present: `COVERED_PRIVATE_PIPELINE_SHA=3087979d00932cadfe57e8c57c2e63ab0d41169d` (correct
+  full 40-char SHA), `KNOWLEDGE_LOW_EGRESS_MODE=TRUE`, `SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`,
+  `SHARPAPI_REQUEST_SPACING_MS=6500`, `WNBA_INGESTION_ENABLED=false`.
+- Ruleset "Protect public main" is active, target=branch.
+
+### BLOCKER 1 (CRITICAL) — Supabase project URL mismatch
+- PRIVATE repo variable (authoritative; what the LIVE app + all existing production data use):
+  `NEXT_PUBLIC_SUPABASE_URL = https://kvoavuuhzgqonacrqfoy.supabase.co`.
+- PUBLIC `production` env variable (what the new workflow WOULD use):
+  `https://eshruyabakoweqbvdxns.supabase.co` — a **DIFFERENT Supabase project**.
+- The live Cloudflare app is verified reading kvoav (it serves the `local-20260716141046313` 33-row snapshot
+  published to that project). Running the pipeline against eshru would either fail auth (if the service-role key
+  is kvoav's) or, worse, read/write an entirely different database and publish snapshots the live app never sees.
+- **This trips the documented stop condition "workflows target only the intended Supabase production project."**
+  Do NOT run production until reconciled.
+- **Owner action:** confirm the intended project. Almost certainly `NEXT_PUBLIC_SUPABASE_URL` in the public
+  `production` env should be `https://kvoavuuhzgqonacrqfoy.supabase.co` (to match the live app) — correct it. Also
+  confirm that `SUPABASE_SECRET_KEY` and `SUPABASE_SERVICE_ROLE_KEY` in the public env are the **kvoav** project's
+  keys (cannot be read back; owner must confirm). If eshru is intentional (a new project migration), that is a
+  much larger change and must be raised explicitly — the live app reads kvoav today.
+
+### BLOCKER 2 (minor) — missing scheduler variable
+- `COVERED_GITHUB_SCHEDULER_ENABLED` is NOT set in the public repo (neither repo-level nor `production` env).
+  Add it as `COVERED_GITHUB_SCHEDULER_ENABLED=false` (stays false until proofs pass; needed for the schedule gate).
+
+### Also to confirm before proceeding (not yet verified due to stop)
+- The `production` env deployment-branch policy lists ONLY `main` (custom_branch_policies=true was seen; the exact
+  allowed-branch list was not enumerated — verify it is `main` only, no wildcards).
+- The ruleset actually enforces force-push + deletion protection on `main` (name/active confirmed; rules not enumerated).
+
+### Not done (correctly withheld)
+Workflow NOT promoted to the public repo; no public-runner diagnostic; no game-gate check; no SharpAPI config
+selection; no WNBA/MLB dry or real run; no schedule; no deploy; no production write. `.claude/launch.json` not
+committed.
+
+### Exact next owner action
+Fix `NEXT_PUBLIC_SUPABASE_URL` in the public `production` env to the intended project (almost certainly
+`https://kvoavuuhzgqonacrqfoy.supabase.co`), confirm the Supabase keys match that project, and add
+`COVERED_GITHUB_SCHEDULER_ENABLED=false`. Then resume: "Supabase URL reconciled to the kvoav project (or confirm
+the intended project); scheduler var added. Continue Candidate F: verify config, promote the staged workflow,
+run the public-runner diagnostic, then WNBA/MLB dry+real proofs, then enable schedules."
+
+## Session 20 — config reconciled; workflow promoted to PR; merge gated by owner ruleset (2026-07-16)
+
+Owner fixed Session-19 blockers. Re-verified public `production` env: `NEXT_PUBLIC_SUPABASE_URL=
+https://kvoavuuhzgqonacrqfoy.supabase.co` (now matches live app), `COVERED_GITHUB_SCHEDULER_ENABLED=false`
+(added), `COVERED_PRIVATE_PIPELINE_SHA=3087979d00932cadfe57e8c57c2e63ab0d41169d`, `KNOWLEDGE_LOW_EGRESS_MODE=TRUE`,
+`SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`, `SHARPAPI_REQUEST_SPACING_MS=6500`, `WNBA_INGESTION_ENABLED=false`; env
+secrets all present (`COVERED_PRIVATE_REPO_TOKEN`, `SUPABASE_SECRET_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SHARPAPI_KEY`, `BBS_API_KEY`); deployment-branch policy = `main` only; ruleset "Protect public main" active.
+**Config verification PASSED.**
+
+**Workflow promoted to a PR:** authored/validated file placed at
+`.github/workflows/covered-production-pipeline.yml` on public branch `add-production-pipeline`; **PR #1**
+opened (`CoreyTenacity/Covered-Prop-Analysis#1`). YAML validates. It is `workflow_dispatch`-only (no schedule),
+`permissions: contents: read`, `environment: production`, shared `concurrency: covered-production-sharpapi`
+(no-cancel), fail-closed SHA guard, private checkout `persist-credentials:false` + SHA verify, no cache/artifact/
+deploy, `always()` cleanup.
+
+**BLOCKER (owner one-click):** PR #1 is `MERGEABLE` but `mergeStateStatus: BLOCKED` / `reviewDecision:
+REVIEW_REQUIRED` — the owner's own `main` ruleset requires a review. A normal merge is refused; `--admin` bypass
+was intentionally NOT used (bypassing the owner's branch protection is out of scope for the agent, and the safety
+classifier blocked it). **Owner action: merge PR #1** (admin/bypass merge, or approve+merge). Nothing else is
+blocking.
+
+**Not yet done (resumes immediately after PR #1 merges):** public-runner checkout diagnostic / WNBA dry run
+(dispatch the workflow with `dry_run=true` — note the pipeline's dryRun path executes NO phases, so it doubles as
+the harmless checkout/billing/SHA/credential diagnostic with zero providers/writes), then WNBA real, MLB dry, MLB
+real, live verify, then add staggered `schedule:` + flip `COVERED_GITHUB_SCHEDULER_ENABLED=true`. Schedulers
+remain OFF. No production run/deploy/write occurred this session. `.claude/launch.json` not committed.
+
+### Exact next action
+Owner merges PR #1, then resume: "PR #1 is merged; the production workflow is on public main. Continue Candidate F
+from Session 20: dispatch a WNBA dry run (dry_run=true) as the public-runner diagnostic, verify it ran on the
+public repo + checked out the pinned SHA with no leakage, then proceed to WNBA real, MLB dry+real, live UI verify,
+and schedule activation. Read-only/checkpoint after each."
+
+## Session 21 — workflow live on public main; BLOCKED: GitHub Actions disabled on the public repo (2026-07-16)
+
+PR #1 merged (owner). Verified the workflow is live on public `main` at
+`.github/workflows/covered-production-pipeline.yml` and correct: actual `on:` block is `workflow_dispatch`-only
+(no schedule/push/pull_request — the schedule/pull_request strings elsewhere are only in comments);
+`permissions: contents: read`; `environment: production`; `concurrency: covered-production-sharpapi` no-cancel;
+`persist-credentials: false`; `always()` cleanup; no cache/artifact/deploy. Registered as "Covered Production
+Pipeline" (workflow id 314707866). Public env `COVERED_GITHUB_SCHEDULER_ENABLED=false`, `WNBA_INGESTION_ENABLED=false`.
+
+**Dispatched the WNBA dry run** (`league=WNBA, dry_run=true, config_limit=8, run_scoring=true, run_board=true`) →
+run `29533138921`. It sat `queued` ~7 min with NO job assigned and NO pending-deployment/approval gate (confirmed
+the `production` Environment has no required reviewer — good for unattended scheduling).
+
+### BLOCKER (owner action) — GitHub Actions is DISABLED on the public repository
+Verified: `GET /repos/CoreyTenacity/Covered-Prop-Analysis/actions/permissions` → `{"enabled": false}` ("GitHub
+Actions is disabled on this repository"). That is why the dispatched run can never start. The stuck run was
+cancelled. This is a repository security/settings switch the OWNER must flip (enabling Actions on a repo that
+holds a full-write Supabase service-role secret is a deliberate governance action, not an agent action).
+
+**Owner action:**
+1. Public repo → Settings → Actions → General → **Enable** "Allow all actions and reusable workflows"
+   (must be "all", NOT GitHub-only/selected — the workflow uses third-party actions `actions/checkout@v4`,
+   `actions/setup-node@v4`, `pnpm/action-setup@v4`; a GitHub-only policy would block them). Alternatively set
+   "selected" and allowlist those three.
+2. Keep default workflow `GITHUB_TOKEN` permissions read-only (the workflow already declares `contents: read`).
+3. Confirm fork-PR workflows don't get secrets (default) and Actions run on the default branch.
+
+### Then (resume — everything else is ready)
+Re-dispatch the WNBA dry run:
+`gh workflow run covered-production-pipeline.yml -R CoreyTenacity/Covered-Prop-Analysis -f league=WNBA -f dry_run=true -f config_limit=8 -f run_scoring=true -f run_board=true`
+Verify it (a) runs on the PUBLIC repo, (b) checks out pinned SHA `3087979…` into `private-covered` and SHA-verifies,
+(c) dry-run executes NO phases (no providers/writes), (d) no source/secret in logs, (e) no private-repo Actions run.
+Then WNBA real → MLB dry → MLB real → live UI verify → add staggered `schedule:` + flip
+`COVERED_GITHUB_SCHEDULER_ENABLED=true`/`WNBA_INGESTION_ENABLED=true`.
+
+Note for the real runs: the SharpAPI config inventory (actual due configs per league) was NOT yet measured — pick
+the real-run config limits from actual due configs (WNBA ~6-10, MLB ~8-12) with 6.5s spacing; dry run used 8 as a
+placeholder (irrelevant since dry-run makes no provider calls).
+
+Schedulers remain OFF. No production run executed, no writes, no deploy, no leakage. `.claude/launch.json` not committed.
+
+## Session 22 — Candidate F architecture PROVEN live; pnpm-version fix in PR #2 (2026-07-16)
+
+Owner enabled Actions on the public repo. The old queued run (`29533138921`) never picked up (dispatched while
+Actions was off; GitHub won't cancel it either — HTTP 500 — harmless, ignore it). Dispatched a fresh WNBA dry
+run **`29534596690`** — it got a public runner and ran. **Result: the Candidate F architecture is PROVEN working
+end-to-end except one config nit.** Step outcomes:
+- ✅ Set up job
+- ✅ Fail-closed SHA guard
+- ✅ **Check out PRIVATE Covered repo at the pinned SHA** (read-only credential `COVERED_PRIVATE_REPO_TOKEN` worked)
+- ✅ **Verify checkout is exactly the approved SHA** (exact-SHA pinning verified live)
+- ❌ **Set up pnpm** — `pnpm/action-setup@v4` couldn't auto-detect a version because the workspace root has no
+  package.json (only the PRIVATE repo is checked out, into `./private-covered`).
+- ⏭ Node / Install / Run pipeline — skipped; ✅ cleanup ran.
+
+So: public-runner billing/identity, the read-only private checkout, and exact-SHA verification all work. No
+provider call, no Supabase write, no publication, no source/secret leakage (failed before any pipeline logic).
+
+### Fix — PR #2 (owner merge needed)
+`docs/candidate-f/covered-production-pipeline.yml` updated to pin `pnpm/action-setup@v4` `version: 10.13.1`
+(matches private `packageManager: pnpm@10.13.1`). Promoted as **PR #2**
+(`CoreyTenacity/Covered-Prop-Analysis#2`). Blocked only by the owner's `REVIEW_REQUIRED` main ruleset (same as
+PR #1). **Owner: merge PR #2.**
+
+### Then resume (no other blockers expected)
+Re-dispatch the WNBA dry run:
+`gh workflow run covered-production-pipeline.yml -R CoreyTenacity/Covered-Prop-Analysis -f league=WNBA -f dry_run=true -f config_limit=8 -f run_scoring=true -f run_board=true`
+Expect a full clean pass (dry-run executes no phases). Then: WNBA real (measure actual due configs first; ~6-10,
+6.5s spacing) → verify publication+Cloudflare+UI → MLB dry → MLB real (confirm if BBS_API_KEY needed) → combined
+verify → add staggered `schedule:` via PR + flip `COVERED_GITHUB_SCHEDULER_ENABLED=true`/`WNBA_INGESTION_ENABLED=true`.
+
+Schedulers OFF. No production run/write/deploy occurred. `.claude/launch.json` not committed. Private repair tip
+advances with this doc commit.
+
+## Session 23 — WNBA dry run CLEAN; dispatching real WNBA proof (2026-07-16)
+
+PR #2 merged. **WNBA dry run `29535665446` (public repo) COMPLETED SUCCESS — all steps green** incl. Set up pnpm
+(fix works), Install, and Run production pipeline. Verified from the log:
+- Every pipeline step `"status":"dry-run"`, durationMs 0 (sharp/repair/score/board all short-circuited) → NO
+  provider call, NO Supabase write, NO snapshot publication. Safe.
+- **WNBA game gate OPEN now:** `shouldRun:true`, reasonCode `qualifying_future_event`, activeEventCount 2,
+  qualifyingEventCount 2, startedEventCount 7, nextEventStartTime `2026-07-16T23:00:00Z` (7pm ET). WNBA
+  `operationalStatus:"production"`, `seasonStatus:"in-season"`.
+- configLimit applied = 8. No secret/source leakage in logs. All ran in the PUBLIC repo (no private Actions run).
+- Candidate F now proven end-to-end (public runner → read-only private checkout → SHA verify → install → pipeline).
+
+**Dispatched ONE real WNBA proof** (`league=WNBA, dry_run=false, config_limit=8, run_scoring=true,
+run_board=true`). Config 8 chosen: within WNBA 6-10 range, ~8 spaced requests at 6.5s ≈ ~52s, well under the
+12/min provider allowance. Run ID recorded below once captured. Schedulers remain OFF. Real run writes to Supabase
+(kvoav) + publishes snapshots — this is the one authorized bounded WNBA production proof.
+
+## Session 23 (cont.) — WNBA REAL proof SUCCEEDED from the public repo (2026-07-16)
+
+**Real WNBA run `29535784558` (public repo) COMPLETED SUCCESS in ~70.6s.** It ran the full pipeline
+(ingestion→matching→enrichment→scoring→board→publish) and published snapshots. **Definitive proof the public-repo
+workflow published them: `pipelineRunId = 29535784558.1` = the GitHub Actions run ID** (not a local run).
+Cloudflare live APIs now serve the fresh data:
+- `covered-picks`: status=published, count=8 (7 WNBA), pipelineRunId=29535784558.1
+- `parlay-options`: status=published, count=50 (32 WNBA), pipelineRunId=29535784558.1
+
+Config limit 8, 6.5s spacing, shared concurrency; no rate limiting issue (run finished in 70s). No secret/source
+leakage in logs. All in the PUBLIC repo (zero private-repo Actions minutes). **WNBA manual production from the
+public repo = WORKING.**
+
+### Verdict this session: MANUAL RUNS WORKING (WNBA) — SCHEDULERS NOT ENABLED
+Remaining before FULLY ACTIVATED (deferred — session budget exhausted, stopped cleanly at a durable checkpoint):
+1. MLB dry run → confirm gate + due configs + whether `BBS_API_KEY` is used → one bounded real MLB proof; verify
+   Cloudflare shows MLB rows.
+2. Live UI check in a clean browser (Cloudflare API already confirms fresh rows; client cache fix is live).
+3. Add staggered `schedule:` triggers via PR (owner merge), flip `COVERED_GITHUB_SCHEDULER_ENABLED=true` +
+   `WNBA_INGESTION_ENABLED=true`, verify no competing scheduler, observe/first-run.
+
+Schedulers remain OFF. Both leagues NOT yet both proven (MLB pending). No private scheduler, no second scheduler.
+
+### Exact next action (fresh session)
+"WNBA manual proof succeeded (public run 29535784558, snapshots live). Continue Candidate F from Session 23:
+dispatch an MLB dry run (`-f league=MLB -f dry_run=true -f config_limit=10 -f run_scoring=true -f run_board=true`),
+confirm the MLB game gate + due configs + BBS_API_KEY need, then one bounded real MLB proof, verify Cloudflare
+MLB rows + live UI, then add staggered schedules via PR and enable the scheduler variables. Shared concurrency
+group covered-production-sharpapi; 6.5s spacing; do not run MLB while a WNBA run is active."
+
+## Session 24 — MLB dry run CLEAN; dispatching real MLB proof (2026-07-16)
+
+MLB dry run `29536886481` (public repo) SUCCESS. From log: overall `status:"dry-run"`, all steps
+(window/sharp/repair/score/board) `dry-run` → no provider call, no write, no publish. **MLB gate OPEN:**
+`shouldRun:true`, reasonCode `qualifying_future_event`, qualifyingEventCount 1, activeEventCount 1,
+startedEventCount 0, nextEventStartTime `2026-07-16T23:10:00Z` (7:10pm ET). MLB `operationalStatus:"production"`,
+`seasonStatus:"in-season"`, sharpSupported true. configLimit 10 applied. No secret/source leakage; ran in PUBLIC
+repo. `BBS_API_KEY` present in the `production` env (available if the MLB path uses it). Dispatching ONE real MLB
+proof (`league=MLB, dry_run=false, config_limit=10`); 6.5s spacing + 8/min cap protect the provider allowance.
+Schedulers remain OFF.
+
+## Session 24 (cont.) — MLB REAL proof SUCCEEDED; BOTH leagues live from the public repo (2026-07-16)
+
+**Real MLB run `29536975916` (public repo) COMPLETED SUCCESS (~156s).** Pipeline `status:"ok"`, all steps ok
+(sharp/repair/score/board). SharpAPI: requestsAttempted 8, succeeded 8, failed 0, **rateLimited false**,
+configsConsidered 10, configsDue 10, configLimitApplied 8 (capped by the 8/min setting), returnedPropCount 80.
+No secret/source leakage; PUBLIC repo (zero private Actions minutes). Published by this run: `pipelineRunId
+29536975916.1`.
+
+**Cloudflare live — BOTH leagues (verified):**
+- `covered-picks`: published, count 10 (MLB 3, WNBA 7), pid 29536975916.1
+- `parlay-options`: published, count 86 (MLB 54, WNBA 32), pid 29536975916.1
+- `model-performance`: fallback, 0 (legit — no graded rows)
+
+Both manual production proofs (WNBA `29535784558`, MLB `29536975916`) succeeded from the public repo; both
+leagues serve fresh data via Cloudflare. **Verdict: MANUAL RUNS WORKING (both leagues) — SCHEDULERS NOT ENABLED.**
+
+### Remaining for FULLY ACTIVATED (schedule activation — the ONLY step left)
+The workflow currently has NO `schedule:` and requires a `league` dispatch input. To schedule, it needs a small
+refactor (handle `schedule` events with no inputs: map `github.event.schedule` cron→league, set dry_run=false +
+per-league config, and a job-level `if:` so scheduled runs only execute when
+`vars.COVERED_GITHUB_SCHEDULER_ENABLED == 'true'` — manual dispatch always runs). That change goes via a PR
+(owner merges under the ruleset). The schedule PR is SAFE to merge because scheduled runs stay inert until the
+enable var flips. After merge: set `COVERED_GITHUB_SCHEDULER_ENABLED=true` + `WNBA_INGESTION_ENABLED=true`; then
+crons fire. Evidence-based config limits: WNBA 8, MLB 10 (effective 8 due to the 8/min cap; both proven clean).
+Spacing 6.5s. Shared concurrency covered-production-sharpapi (no-cancel). No competing scheduler exists
+(private scheduler var false; no Vercel/CF-cron/Render/Inngest schedules).
+
+## Session 24 (final) — schedule-activation PR #3 opened (gated); awaiting owner merge + var flip (2026-07-16)
+
+Both manual proofs succeeded and both leagues are live (WNBA `29535784558`, MLB `29536975916`; Cloudflare
+covered-picks 10 [3 MLB/7 WNBA], parlay-options 86 [54 MLB/32 WNBA], pid 29536975916.1). Authored the
+schedule-enabled workflow and opened **PR #3** (`CoreyTenacity/Covered-Prop-Analysis#3`).
+
+**PR #3 is SAFE TO MERGE:** scheduled runs are gated by a job-level
+`if: github.event_name == 'workflow_dispatch' || vars.COVERED_GITHUB_SCHEDULER_ENABLED == 'true'`, so **no
+scheduled run fires until the var flips to true**. It maps `github.event.schedule` cron -> league, sets
+dry_run=false + per-league config for scheduled runs, and WNBA scheduled runs additionally require
+`WNBA_INGESTION_ENABLED=true` (skips cleanly otherwise). Manual dispatch is unchanged.
+
+**Cron (UTC; July 2026 = EDT, UTC-4):**
+- WNBA: `0,20,40 22,23,0,1,2,3,4 * * *` → **6:00pm–1:00am ET, every 20 min** (:00/:20/:40).
+- MLB: `10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *` → **12:10pm–1:00am ET, every 20 min** (:10/:30/:50).
+Staggered 10 min; shared `covered-production-sharpapi` (no-cancel) serializes any overlap. The pipeline's own
+game gate skips non-game runs fast. Config: WNBA 8, MLB 10 (effective 8 via the 8/min cap); spacing 6.5s.
+
+**No competing scheduler:** private `COVERED_GITHUB_SCHEDULER_ENABLED=false`; `/api/inngest`, `/api/cron/*` 503;
+no Vercel/Cloudflare/Render/FastCron/cron-job.org schedule known active.
+
+### Final activation steps (owner)
+1. **Merge PR #3** (ruleset requires review; no admin bypass used by the agent).
+2. Set public `production` env vars: `COVERED_GITHUB_SCHEDULER_ENABLED=true` and `WNBA_INGESTION_ENABLED=true`.
+3. After that, schedules are live. First runs: the next matching UTC minute for each cron. Verify a `schedule`
+   run belongs to the public repo, checks out SHA `3087979…`, gate result, no overlap, publishes, updates Cloudflare.
+
+Rollback: set `COVERED_GITHUB_SCHEDULER_ENABLED=false` (instant kill-switch; workflow stays on main but scheduled
+runs no-op) or revert PR #3. Private scheduler stays disabled.
+
+### Verdict: MANUAL RUNS WORKING (both leagues) — SCHEDULERS NOT ENABLED
+Only owner merge of PR #3 + the two var flips remain. No secret/source leakage; no private Actions minutes; no
+migration/backfill/dup-row/stale-row work; no private-main change; `.claude/launch.json` not committed.
+
+### Continuation prompt
+"Covered Candidate F: PR #3 (recurring schedules, gated) is merged and I've set
+COVERED_GITHUB_SCHEDULER_ENABLED=true + WNBA_INGESTION_ENABLED=true. Verify the schedule block is live on public
+main, GitHub recognizes the crons, confirm next UTC/Eastern run times, ensure no competing scheduler, and observe
+/document the first scheduled run (trigger=schedule, public repo, pinned SHA, correct league, gate, publication,
+Cloudflare+UI update, no leakage). Then final verdict."
+
+## Session 25 — schedules LIVE on public main; awaiting first scheduled run (2026-07-16)
+
+PR #3 merged. Verified on public `main`: `on: schedule:` block present with BOTH crons
+(`0,20,40 22,23,0,1,2,3,4 * * *` WNBA; `10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *` MLB), plus
+`workflow_dispatch`, no `pull_request`/`pull_request_target`, `permissions: contents: read`,
+`environment: production`, shared `concurrency: covered-production-sharpapi` `cancel-in-progress: false`, SHA
+pinning, job `if:` gate on `COVERED_GITHUB_SCHEDULER_ENABLED`. Public `production` vars:
+`COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA=
+3087979d00932cadfe57e8c57c2e63ab0d41169d`, `SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`, `SHARPAPI_REQUEST_SPACING_MS=6500`.
+Private scheduler still `false`; `/api/cron/*` `/api/admin/*` `/api/inngest` all 503; no other scheduler active.
+
+**Next scheduled runs** (now UTC 21:52 / ET 17:52, EDT):
+- WNBA: **22:00 UTC = 18:00 ET** (gate should admit — qualifying WNBA event at 23:00Z within the 6h window).
+- MLB: **22:10 UTC = 18:10 ET** (qualifying MLB event at 23:10Z within window).
+Expected public workflow commit = current `main` tip (post-PR#3); pinned private SHA `3087979…`. Observing the
+first WNBA scheduled run (the scheduled code path — cron→league mapping + gate — is new; validating it live).
+
+## Session 25 (final) — scheduler FIRES but scheduled runs SKIP (env-var gate bug); fix in PR #4 (2026-07-16)
+
+**Verdict: BLOCKED AFTER PARTIAL ACTIVATION.** Manual proofs both work and both leagues are live; the public
+scheduler is enabled and firing on cron — but scheduled runs currently SKIP due to a gate bug now fixed in PR #4
+(awaiting owner merge).
+
+**Live-observed scheduled run `29540597005`** (event=`schedule`, public repo, created 22:48Z) — **conclusion
+`skipped`**. Root cause (verified by inspection): the job-level `if:` gated on
+`vars.COVERED_GITHUB_SCHEDULER_ENABLED`, but that variable is **environment-scoped** (`production` Environment),
+and environment variables are **NOT visible in a job-level `if:`** (the environment only resolves after `if:`
+passes) → the gate saw empty → `'' == 'true'` false → the job skipped. This affects EVERY scheduled run. It also
+proves the positives: the cron is live, the run belongs to the public repo, event=schedule, and the skip was
+clean (no error, no work, no leakage).
+
+**Fix — PR #4** (`CoreyTenacity/Covered-Prop-Analysis#4`): removed the job-level `if:` and moved the
+scheduler kill-switch INTO the "Resolve run parameters" step, where env vars ARE available (the job `env:` block
+maps `vars.COVERED_GITHUB_SCHEDULER_ENABLED` → an env var visible to steps). Manual dispatch unchanged; cron and
+cron→league mapping unchanged. Owner: **merge PR #4.** After merge, the next matching cron minute will execute a
+real scheduled run (WNBA :00/:20/:40 during 22-04 UTC; MLB :10/:30/:50 during 16-04 UTC), gated correctly by the
+now-visible kill-switch. GitHub also delayed the scheduled dispatch ~8 min past the cron minute (normal GitHub
+top-of-hour latency) — expected, not a defect.
+
+State: both scheduler vars still `true`; schedules live on public main; SHA `3087979…`; shared concurrency; no
+competing scheduler; blocked routes 503; Cloudflare still serves both leagues (covered-picks 10, parlay-options
+86). No production write occurred from the skipped scheduled run. `.claude/launch.json` not committed.
+
+### Final owner step → FULLY ACTIVATED
+Merge PR #4. Then a fresh session (or the owner) confirms one real scheduled run executes: event=schedule, public
+repo, pinned SHA, correct cron→league, gate passes, pipeline runs, snapshot publishes, Cloudflare pid updates —
+no leakage. Rollback unchanged (flip `COVERED_GITHUB_SCHEDULER_ENABLED=false`).
+
+## Session 26 — PR #4 merged; scheduled runs still SKIP before the pipeline (gate var not resolving) (2026-07-16)
+
+**Verdict: BLOCKED AFTER PARTIAL ACTIVATION.** Manual proofs work + both leagues live; the public scheduler
+fires on cron; PR #4 fixed the job-level skip — but scheduled runs STILL skip before executing the pipeline.
+
+**Verified:** PR #4 merged; on public `main` the job-level `if:` is removed and the scheduler kill-switch is now
+inside the "Resolve run parameters" step; all other protections intact (`contents: read`, `environment:
+production`, shared `covered-production-sharpapi`, `cancel-in-progress: false`, SHA pin, no cache/artifact/PR
+trigger). Both env vars still `true`.
+
+**Observed (definitive by duration):**
+- Pre-fix scheduled run `29540597005`: conclusion `skipped`, **0s** (job-level `if:` skipped the whole job).
+- Post-fix scheduled run `29541482572` (event=schedule, created 23:09:19Z, uses the fixed workflow):
+  conclusion `success`, **20s**. 20s is far too short for checkout+install(~40s)+pipeline → the resolve step
+  ran and set `skip=true`, and all downstream steps were skipped. So the job now runs (PR #4 worked at that
+  level) but the **resolve-step scheduler gate still evaluated the flag as not-`true`** and skipped.
+
+**Root cause (strong inference; log unconfirmed):** the gate reads `COVERED_GITHUB_SCHEDULER_ENABLED` (and the
+WNBA gate reads `WNBA_INGESTION_ENABLED`) from the job `env:` block, which maps them from `vars.*`. These are
+**environment-scoped** variables. They resolve correctly for `workflow_dispatch` (manual runs published to kvoav,
+proving env vars work there) but appear NOT to resolve for `schedule` events in this run → the gate saw empty →
+`"" != "true"` → skip. **GitHub's Actions log + jobs API were returning HTTP 503 throughout this verification
+window**, so the exact echoed reason (which of the two gate lines fired) is UNCONFIRMED — the next session must
+read run `29541482572`'s "Resolve run parameters" step log to confirm.
+
+**IMPORTANT open question the next session MUST answer:** if environment-scoped *variables* don't resolve for
+scheduled events here, do environment-scoped *secrets* (`SUPABASE_SERVICE_ROLE_KEY`, `SHARPAPI_KEY`, etc.) also
+fail for scheduled runs? If so, even fixing the gate won't let the pipeline run on schedule — the pipeline needs
+those secrets. Determine this before/with the fix.
+
+### Candidate fixes (apply after confirming via the resolve-step log)
+1. **Move the two gate flags to REPOSITORY variables** (`COVERED_GITHUB_SCHEDULER_ENABLED`,
+   `WNBA_INGESTION_ENABLED`): repository variables are reliably in `vars` for ALL event types. Minimal owner action.
+2. If environment SECRETS also don't resolve for scheduled events, move the production secrets to
+   **repository-level secrets** (repo secrets ARE available to scheduled runs), keeping the `production`
+   Environment for the branch restriction. (Larger change; confirm the need first.)
+3. Verify with the next naturally-scheduled run: duration should jump to ~60-160s and Cloudflare `pipelineRunId`
+   should advance to `<runid>.1` (unless a legitimate game-gate skip, which is acceptable).
+
+### State / rollback
+Both scheduler vars still `true`; schedules live; no competing scheduler; blocked routes 503; Cloudflare still
+serves both leagues (covered-picks 10, parlay-options 86, pid 29536975916.1 from the manual MLB proof). NO
+production write occurred from either scheduled run (both skipped cleanly). Rollback unchanged
+(`COVERED_GITHUB_SCHEDULER_ENABLED=false`). No manual proof reruns done. `.claude/launch.json` not committed.
+
+### Exact next action (fresh session, once GitHub API is healthy)
+"Read run 29541482572's 'Resolve run parameters' step log to confirm which gate line set skip=true. Then move
+COVERED_GITHUB_SCHEDULER_ENABLED and WNBA_INGESTION_ENABLED to REPOSITORY variables (and confirm whether env
+secrets resolve for scheduled runs; if not, move production secrets to repo-level). Then wait for the next
+scheduled cron and confirm it reaches the pipeline (duration ~60-160s, Cloudflare pid advances) or cleanly
+game-gate-skips. Do not rerun the manual proofs."
+
+## Session 27 — analyzer root-caused (Cloudflare config gap); board provenance OK; scheduled diag blocked by GitHub API outage (2026-07-16)
+
+**Verdict: BLOCKED AFTER PARTIAL ACTIVATION.** Three findings:
+
+### 1. Scheduled-run diagnosis — BLOCKED by GitHub Actions API outage (external)
+GitHub's Actions **log + jobs API are globally degraded right now**: `gh run view --log` returns 1 line and
+`--json jobs` returns non-JSON for BOTH the skipped scheduled run `29541482572` AND the known-good manual run
+`29536975916`. So I could not read step conclusions or the resolve-step echo to confirm WHY the scheduled run
+skipped (20s). The prompt's fallback (add a diagnostic step) does not help while the API is down — its output
+also goes to logs I can't read. **Unchanged inference from Session 26** (still UNPROVEN): the env-scoped gate
+flag isn't resolving to `true` on `schedule` events. **Next session (once GitHub API is healthy):** read
+`29541482572`'s "Resolve run parameters" step log to see which echo fired, then apply the smallest fix (likely:
+move `COVERED_GITHUB_SCHEDULER_ENABLED`/`WNBA_INGESTION_ENABLED` to REPOSITORY variables), and confirm whether
+env SECRETS resolve on schedule (they must, or the pipeline can't run scheduled).
+
+### 2. Manual Analyzer failure — ROOT CAUSE CONFIRMED (live), not a code bug
+Owner's "Could not analyze this parlay selection" is a **Cloudflare deployment-config gap**, verified live:
+`POST /api/parlay-analysis` on the deployed app (with 2 real legs) returns **HTTP 503
+`{"error":"SCORING_ENGINE_URL/SCORING_ENGINE_SECRET is not configured."}`**. Call path (verified in code):
+Manual Analyzer → `POST /api/parlay-analysis` (`app/api/parlay-analysis/route.ts`) →
+`analyzeParlaySelectionRemote()` (`lib/knowledge/scoring-engine-client.ts`) → requires
+`process.env.SCORING_ENGINE_URL` + `SCORING_ENGINE_SECRET`; if absent → 503; else calls the PRIVATE
+`covered-scoring-engine` Worker at `{SCORING_ENGINE_URL}/analyze-parlay` with `Authorization: Bearer <secret>`.
+The route + client ARE deployed (they returned the config error), so **no code change and no private-source
+exposure is needed** — the scoring math stays in the private Worker.
+**Fix (OWNER, Cloudflare-side):** (a) ensure the `covered-scoring-engine` Worker is deployed (its source is
+private; `wrangler deploy` from the private repo) with `SCORING_ENGINE_SECRET` set; (b) on the PUBLIC app's
+Cloudflare Worker, set env var `SCORING_ENGINE_URL` = the Worker's `https://…workers.dev` URL and secret
+`SCORING_ENGINE_SECRET` = the same bearer. Then `/api/parlay-analysis` returns analysis and the Manual Analyzer
+renders details. (Secret handling is an owner action — the agent does not set Cloudflare secrets.) No auth is
+required for analysis (public browsing stays open); save remains a separate authenticated path.
+
+### 3. Board provenance — VERIFIED good (both leagues)
+Live `covered-picks`: WNBA 7/7 and MLB 3/3 rows have full provenance — real player names, covered_score from
+scoring (e.g. Shakira Austin 90/Elite/High Confidence player_points; Bryce Harper 54/Lean/Medium Confidence
+batter_total_bases), labels + confidence present, `scored_prop_id`+`current_prop_id` set, event/market resolved,
+no dropped fields, both leagues represented. Scoring→persistence→snapshot→render provenance intact. (Deep
+per-table enrichment-input matrix not separately run; the successful manual proof runs + this snapshot evidence
+substantiate it.)
+
+### 4. Portrait mobile — RECORDED as the next product phase (not started)
+Owner: app is acceptable mainly in landscape; portrait mobile needs a dedicated phase. Scope (do NOT start now,
+do NOT broaden into a redesign): `/today`, Parlay Builder, selected legs, analysis details, save button,
+navigation, overflow, typography, tap targets, safe areas, sticky elements — at 320/375/390/430 CSS px. Sequence
+this AFTER: (1) scheduled-automation fix, (2) board provenance (done), (3) Manual Analyzer config fix.
+
+### State / rollback / compliance
+Both scheduler vars still `true`; schedules live; no competing scheduler; blocked routes 503; Cloudflare serves
+both leagues (covered-picks 10, parlay-options 86). No production write, no secret/source exposure, no secret
+movement, no code change this session (diagnosis + docs only). Rollback unchanged. `.claude/launch.json` not
+committed.
+
+### Exact next actions
+1. (GitHub API healthy) read run 29541482572 resolve-step log → fix scheduled gate (repo vars) → verify next
+   scheduled run reaches the pipeline or cleanly game-gate-skips.
+2. (Owner) configure Cloudflare `SCORING_ENGINE_URL` + `SCORING_ENGINE_SECRET` on the public app; ensure the
+   scoring-engine Worker is deployed → Manual Analyzer works.
+3. Then portrait-mobile phase.
+
+## Session 28 — scheduler PROVEN working (Session 26 was a false alarm); analyzer needs SCORING_ENGINE_URL format fix (2026-07-17 UTC)
+
+GitHub's API recovered. Read the actual logs — **correcting the Session 26 inference, which was WRONG.**
+
+### SCHEDULED AUTOMATION WORKS — verified end-to-end
+Step conclusions + pipeline JSON (not duration guesses) are authoritative:
+- `29540597005` (pre-PR#4): job-level skip (0s) — the real bug PR #4 fixed.
+- `29541482572` (post-PR#4, MLB, 23:09): ALL steps success **including "Run production pipeline"**; the pipeline's
+  own output shows `league=MLB, dryRun=false, status:skipped, window.shouldRun=false, reasonCode
+  "inside_close_buffer"` → a **clean GAME-GATE skip** (game too close to start). ACCEPTABLE. NOT a config skip.
+  (Session 26's "20s ⇒ skip=true gate bug" was a false alarm — it was checkout+install+game-gate-skip.)
+- **`29543076538` (schedule, 23:50 UTC, 123s): ran the FULL pipeline and PUBLISHED.** Cloudflare `pipelineRunId`
+  now `29543076538.1` (covered-picks + parlay-options). A genuine cron-triggered run reached the normal path,
+  ingested→scored→built→published, updated Cloudflare. **Scheduler is fully functional; no fix needed.**
+
+Enumerated skip paths for the schedule branch: scheduler flag → reads true (pipeline ran); WNBA flag → n/a (MLB);
+cron→league → mapped correctly (MLB derived, no "Unrecognized"); SHA → validated + verified; game gate → the only
+skip that fired (legitimately, inside_close_buffer). No workflow-config skip occurred.
+
+### Manual Analyzer — bindings now seen; SCORING_ENGINE_URL is MALFORMED
+Owner added `SCORING_ENGINE_URL` + `SCORING_ENGINE_SECRET` to the public app Worker. Live `POST
+/api/parlay-analysis` (2 real legs) now returns **HTTP 502 `{"error":"Invalid URL string."}`** (was 503 "not
+configured") — so both bindings ARE seen by the runtime. Root cause: `scoring-engine-client.ts` does
+`new URL("/analyze-parlay", SCORING_ENGINE_URL)`, which throws `Invalid URL` when the base lacks a scheme. So
+**`SCORING_ENGINE_URL` is not a valid absolute URL — almost certainly missing the `https://` prefix** (or has
+stray whitespace).
+**Fix (owner, instant, Cloudflare-side, no code/deploy):** set `SCORING_ENGINE_URL` to the FULL absolute URL of
+the deployed scoring Worker, e.g. `https://covered-scoring-engine.<account-subdomain>.workers.dev` (include
+`https://`, no trailing spaces, no path). Then re-test `POST /api/parlay-analysis`:
+- 200 + analysis JSON → fixed (Manual Analyzer renders).
+- 401 → the two `SCORING_ENGINE_SECRET`s (public app vs Worker) don't match — reconcile.
+- connection error → the `covered-scoring-engine` Worker isn't deployed/reachable — deploy it (private repo).
+Optional durable hardening (code, needs PR+merge+deploy): normalize the base URL in `scoring-engine-client.ts`
+(trim; prepend `https://` if no scheme) so a scheme-less binding can't recur. Not done this session (the
+owner-config correction is faster and sufficient).
+
+### Board provenance — still valid
+Verified in Session 27 (WNBA 7/7, MLB 3/3 full provenance). Current `covered-picks count=0` is LEGITIMATE: it's
+~00:12 UTC / 8pm ET, games started → no future qualifying picks; `parlay-options` still 39. Mechanism intact.
+
+### State / verdict
+Scheduler works (public-only, SHA-pinned, no leakage, shared concurrency); board provenance verified; blocked
+routes still 503; private scheduler off; no competing scheduler. **ONLY remaining blocker: the malformed
+`SCORING_ENGINE_URL` → Manual Analyzer 502.** Verdict: **BLOCKED AFTER PARTIAL ACTIVATION** (one owner-side URL
+correction from full). No production write/secret movement/code change this session (diagnosis + docs only).
+Portrait-mobile remains the recorded next product phase. `.claude/launch.json` not committed.
+
+### Exact next action
+Owner: correct `SCORING_ENGINE_URL` to a full `https://…workers.dev` value on the public app Worker; re-test
+`POST /api/parlay-analysis`. If 200, Manual Analyzer is restored → then FULLY ACTIVATED (scheduler already proven).
+
+## Session 29 — scoring Worker source verified & deploy-ready; deployment is owner-only (no CF creds) (2026-07-17 UTC)
+
+Owner confirmed there is NO `covered-scoring-engine` Worker deployed (only `covered-opennext-proof` exists). So
+`SCORING_ENGINE_URL` currently points at nothing valid → the 502 "Invalid URL"/unreachable. The scoring Worker
+must be DEPLOYED as a separate Worker, then wired.
+
+### Source verified (read-only) — deploy-ready, no code/migration change
+- Dir: `scoring-engine/`; Wrangler `name: covered-scoring-engine`; entrypoint `src/index.ts`; `workers_dev: true`;
+  `compatibility_date 2026-07-12`, `compatibility_flags ["global_fetch_strictly_public"]`.
+- Endpoints (verified in `src/index.ts`): `POST /analyze-parlay` (line 87), `POST /score-opportunities` (line 90),
+  else 404. `analyzeParlaySelectionRemote()` calls `/analyze-parlay` → MATCHES.
+- Auth: `SCORING_ENGINE_SECRET` bearer (401 if mismatch, 503 if unset). **Stateless** — no Supabase read/write,
+  no external providers, no Supabase service-role/provider keys needed. Only secret required: `SCORING_ENGINE_SECRET`.
+- Deploy script exists: `scoring-engine:deploy` = `wrangler deploy --config scoring-engine/wrangler.jsonc`.
+- Expected URL after deploy: `https://covered-scoring-engine.<account-subdomain>.workers.dev` (workers.dev + account subdomain).
+- (Minor clutter: a stray `scoring-engine/src 2/` duplicate dir exists; wrangler uses `main: src/index.ts`, so it
+  is ignored by deploy. Not a blocker.)
+
+### Why deployment is OWNER-ONLY this session
+`wrangler whoami` = NOT authenticated; no `CLOUDFLARE_API_TOKEN` in env, `.env.local`, or `.dev.vars`. The agent
+cannot deploy a Worker or `wrangler secret put` (credential/secret-handling). Everything else is verified/ready.
+
+### Exact owner steps (in the PRIVATE repo working tree)
+1. Deploy the Worker (uses your Cloudflare auth — `wrangler login` first, or set `CLOUDFLARE_API_TOKEN`):
+   `pnpm run scoring-engine:deploy`  → creates `covered-scoring-engine` at
+   `https://covered-scoring-engine.<account-subdomain>.workers.dev`.
+2. Set the Worker's secret (SAME value as the public app's `SCORING_ENGINE_SECRET`):
+   `npx wrangler secret put SCORING_ENGINE_SECRET --config scoring-engine/wrangler.jsonc`
+3. On the PUBLIC app Worker (`covered-opennext-proof`) runtime Variables & Secrets, set:
+   `SCORING_ENGINE_URL = https://covered-scoring-engine.<account-subdomain>.workers.dev`  (correct the current bad value;
+   do NOT point it at the app Worker). Ensure the public app's `SCORING_ENGINE_SECRET` == the Worker's (step 2).
+   Runtime binding changes read live (the 503→502 change proved bindings apply without a code redeploy).
+4. Re-test: `POST /api/parlay-analysis` with 2 legs → expect HTTP 200 + analysis JSON. Then load the Manual
+   Analyzer live and confirm details render. (401 → secrets mismatch; connection error → Worker not reachable.)
+
+### Automation / board / boundaries — RECONFIRMED healthy
+Scheduler vars both `true`; the proven full scheduled publish `29543076538` (pid `29543076538.1`) is live on
+Cloudflare (`parlay-options` published/39; `covered-picks`+`model-performance` fallback/0 — LEGITIMATE at ~00:20
+UTC / 8:20pm ET, games done, no future picks). Public GH Actions sole scheduler; private scheduler off; SHA
+pinning + shared concurrency active; `/api/cron/*` `/api/admin/*` `/api/inngest` all 503. Board provenance
+mechanism verified (Session 27, real rows).
+
+### Verdict: BLOCKED AFTER PARTIAL ACTIVATION
+Only blocker: the scoring Worker is not deployed (owner-only, steps above). Scheduler proven working; board
+provenanced; boundaries intact. Once the Worker is deployed + wired and the Manual Analyzer visibly renders →
+FULLY ACTIVATED. No production write/secret movement/code change this session (verify + docs only).
+Portrait-mobile remains the recorded next product phase. `.claude/launch.json` not committed.
+
+## Session 30 — dashboard deploy bundle for covered-scoring-engine prepared (read-only prep) (2026-07-17 UTC)
+
+Owner cannot use Wrangler (`npx` not found) → will deploy the private `covered-scoring-engine` Worker via the
+Cloudflare dashboard editor, which needs a single self-contained JS module. Prepared one (read-only prep; no
+deploy, no code change to `scoring-engine/src`, nothing committed except this note).
+
+- **Bundle (LOCAL, untracked, NOT committed):** `scoring-engine/dist/covered-scoring-engine.dashboard.js`
+  (18.9 KB). Built by transpiling `scoring-engine/src/{index,parlay-analysis,score-opportunities}.ts` with `tsc`
+  (types stripped; `types.ts` is 100% type-only) and concatenating into one ESM module (0 imports). Lives under
+  `scoring-engine/**` which is `privateOnly` (excluded from the public export); do NOT commit or publish it.
+- **Verified:** valid JS module (`node --check`); self-contained (0 import/require); has `export default` + both
+  routes + `SCORING_ENGINE_SECRET` bearer auth + both scoring fns; ZERO Supabase/provider refs (stateless).
+  Functional smoke test (local, mock env): no-auth→401, wrong-secret→401, unset→503, bad-body→400, valid→200 with
+  `AnalyzedParlay` shape (`legs,parlayWarnings,summary,canAddMore`) matching the client, unknown route→404.
+- Worker name `covered-scoring-engine`; compat date `2026-07-12`; flags `["global_fetch_strictly_public"]`;
+  `workers_dev: true` → URL `https://covered-scoring-engine.<account-subdomain>.workers.dev`. Request:
+  `POST /analyze-parlay` body `{"selected": ParlayOptionRow[]}` + `Authorization: Bearer <SCORING_ENGINE_SECRET>`;
+  response `AnalyzedParlay`. Compatible with `analyzeParlaySelectionRemote()`.
+- **Owner dashboard deploy:** Cloudflare → Workers & Pages → Create Worker → name `covered-scoring-engine` →
+  Edit code → paste the bundle file's contents → Deploy → Settings → Variables & Secrets → add Secret
+  `SCORING_ENGINE_SECRET` (same value as the public app) → set compat date `2026-07-12` + flag
+  `global_fetch_strictly_public` → then set the public app's `SCORING_ENGINE_URL` to the new Worker URL. No code
+  change, no migration, no Supabase/provider keys needed. Verdict unchanged: BLOCKED AFTER PARTIAL ACTIVATION
+  until deployed + wired + Manual Analyzer visibly renders.
+
+## Session 31 — scoring Worker DEPLOYED & verified live; only SCORING_ENGINE_URL binding value still wrong (2026-07-17 UTC)
+
+Owner deployed `covered-scoring-engine`. **Verified live & working** via direct requests to
+`https://covered-scoring-engine.<account-subdomain>.workers.dev`: `POST /analyze-parlay` (no bearer) → 401
+"Unauthorized"; `POST /` → 404 "Not found" route:"/". So the Worker + auth are correct and reachable.
+
+**Remaining blocker:** the public app's `POST /api/parlay-analysis` still returns **502 "Invalid URL string"** —
+the `covered-opennext-proof` worker's `SCORING_ENGINE_URL` value is not a valid absolute URL (Cloudflare/workerd's
+`new URL()` error). The Worker URL is confirmed, so the fix is exact:
+Set `SCORING_ENGINE_URL` on the `covered-opennext-proof` worker to EXACTLY (copy/paste, no quotes/spaces/path):
+`https://covered-scoring-engine.<account-subdomain>.workers.dev`
+Common causes of the current 502: missing `https://` scheme; literal quotes around the value; trailing/leading
+whitespace; a path appended. After correcting, re-test `POST /api/parlay-analysis` → expect 200 + AnalyzedParlay,
+then confirm the Manual Analyzer renders. If it STILL 502s with an exactly-correct value, apply the durable code
+fix: normalize baseUrl in `lib/knowledge/scoring-engine-client.ts` (trim + prepend `https://` if no scheme) —
+small, justified, via a public PR (owner merge + Workers Build redeploy). Verdict unchanged: BLOCKED AFTER PARTIAL
+ACTIVATION until the binding is corrected and the analyzer visibly renders. Automation + board remain healthy.
+
+## Session 32 — Manual Analyzer RESTORED; ALL gates pass → FULLY ACTIVATED (2026-07-17 UTC)
+
+Owner corrected `SCORING_ENGINE_URL`. **Verified end-to-end, API + live UI:**
+- `POST /api/parlay-analysis` (2 real legs) → **HTTP 200 ~200ms**, full `AnalyzedParlay`
+  (legs, parlayWarnings, summary{selected_leg_count, average_covered_score, average_match_confidence,
+  high_confidence_legs, strongest/weakest_leg, quality_label}, canAddMore).
+- Scoring Worker `covered-scoring-engine` live at `https://covered-scoring-engine.<account-subdomain>.workers.dev`
+  (direct: no-auth→401, unknown route→404). Public app reaches it, bearer accepted.
+- **Live UI (clean drive):** selected 2 distinct legs → `2/6 chosen` → the analyzer VISIBLY renders details:
+  "Overall Slip Quality: Data Limited", Average Covered Score 75.5, Average Match Confidence 0.95, High-Confidence
+  Legs 2, parlay caution "multiple legs from the same event", per-leg (Breanna Stewart · Less 19.5 player points ·
+  DraftKings · Covered Score 84 · Strong · Medium Confidence · Elevated Risk · strongly_resolved · 0.95) + leg
+  warnings. The old "Could not analyze this parlay selection" error is GONE. No parlay saved; no authenticated write.
+
+### FULLY ACTIVATED — all criteria met (verified)
+1. Scheduled runs reach the normal pipeline path: `29543076538` ran the FULL pipeline and published (Cloudflare
+   pid `29543076538.1`); `29541482572` cleanly game-gate-skipped (inside_close_buffer). Public-only scheduler.
+2. Exact private SHA pinning works (`3087979…`, verified each run).
+3. Public GitHub Actions is the sole scheduler; private scheduler off; no Vercel/CF-cron/Inngest schedule.
+4. No secret or private-source leakage (Worker code deployed via dashboard from a local privateOnly bundle;
+   public export unchanged; logs sanitized).
+5. Board provenance verified: parlay-options rows are scored/enriched (covered scores, labels, match confidence
+   0.95 visible + consumed by the analyzer). (covered-picks count varies by time-of-day; mechanism intact.)
+6. Manual Analyzer visibly renders valid analysis details (above).
+7. Live UI acceptance passes: /today, board, Parlay Builder, analyzer all render; blocked routes 503.
+
+### Product completeness note
+FULLY ACTIVATED = the automation + analysis pipeline is operational. **The app is NOT declared product-complete**:
+the portrait-mobile responsiveness phase remains outstanding (recorded below/prior sessions) — it is the next
+product phase (surfaces: /today, Covered Picks/Parlay Builder cards, filters, selected-leg state, analysis
+details, save button, nav, overflow, typography, tap targets, safe areas, sticky controls; widths 320/375/390/430
+CSS px). Begin only now that automation, analyzer, and provenance are green.
+
+### Rollback (unchanged)
+Kill automation: set public `COVERED_GITHUB_SCHEDULER_ENABLED=false` (instant no-op) / revert
+`COVERED_PRIVATE_PIPELINE_SHA`. Analyzer: it degrades to a sanitized error if the Worker/URL is unset. Private
+scheduler stays disabled.
+
+## Session 33 — Portrait-mobile assessment: app is ALREADY largely responsive; light polish only (2026-07-17 UTC)
+
+Started the portrait-mobile phase by GROUNDING it in live testing (per "distinguish facts from assumptions")
+rather than assuming a broken layout. **Verified finding: the live app is already substantially
+portrait-responsive** — the premise "only good in landscape" is not borne out.
+
+### Evidence (live app, real widths)
+- `/today` @375: **0px horizontal overflow**, no over-wide elements, 16px body font, full-width stacked filters,
+  proper bottom tab bar. Screenshot: clean.
+- `/slip-analyzer` @375 and @320: **0px overflow**; only multi-col element is the filter bar (flex-wrap, ~168px
+  items) — no content overflow. With **2 legs selected at 320px**, the analysis panel renders fully
+  (`OVERALL SLIP QUALITY`, avg scores, per-leg detail) with 0 overflow and no error. Screenshots: clean.
+- Existing mobile CSS in `app/globals.css` is deliberate and fairly complete: `.mobile-nav` fixed bottom tab bar
+  with `padding-bottom: max(8px, env(safe-area-inset-bottom))` (safe areas handled, :369); sticky
+  `.knowledge-filter-bar` on mobile (:360); `.knowledge-builder-layout { grid-template-columns: 1fr }` single
+  column (:362); `.mobile-header`/`.mobile-nav` shown only on mobile (:101); flex-wrap filters (:214).
+
+### Verified vs. assumption
+- VERIFIED FACT: no horizontal overflow, sensible single-column stacking, readable typography, working analyzer,
+  and safe-area-aware bottom nav at 320/375/390 portrait.
+- The owner's impression of a landscape-only app is NOT reproduced in direct testing.
+
+### Small, optional polish punch-list (NOT a redesign; owner's call given each needs a deploy cycle)
+1. `.mobile-nav__item small { font-size: 8px }` (globals.css :369) — nav sub-labels are very small; consider 10–11px.
+2. Filter flex-wrap can leave one filter alone on a row (e.g. "Best score") — cosmetic; could full-width the last
+   odd item or tune `flex`/`min-width` at narrow widths.
+3. Bottom-nav item tap height measured ~33px (cells are ~65px wide) — acceptable; could pad to ≥44px for a11y.
+4. Not yet spot-checked at 430px specifically (320/375/390 verified clean; 430 is wider so lower risk).
+
+### Recommendation
+No portrait redesign is warranted. The above are minor, subjective polish items; each would require a
+private→public-PR→Workers-Build deploy cycle. Recommend the owner decide whether to batch them into a small
+"mobile polish" PR. **Do NOT declare product-complete** language changes here — this only downgrades the
+portrait phase from "needed redesign" to "optional light polish". No code change made this session
+(read-only assessment + docs). Automation + analyzer remain FULLY ACTIVATED. `.claude/launch.json` not committed.
+
+## Session 34 — Covered Picks filter fixes + mobile compaction + data-quality findings (2026-07-17 UTC)
+
+Owner-reported issues on Covered Picks / Builder. Changes (public-safe components + CSS; validated):
+
+### Fixed (code)
+- **Confidence filter corrected** (`covered-picks-shell.tsx`): options were `High/Solid/Limited/Low` — but the
+  real vocabulary (`confidenceLabelFor` in `adapters/base.ts`) is `High/Medium/Low Confidence` + `Data Limited`.
+  "Solid"/"Limited" never matched any row; "Medium Confidence" (the most common label — 14/39 live) was MISSING.
+  Now `["", "High Confidence", "Medium Confidence", "Low Confidence", "Data Limited"]`.
+- **Default minimum covered score 50 → 70** (`covered-picks-shell.tsx`, per owner).
+- **Builder hides incomplete-scoring props** (`parlay-builder-shell.tsx`): `onlyScored` only checks
+  `latest_scored_prop_id`; 17/39 live parlay-options rows have a scored row with NULL `covered_score`
+  (candidate/incomplete state) and rendered with no score. Added `.filter(r => r.covered_score != null)` to the
+  manual catalog so only genuinely-scored props show.
+- **Mobile filter bar compaction** (`globals.css` @≤760px): the 8 Covered Picks filters were full-width stacked
+  (a tall wall before any content — owner's "too much going on"). Now a **2-column grid** (date + search span full
+  width; 6 selects in 2 cols) — roughly halves the filter height.
+
+### Filter-options-vs-data validation (owner ask) — result
+- Confidence: was broken → FIXED (above).
+- Market + Sportsbook: already **derived dynamically from board data** (`useMemo` over `data.rows`) → always match. ✓
+- Risk (`Low/Moderate/Elevated/High Risk`): matches `riskLabelFor` vocabulary. ✓  Sport (Baseball/Basketball): ✓
+- League: static `MLB/WNBA/NBA` — NBA is off-season (never present today) but a valid registry league. Minor;
+  left as-is (could be made data-driven later).
+
+### Data-quality findings (NOT code bugs; reported)
+- **0 Covered Picks right now (owner #6):** live covered-picks is `fallback, 0 rows`, publishedAt 2026-07-16T23:52
+  (last scheduled run) — it's 21:05 ET; games have started, so the strict **publishable** gate yields 0 FUTURE
+  publishable picks. Legitimate late-evening state (it had 10 rows earlier today). It repopulates during pregame
+  windows. parlay-options (looser gate) still has 39.
+- **Incomplete scoring (owner #7):** root cause = 17/39 parlay-options props have a `scored_props` row with NULL
+  `covered_score` (scoring created a candidate row that never finished computing). The builder now hides them
+  (client-side). The DEEPER fix (why the scoring pipeline persists incomplete scored_props) is a private-scoring
+  data-quality item for a separate pass — not addressed here.
+
+### Housekeeping
+- Redacted the account-specific `*.workers.dev` subdomain (`corey`+`093011`) from `docs/AGENT_HANDOFF.md` +
+  `docs/PROJECT_CONTEXT.md` — it had leaked into these EXPORTED docs across sessions 28-31, failing the session-12
+  hostname regression test. Now `<account-subdomain>` placeholder; test green.
+
+### Validation
+typecheck clean; `pnpm test` 266 pass / 0 fail / 1 skip; `pnpm build` OK; boundary audit 0 violations; public
+export PASS (0 secret findings). Next: sync these public-safe changes to the public repo via PR → owner merge →
+Workers Builds deploy → re-verify on mobile at 320/375/390/430. No production write; `.claude/launch.json` not committed.
+
+## Session 35 — PR #5 live-verified (deploy, filters, mobile, automation) — all pass (2026-07-17 UTC)
+
+Read-only live verification of PR #5 after merge. **All checks pass.**
+
+### Deployment
+- Public `main` tip: `088527f` (the PR #5 merge commit) — confirmed live via Cloudflare Workers Builds.
+- `covered-production-pipeline.yml` unchanged on public main: `schedule:` (both crons), `contents: read`,
+  `environment: production`, `covered-production-sharpapi` concurrency (`cancel-in-progress: false`),
+  `COVERED_PRIVATE_PIPELINE_SHA` fail-closed guard, scheduler gate — all byte-identical to pre-merge.
+- Production env vars unchanged: `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`,
+  `COVERED_PRIVATE_PIPELINE_SHA=3087979…`, spacing 6500ms, cap 8/min.
+
+### Automation health (unaffected by the app-code merge, as expected)
+4 consecutive `schedule` runs `success` since the last checkpoint, incl. one at 03:48Z (~1h after merge):
+`29553266513, 29548321370, 29544159875, 29543076538`. Inspected `29553266513` (MLB): pipeline `status:"skipped"`,
+gate `shouldRun:false, reasonCode:"outside_pregame_window"` — a clean, legitimate game-gate skip (very late
+night/early morning, no qualifying event), NOT a config or workflow-level skip. Scheduler unaffected by the PR.
+
+### Live filter verification (Covered Picks, all 4 portrait widths: 320/375/390/430)
+- Default minimum Covered Score: **"70+ Covered Score"** ✓ (320px, confirmed via DOM).
+- Confidence options exactly: `Any confidence, High Confidence, Medium Confidence, Low Confidence, Data Limited`
+  — no "Solid"/"Limited" ✓. "Medium Confidence" is selectable (tested: select fires, no crash, no overflow) ✓.
+- Risk options confirmed correct (`Low/Moderate/Elevated/High Risk`) via the live empty-state test.
+- Filter bar renders as a **2-column CSS grid** at 320 (140px×140px) and 375 (167.5px×167.5px) ✓.
+- Horizontal overflow: **0px at 320, 375, 390** (checked directly) and **0px at 430** (checked on the builder page).
+- Date input + search remain full-width/usable (unchanged, span the grid).
+
+### Live scored-row filtering verification (Parlay Builder, 430px)
+- Raw `/api/knowledge/parlay-options`: 39 rows total, **22 with a real covered_score, 17 with null** (unchanged
+  from pre-merge — this is a data-layer fact, not something the UI fix changes).
+- Rendered builder cards (10 visible, deduped/collapsed from the 22 scored rows): **every card has a real,
+  non-blank numeric Covered Score** (50, 50, 48, 47, 46, 45, 45, 44, 44, 43) with correct labels — no null-score
+  card leaked through. Card selection tested and works (`+ Add leg` → `1/6 chosen`, 0 overflow).
+- These are genuinely fresh future WNBA props (Jul 17, 7:30-7:40 PM ET, tomorrow's slate) — confirms the
+  pipeline is actively producing new scored data, not stale.
+
+### Live API health
+`covered-picks`: fallback/0 — **legitimate**: confirmed via the scheduled run's own gate log (0 qualifying future
+publishable events at this hour, not a bug). `parlay-options`: published/39. `model-performance`: fallback/0
+(legitimate, no graded rows). `/api/cron/*`, `/api/admin/*`, `/api/inngest`: all still 503.
+
+### Remaining work (explicitly NOT resolved by PR #5)
+- **PR #5 is an incremental mobile improvement only** (filter-bar compaction). The full portrait-mobile pass
+  (Session 33's punch-list: nav label size, odd-filter-wrap spacing, tap-target height, broader spot-checks) is
+  still OUTSTANDING — not started.
+- **The null-score data-quality issue is UNRESOLVED at the source.** PR #5 only hides null-covered_score rows in
+  the Parlay Builder UI; it does not fix *why* the scoring pipeline persists `scored_props` rows with a NULL
+  `covered_score` (17/39 live, unchanged post-merge) or on Covered Picks/other surfaces. That remains a private-
+  scoring pipeline investigation for a separate, dedicated pass.
+
+No production write, no workflow/secret/variable/concurrency/SHA-pinning change, no scheduler modification this
+session — read-only verification + docs only. `.claude/launch.json` and `scoring-engine/dist/` not committed.
+
+## Session 36 — ROOT CAUSE: recurring pipeline never refreshes enrichment inputs (owner-flagged low scores) (2026-07-17 UTC)
+
+Owner observed: covered scores are mostly <70 and asked whether this reflects incomplete data. **Verified: YES,
+confirmed via code trace + bounded live queries. Read-only investigation only, no code/production change.**
+
+### Verified evidence (Atlanta Dream @ Toronto Tempo, 2026-07-17, 43 scored prop rows across 11 players)
+- 100% of scored props carry BOTH `missing_matchup_context` AND `stale_features`; all stuck at `prop_state:
+  "candidate"` (never `publishable`).
+- `confidence_score` (max 45, formula: `data_quality_score + marketScore + matchupScore*0.35`) running 18-29 —
+  well under ceiling — while `edge_score` (9-27, the real statistical signal, NOT data-quality-affected) is often
+  healthy. `covered_score = edge_score + confidence_score`, so the confidence penalty directly suppresses scores
+  that would otherwise clear 70 (e.g. Isabelle Harrison rebounds: edge 27.3, confidence only 18.2 -> score 46).
+- `basketball_opponent_context`: NO correct row exists for this specific matchup (the only row returned for these
+  two teams points to an unrelated/stale opponent pairing) -> guarantees `missing_matchup_context` on every prop.
+- `player_recent_features`: stale (>24-120h past the ~12h `stale_after` window) or entirely absent for 5/11 players.
+- 9/11 players lack a `wehoop-wnba` external ID (the identity key needed to ingest fresh game logs).
+
+### Root cause (verified from source, not inferred)
+`lib/knowledge/enrichment/jobs.ts`'s `runLivePreScoreRepair()` (called as the "repair" step in
+`lib/ops/github-actions-pipeline.ts`) explicitly DEFERS matchup/team-context computation to a separate
+"background refresh" job (own source comments: "background refresh should handle it") rather than computing it
+live. That background refresh (`refresh_player_game_logs` / `refresh_recent_features` /
+`refresh_basketball_matchup_features`) is:
+- NOT invoked anywhere in the new recurring public workflow `covered-production-pipeline.yml` (zero references;
+  it only runs sharp-ingest -> repair(defers) -> score -> board -> publish).
+- Only reachable via the OLD dedicated workflows `wnba-data-ingestion.yml` / `mlb-enrichment-backfill.yml`, both
+  `privateOnly` (excluded from the public repo) AND gated by the PRIVATE repo's `COVERED_GITHUB_SCHEDULER_ENABLED`,
+  confirmed still `false`.
+**Net: nothing, anywhere (public or private), currently refreshes player recent-features or matchup/opponent
+context on a recurring basis.** The one batch of fresher data (updated ~2026-07-16 01:5x, referenced in earlier
+sessions as a one-time manual WNBA enrichment fix) was NOT a recurring job; it is now stale with nothing behind it.
+
+### Owner's framing confirmed
+"We should have all the data we need or be able to pull it" is correct — this is a MISSING PIPELINE STAGE in the
+new Candidate F automation, not a fundamental data-unavailability problem. The refresh jobs exist and work (per
+the earlier one-time fix); they are simply never invoked by the new recurring schedule.
+
+### NOT implemented this session (requires explicit scope authorization)
+Adding an enrichment-refresh stage to the recurring public pipeline is a real scope decision: new provider calls
+(SharpAPI/wehoop), additional GH Actions minutes, a job class this project's governance has repeatedly gated
+behind explicit approval. No code/workflow/production change made. Read-only diagnosis + docs only.
+
+### Exact next step (owner decision needed)
+Scope + (if approved) implement adding `refresh_player_game_logs` / `refresh_recent_features` /
+`refresh_basketball_matchup_features` (bounded, current-window-scoped, matching the existing job design) into the
+recurring public `covered-production-pipeline.yml`, or as a separate lower-frequency scheduled stage, with an
+explicit cost/frequency bound (SharpAPI request budget, Actions minutes). Not started.
+
+## Session 37 — Enrichment repair IMPLEMENTED + pre-promotion audit (bounded, stale-only, failure-aware) (2026-07-17 UTC)
+
+Implemented the missing enrichment stage from Session 36, then ran a full pre-promotion audit. **Private commits
+only, pushed to `origin codex/public-repo-repair`. `COVERED_PRIVATE_PIPELINE_SHA` NOT advanced. No real
+write-capable production proof was run. No migration, no backfill, no scheduler/config change.**
+
+Private commits (on `codex/public-repo-repair`, after Session 36 tip `9eb08e4`):
+- `2e7d563` — wire bounded background enrichment into `runLivePreScoreRepair`.
+- `e245a71` — bound the WNBA whole-season download to stale-only; surface systematic enrichment failures.
+- `66a994b` — correct WNBA identity-completeness label (SportsDataverse, not wehoop).
+
+### Corrected root cause (supersedes the Session 36 wehoop framing)
+Session 36 partly mis-framed the cause as missing `wehoop-wnba` IDs. Corrected, verified from source:
+- The recurring pipeline DOES run a repair phase before scoring. The real defect is a **circular gate**:
+  `inspectLiveRepairPreflight` (`lib/knowledge/enrichment/jobs.ts`) refuses to recompute
+  `basketball_team_context`/`basketball_opponent_context` (and MLB matchup support rows) whenever they are
+  stale/missing, deferring to "a background refresh" — but that background refresh lives only in the
+  `privateOnly` workflows (`wnba-data-ingestion.yml`, `mlb-enrichment-backfill.yml`) excluded from the public
+  pipeline. Once context went stale it could never self-heal.
+- **`wehoop-wnba` IDs are NOT the blocker.** WNBA matchup routing already defaults to `espn-sportsdataverse`
+  (`resolveWnbaDataProvider()`), SportsDataverse identity resolution is provider-agnostic (`ensurePlayer`:
+  provider mapping → normalized-name alias → name variants; stores `sportsdataverse-wnba` IDs, never wehoop),
+  and `refresh_recent_features` reads `player_game_logs` generically by `league_id`/`player_id`. The legacy
+  `WeHoopWnbaAdapter`/`stats.nba.com` path is confirmed unreachable from GitHub Actions and is untouched/vestigial
+  (the preflight's legacy playerLogs stage now no-ops because SDV supplies the logs).
+
+### The fix (`runBoundedBackgroundEnrichment`, called before the preflight inside `runLivePreScoreRepair`)
+- **WNBA**: `ingestSportsDataverseWnbaSeason` (SDV, ESPN-backed parquet) populates `player_game_logs`/
+  `team_game_logs`, then the existing ESPN-routed matchup refresh recomputes team/opponent context. This is what
+  breaks the circular gate (it runs BEFORE the preflight).
+- **MLB**: the six existing support-refresh functions (lineups, starting pitchers, weather, ballparks, handedness,
+  bullpen) are invoked; they feed the preflight's `refreshMlbMatchupFeaturesJob`. `statsapi.mlb.com`/Open-Meteo/
+  BigBalls are confirmed reachable from GitHub Actions (`docs/MLB_PROVIDER_EVIDENCE_AUDIT.md`).
+
+### Recurring cost bounds (Phase 1–2, measured/verified)
+- **WNBA download is stale-only.** `ingestSportsDataverseWnbaSeason` downloads three whole-season parquet files
+  (schedule 208.5 KB + player_box 95.0 KB + team_box 39.9 KB = ~343 KB, measured 2026-07) on every call; its
+  "incremental" watermark bounds writes, not the download. `planWnbaBackgroundEnrichment()` (pure, unit-tested)
+  gates the download: it runs ONLY when a completed game for the referenced teams is newer than the newest
+  already-logged game. The cheap Supabase-only matchup recompute runs only when referenced-team context is
+  missing/stale. A fully-current run skips BOTH substages (zero download, zero writes). Live read-only profile
+  (Atlanta Dream @ Toronto Tempo, 2026-07-17): logs at 07-10 vs a completed game 07-14 → `shouldIngest:true` this
+  run; a run 20 min later (after catch-up) → both substages skip. Once triggered, the SDV ingestion writes are
+  league-wide-incremental (all teams since the watermark) and the matchup recompute is league-wide — both bounded
+  by league size + the incremental window, never historical.
+- **MLB is bounded by design.** Only lineups + weather make external calls, both freshness-skipped (confirmed
+  lineups; weather TTL 180 min) and per-run capped (≤3 events / ≤cap events). pitchers/ballparks/handedness/
+  bullpen are Supabase-only compute with rotating-window write caps (≤16/≤24/≤48/≤24 rows). No function does
+  historical work. When no qualifying props exist, the whole stage skips at the top guard. No MLB code change.
+
+### Freshness guards (exact)
+- WNBA download: `maxLoggedGameDate >= mostRecentPastGameDate` (referenced teams) → skip. Completed = event
+  `start_time < now − 3.5h`.
+- WNBA matchup recompute: every referenced team has `basketball_team_context.updated_at` fresh within 24h
+  (matches `LIVE_REPAIR_THRESHOLDS.WNBA.basketballContextMinutes`) → skip; forced when new logs were written.
+- MLB: each substage's own internal freshness skip (lineups confirmed-skip, weather TTL) + rotating windows.
+
+### Readiness / failure semantics (Phase 3)
+"Fail soft, never blocks scoring" was too permissive: a systematic enrichment failure was reported as a healthy
+`ok` repair step. Now:
+- the background stage returns a precise status — `ok` (or clean fresh-skip) / `warning` (partial: some MLB
+  substages errored, or a degraded WNBA matchup) / `warning` (systematic: all MLB substages errored / caught
+  throw). It never hard-fails (scoring must still run and never suppress legitimately low scores).
+- the repair STEP status now reflects the worst repair sub-stage status (added `warning` to
+  `GitHubActionsPipelineStepStatus`) — visible, non-blocking. The GH step summary prints the background-enrichment
+  status + message.
+- publication already retains prior snapshots (`priorLatestSnapshotRetained`) and sets `publicationCompleted:false`
+  on any unsafe build, so it never falsely claims full enrichment completion — verified, unchanged.
+
+### Manual Analyzer — independently re-verified live this session (unaffected by enrichment changes)
+- `covered-scoring-engine` Worker deployed: `POST /analyze-parlay` without auth → 401; unknown routes → 404.
+- App `POST /api/parlay-analysis` (empty selection) → HTTP 200 with a valid analysis payload (not 503/401) →
+  `SCORING_ENGINE_URL` correct AND both Workers share the secret AND the analyzer renders analysis.
+
+### Validation (Phase 6)
+typecheck PASS · full suite 286 pass / 1 pre-existing skip / 0 fail · production build PASS (exit 0) ·
+public-boundary audit + secret scan + deterministic export checks PASS (part of `pnpm test`). `pnpm run lint`
+fails pre-existing and unrelated: repo is on **Next 16.2.10 which removed `next lint`**, there is no
+`eslint-config-next` dep and no ESLint config, no CI/governing validation runs lint, and the error is
+invocation-level (`no such directory: .../lint`) so `.ts` edits cannot cause it.
+
+### SAFE PROMOTION PLAN (Phase 7 — NOT executed; owner-gated)
+No secure manual SHA override is present, so use this sequence when authorized:
+1. Record current known-good `COVERED_PRIVATE_PIPELINE_SHA` (for rollback).
+2. Set `COVERED_GITHUB_SCHEDULER_ENABLED=false` (public production Environment).
+3. Confirm no scheduled run is in-flight.
+4. Set `COVERED_PRIVATE_PIPELINE_SHA` to the validated tip on `codex/public-repo-repair` (currently `66a994b`,
+   or a later validated fix commit).
+5. Run one WNBA dry diagnostic (`--dryRun true`) against the new SHA.
+6. Run one MLB dry diagnostic (MLB behavior changed, so include it).
+7. During natural qualifying windows, run exactly one bounded real proof per league (`workflow_dispatch`,
+   `--dryRun false`, single league), capturing before/after freshness + risk-flag counts + provider calls +
+   Supabase rows + bytes + runtime.
+8. Verify enrichment runs before scoring, matchup context corresponds to the correct event, stale/missing flags
+   clear only when genuinely repaired, low scores are NOT artificially inflated, and both leagues still function.
+9. On success: retain the new SHA, then re-enable `COVERED_GITHUB_SCHEDULER_ENABLED=true`.
+10. On failure: restore the previous SHA (step 1) BEFORE re-enabling scheduling.
+
+### State
+`origin/main` unchanged (`23f66595…`). `COVERED_PRIVATE_PIPELINE_SHA` unchanged (still the prior known-good
+commit; recurring schedules keep running the OLD SHA). No real proof of the new commits has occurred. Verdict:
+**READY FOR BOUNDED PRODUCTION PROOF** (bounds proven, failures represented, tests/build green, rollback explicit).
+
+## Session 38 — Production promotion of bounded enrichment: coverage bug found+fixed, MLB proven, WNBA pending (2026-07-17 UTC)
+
+Executing the owner-authorized promotion of the bounded enrichment. Scheduler PAUSED during promotion.
+**ROLLBACK_PRIVATE_PIPELINE_SHA = `3087979d00932cadfe57e8c57c2e63ab0d41169d`** (the prior production SHA).
+
+### Rollback state (Phase 1) + config changes (Phases 2-3)
+- Candidate SHA (initial): `11bbd13507a6940ce7e00468611780677799c493`.
+- Public production Environment (repo `CoreyTenacity/Covered-Prop-Analysis`):
+  - `COVERED_GITHUB_SCHEDULER_ENABLED`: `true` -> **`false`** (paused 16:35:52Z). Manual dispatch unaffected
+    (workflow gates the kill-switch only on scheduled runs).
+  - `COVERED_PRIVATE_PIPELINE_SHA`: `3087979d…` -> `11bbd13…` -> **`db4912f02054da80f2bf140c53ec8e7d767f9433`**
+    (re-pinned after the coverage fix, 16:49:24Z).
+- No active/queued runs at pause; shared concurrency group clear.
+
+### Dry diagnostics (Phase 4) — candidate SHA, no writes
+- WNBA run `29596836734`: SHA `11bbd13` checked out+verified; game gate `shouldRun:false` (outside window,
+  next event 23:30Z) -> skipped. Correct.
+- MLB run `29596842921`: SHA verified; `shouldRun:true` (1 qualifying event 17:35Z); planned steps
+  window/sharp/repair/score all `dry-run`; no writes, no snapshot.
+
+### Real MLB proof — TWO runs (coverage bug found, fixed, re-proven)
+**Proof 1 (SHA 11bbd13, run `29597028063`):** background enrichment `skipped` — "no active teams or events
+targeted"; the WHOLE repair phase (identity/playerLogs/recentFeatures/matchup/background) skipped;
+`activePropCount:0`; 40 candidates, 0 publishable. **Root cause (pre-existing bug):** `loadActivePropCoverage`
+fetched active props `orderBy start_time.asc limit 400` then post-filtered to the current window. MLB carries a
+large stale-active backlog (past-game rows still `active=true`); the oldest-400 page was ALL past games -> window
+post-filter matched nothing -> empty coverage -> entire repair phase inert. This is why scores never improved
+even after wiring the enrichment.
+**Fix (commit `db4912f`):** bound the query itself to `start_time >= now-2h`. Verified read-only: MLB coverage
+0 -> 60 (later 101) scoped; WNBA 0 -> 60 scoped. typecheck + full suite (286 pass/1 skip/0 fail) + build clean.
+**Proof 2 (SHA db4912f, run `29597712952`, ~4.7 min):** steps sharp `ok` / repair `warning` / score `ok` /
+board `ok`. `activePropCount:101` (fix confirmed). Background enrichment RAN: status `warning` — 1 degraded
+substage (weather). Substage results: lineups inserted 0 / eventsProcessed 3 (≤3 cap; lineups not posted 40min
+pre-game — honest), pitchers inserted 3, ballparks upserted 19, handedness inserted 48 (≤48 cap), bullpen 0,
+**weather ERROR** = pre-existing defect: `mlb_weather` insert violates NOT NULL `game_id` (Postgres 23502) —
+refreshMlbWeather omits game_id. Correctly isolated as a degraded warning (proves Phase 3 semantics on a real
+failure); flagged as a separate follow-up. identityRepair scanned 95 / fullyMatched only 13 / stillUnmatched 45.
+Score: 40 candidates, 0 publishable — blocked by `unmatched_team`/`missing_opponent` (UPSTREAM MLB identity
+matching, out of scope) + genuinely-unavailable pre-game inputs; scores NOT forced. Publication safe:
+covered-picks `fallback` (0 publishable, prior retained), parlay-options `published` 84 rows/149KB. No 429s,
+no crashes.
+**MLB verdict: enrichment implementation PROVEN** (runs, bounded, writes real data, isolates failures, honest
+flags). MLB publishability is upstream-identity-limited, not an enrichment fault.
+
+### WNBA bounded real proof — MATERIALLY FAILED (run `29601049420`, SHA db4912f verified, ~3.2min)
+Owner-authorized after review. Event `79233888-a0d5-41ac-8a5d-c7fd1249379f` "Atlanta Dream at Toronto Tempo"
+(23:30Z) — the exact Session 36 low-score event. `activePropCount:71` (coverage fix confirmed for WNBA too).
+Stages: background `warning` / playerLogs `warning` (legacy wehoop, inert/expected) / recentFeatures `ok` /
+matchup `skipped` / identity `ok`.
+
+**Root failure: `parquet unsupported compression codec: ZSTD`.** SportsDataverse's parquet files (schedule/
+player_box/team_box) are ZSTD-compressed and `hyparquet` in the GitHub Actions runtime cannot decode ZSTD, so
+`ingestSportsDataverseWnbaSeason` throws (after downloading ~343 KB). The throw is caught by the stage's outer
+handler (`warning`, non-blocking) but the matchup recompute never runs. Consequences:
+- `team_game_logs` watermark did NOT advance (still newest game_date 2026-07-10);
+- opponent/matchup context remained absent (0 rows); `missing_matchup_context` persisted on all rows;
+- the stale-only planner's watermark cannot advance, so `shouldIngest` stays true -> it would re-download the
+  whole season + re-fail EVERY scheduled run (repeated failed downloads). Repeat-work bounding is defeated for
+  the SDV substage specifically (recentFeatures freshness-skip still bounds correctly).
+
+**Separate coverage/recent-features improvement (real, but insufficient to retain):** because the coverage fix
+un-blocked identity + recentFeatures, this same run improved WNBA board availability — scored rows 40 -> 66,
+publishable 0 -> 49, published covered-picks 0 -> 28 (parlay-options 36), `stale_features` 40 -> 17. This is
+valuable evidence that the coverage/recent-features changes help, but it is **coupled to the broken/unproven SDV
+implementation**; a candidate with a known recurring provider-stage failure (repeated full-season download +
+failure every run) must not be retained merely because a different part of the patch improved output.
+
+### DECISION: ROLLED BACK AFTER FAILED PROOF (owner-directed)
+- `COVERED_PRIVATE_PIPELINE_SHA`: `db4912f…` -> **restored `3087979d00932cadfe57e8c57c2e63ab0d41169d`** (17:56:08Z).
+- `COVERED_GITHUB_SCHEDULER_ENABLED`: kept `false` during restore, then **re-enabled `true`** (17:56:29Z).
+- Pause verification: the one scheduled run during the pause (`29599827389`, 17:23Z) correctly SKIPPED
+  (resolve step "Scheduler disabled … skipping"; all pipeline steps `skipped`); no scheduled run executed db4912f.
+- **Scheduled-run verification (`29604385112`, 18:35Z, MLB):** checked out `HEAD is now at 3087979` /
+  `EXP=3087979d…` / "pinned correctly"; **0 db4912f references**; reached the normal game gate
+  (`qualifying_future_event`, shouldRun:true); no overlap. Rollback confirmed effective end-to-end.
+- Published snapshots NOT manually altered — the 28-row WNBA snapshot may remain until ordinary known-good
+  publication replaces it (recurring runs on 3087979d will do so).
+
+### Candidate `db4912f` classification
+- Coverage/recent-features fix (`loadActivePropCoverage` window scoping): VALUABLE, proven to improve both leagues'
+  board availability — but coupled to the broken SDV path in this SHA. Preserve and test independently.
+- MLB support-refresh wiring: PROVEN bounded/working (writes real rows; weather substage a separate pre-existing
+  `game_id` NOT NULL defect, owned by a parallel agent's follow-up).
+- WNBA SportsDataverse ingestion: BROKEN in the GH Actions runtime (ZSTD). NOT safe for recurring production.
+
+### Required ZSTD follow-up scope (PREPARE, do not implement while the parallel MLB-weather agent edits this branch)
+A. Preserve + independently test the coverage/recent-features fix (decouple from SDV).
+B. Repair SportsDataverse parquet ingestion: confirm how `hyparquet` selects compression codecs; add/register a
+   ZSTD decoder (e.g. `hyparquet-compressors`) or swap to a runtime-compatible parquet parser; add a ZSTD-
+   compressed fixture; prove schedules + player_box + team_box all parse; prove the ingestion watermark advances;
+   prove the next-20-min plan then SKIPS the repeated download; prove matchup context is rebuilt for the correct
+   event. C. Do NOT reintroduce WeHoop. D. Do NOT promote another SHA until: ZSTD parses in the GH Actions runtime,
+   team_game_logs advance, opponent/matchup context persists, `missing_matchup_context` falls for repaired rows,
+   and repeat-work bounding passes.
+
+### State after rollback
+Production SHA = `3087979d…` (known-good, restored). Scheduler = `true`. Recurring automation runs the prior
+known-good pipeline. No code changed this session on top of db4912f. Branch `codex/public-repo-repair` tip
+remains `db4912f` (a parallel agent is working the MLB-weather fix on it — do not reset/rebase/amend/force-push).
+**Verdict: ROLLED BACK AFTER FAILED PROOF.**
+
+## Session 39 — Clean replacement candidate: ZSTD decode + MLB weather game_id + coverage repair (2026-07-17 UTC)
+
+Prepared ONE clean, fully-tested replacement candidate after the Session 38 rollback, separating the three
+concerns that were conflated in the failed proof. **Production untouched: still pinned to
+`3087979d00932cadfe57e8c57c2e63ab0d41169d`, scheduler enabled on that known-good SHA. No production config
+changed, no proof run this session.** Candidate SHA: **`c4e8e47156385712af6d5afc4982655b0e169cd8`** (pushed to
+`origin codex/public-repo-repair`).
+
+### 1) ZSTD parquet decode — the WNBA proof blocker, now fixed
+Root cause: `hyparquet` (1.26.2) decodes only UNCOMPRESSED + SNAPPY natively and throws "parquet unsupported
+compression codec: ZSTD"; the live SportsDataverse `wehoop-wnba-data` files are ZSTD-compressed. Fix: pass
+`hyparquet-compressors` (1.1.1)'s pure-JS `compressors` map (fzstd for ZSTD, plus GZIP/BROTLI/LZ4/…) to every
+`parquetReadObjects` call in `lib/knowledge/ingestion/sportsdataverse-wnba.ts`. Dependency-only — no native
+binary, no CLI decompressor, no system package — so it runs unchanged under the GitHub Actions Node 22 runtime,
+and covering all codecs future-proofs against an upstream compression change. `hyparquet-writer` (0.16.1) added
+as a **devDependency only** (fixture generation). Also fixed a latent fixture-faithfulness point: real SDV id
+columns are INT32 (JS `number`), which `safeText()` reads via `String(number)` — confirmed by parsing the live
+file with the new decoder (`id: number`), so there is no INT64/bigint issue in production.
+
+### 2) MLB weather game_id — pre-existing defect, integrated
+`mlb_weather.game_id` is NOT NULL; `refreshMlbWeather` wrote `game_id: null` → Postgres 23502 on every upsert
+(surfaced live in run 29597712952's weather substage). Fix: write `game_id: event.id` (the internal event id
+doubles as the legacy `games.id` — verified read-only: all 3 current qualifying MLB events have both teams AND a
+`games` row with the same id). `event_id` and the event-first conflict target (`event_id,weather_date`) are
+unchanged. No migration (`202607120003` not applied). NOTE: a parallel agent was preparing the same one-line fix
+on branch `claude/jovial-hodgkin-aa9925` (from `main`); it is now integrated here — whoever reconciles that branch
+should expect the identical change already present. No history was reset/rebased/force-pushed.
+
+### 3) Coverage/recent-features repair — preserved + independently tested
+The `loadActivePropCoverage` window-scoping fix (already in db4912f) is retained and now has isolated tests;
+`loadActivePropCoverage` was exported for that. This is the change that actually improved WNBA board availability
+in the failed proof (publishable 0→49, published 0→28) independent of SDV.
+
+### Tests (all wired into `pnpm test`; added `lib/knowledge/ingestion/*.test.ts` to the glob)
+- `ingestion/sportsdataverse-wnba-parquet.test.ts` (6): ZSTD schedule/player_box/team_box parse; WITHOUT
+  compressors ZSTD throws the exact prod error (fix is load-bearing); SNAPPY still parses; malformed ZSTD fails
+  cleanly.
+- `ingestion/sportsdataverse-wnba-ingest.test.ts` (4): the REAL ingestion functions parse the committed ZSTD
+  fixtures; incremental watermark bounds (07-10 skipped, 07-14 processed); player/team logs written dated 07-14
+  (watermark advances 07-10→07-14); repeat-work regression — after ingestion the next plan `shouldIngest=false`
+  (no repeated full-season download).
+- `enrichment/coverage.test.ts` (3): a 450-row stale-active backlog no longer truncates current referenced
+  props; null-start and >36h props excluded (window stays bounded).
+- `enrichment/mlb-weather.test.ts` (2): weather upsert carries `game_id = event_id = event.id` with the
+  event-first conflict target; team-less events excluded.
+Fixtures: small committed ZSTD/SNAPPY parquet files under `lib/knowledge/ingestion/__fixtures__/`, regenerated
+by `scripts/generate-sdv-zstd-fixtures.mjs` (dev-only; needs Node ≥22.15 `zlib.zstdCompressSync`). Decoding in
+tests uses fzstd (always available), so the tests don't depend on a ZSTD *compressor*.
+
+### Failure/readiness semantics (unchanged, still verified)
+ZSTD failure → stage `warning` (non-blocking); a successful SDV ingest → `ok`; partial MLB substage failure →
+`warning` with `failedSubstages`; systematic failure cannot masquerade as a healthy repair (repair step reflects
+worst sub-stage); coverage/recent-features success is reported separately from SDV; publication still retains
+prior snapshots (`priorLatestSnapshotRetained`) and never claims false completion; scores are not forced.
+
+### Validation
+typecheck PASS · full suite **301 pass / 1 pre-existing skip / 0 fail** (+15 new) · production build exit 0 ·
+public-export audit PASS (241 included / 52 excluded, 0 import-closure violations, 0 secret findings). `next lint`
+remains a pre-existing Next-16 non-issue (not in governing validation).
+
+### EXACT future proof plan (owner-gated; NOT executed this session)
+Same controlled sequence as Session 38, now expected to pass the WNBA leg:
+1. Record rollback SHA (currently `3087979d…`). 2. `COVERED_GITHUB_SCHEDULER_ENABLED=false`. 3. Confirm no active
+run / clear concurrency. 4. `COVERED_PRIVATE_PIPELINE_SHA=c4e8e47156385712af6d5afc4982655b0e169cd8`. 5. WNBA dry
+diagnostic. 6. MLB dry diagnostic (MLB changed: weather). 7. During natural windows, one bounded real proof per
+league. 8. WNBA acceptance THIS time must show: SDV ingestion `ok` (not ZSTD warning), `team_game_logs` advance
+past 07-10, opponent/matchup context persists (rows > 0), `missing_matchup_context` falls for repaired rows, and
+the next ~20-min plan skips the download. MLB acceptance: weather substage no longer degraded (mlb_weather rows
+persist). 9. On success retain c4e8e47 + re-enable scheduler; verify next scheduled run uses it. 10. On failure
+restore `3087979d…` before re-enabling.
+
+### State
+Production SHA `3087979d…` (unchanged). Scheduler enabled on it. Candidate `c4e8e47` pushed to
+`origin codex/public-repo-repair` only; branch tip advanced from `7dc1503` → `c4e8e47`. Verdict:
+**CANDIDATE READY FOR CONTROLLED PROOF.**
+
+## Session 40 — Permanent pipeline reliability redesign, Phases A–D (candidate; production untouched) (2026-07-17 UTC)
+
+Owner directive: stop patching, redesign the ingestion→enrichment→scoring→board pipeline to be deterministic,
+self-validating, and free of recurring manual repairs. Implemented Phases A–D on `codex/public-repo-repair`.
+**Production untouched: still pinned to rollback SHA `3087979d…`, scheduler enabled on it. No production
+execution/config change/proof this session.** New pipeline framework lives in `lib/knowledge/pipeline/`.
+
+Commits (branch tip advanced `16b7576` → `f59de1f`):
+- `340053a` Phase A — canonical RunManifest + typed StageResult + coverage characterization.
+- `664cbfc` Phase B — field-contract matrix + boundary validation + provider-absent proof + provenance.
+- `a11b699` Phase C — readiness gate + bounded auto-reconciliation + route health gate (wired).
+- `f59de1f` Phase D — ≥70 board invariant (all boundaries) + analyzer readiness + completeness report.
+
+### Phase A — one canonical work set (kills the coverage-truncation class)
+`pipeline/run-manifest.ts`: the single current-prop work set (league/props/events/teams/players/window/
+freshness/runId/version). Pure `selectActiveWorkSet` — query-bounded to the window (a stale-active backlog can
+never fill the page and truncate current props), deterministic order, explicit null-start handling
+(excluded+counted), truncation flagged (never silent), exact columns only. `pipeline/stage-result.ts`: typed
+`StageResult` (processed/completed/blocked, failuresByCause, timings, rows, provider calls, healthy|degraded|
+failed) + the MissingCause taxonomy. Characterization tests prove the old asc+limit-400 truncates a 450-row
+backlog while the manifest keeps the current props.
+
+### Phase B — contracts + validation + proof standard
+`pipeline/field-contracts.ts`: explicit MLB+WNBA matrix (`FIELD_CONTRACTS`) — every scoring input's sources,
+market applicability, freshness, hard-required (grounded in the real scoring-service publishability blockers),
+absence-permitted, consequence, reconciliation stage. `pipeline/boundary-validation.ts`: validate codecs/
+required columns/id types/date formats/DB write shapes BEFORE writes (catches the ZSTD + mlb_weather game_id
+classes) + `classifyAbsence()` provider-absent PROOF standard (absence only with full evidence; request/parse/
+stale/join/mapping/format = pipeline failure). `pipeline/provenance.ts`: ReadinessState + `ScoringProvenance`
+(runId/model/contract/feature+source timestamps/state/allowed-absent/blockers/scoredAt). Doc:
+`docs/ENRICHMENT_FIELD_CONTRACTS.md`.
+
+### Phase C — required gates + auto-reconciliation + health gate (WIRED)
+`pipeline/readiness-classifier.ts` maps publishability blockers → score_ready/score_limited/score_blocked +
+recovery stage (no formula exposure). `pipeline/reconciliation.ts`: bounded, upstream-first, progress-gated,
+non-spinning auto-reconciliation — the recurring-manual-repair replacement. `pipeline/health-gate.ts` +
+`run-health.ts`: per-route/partition publish-or-hold decision (hold+retain-prior only on pipeline-fault
+degradation; provider_absent is never degradation; partitions independent so one degraded league never blocks a
+healthy one). Wired into `lib/ops/github-actions-pipeline.ts`: a bounded repair-reconciliation loop (re-runs the
+idempotent repair up to 3× while recoverable staleness remains AND the outstanding count strictly decreases);
+post-scoring `summary.health` (overall + partitions + per-route decisions ⇒ NO silent degradation); `heldRoutes`
+threaded to publication (`public-snapshots.ts`) so a degraded route retains its prior good snapshot.
+
+### Phase D — ≥70 board invariant + analyzer + report (WIRED)
+`pipeline/board-invariant.ts` enforced at ALL boundaries: reader (`getCoveredPicksOfTheDay` always floors ≥70,
+raisable-only), snapshot build (filter ≥70 + highest-first + dedup + reject-any-sub-70 → retain prior), API
+(`minimumCoveredScore` clamped ≥70), frontend (options floor-and-up only). Fewer qualify ⇒ shorter board, never
+a lowered floor. Manual Analyzer (`/api/parlay-analysis`) augments the SAME scored record with per-leg readiness
+(shows true sub-70 scores; flags score_blocked; no re-enrich/re-score/separate path). `pipeline/
+completeness-report.ts` wired to `summary.completeness` (compact funnel + causes + reconciliation + measurement,
+zero extra reads). E2E updated: a ~40-score publishable prop is correctly gated off the ≥70 board.
+
+### Measurement (egress/runtime)
+Net egress neutral-to-lower: the manifest replaces three overlapping coverage queries with one bounded read;
+the health gate + completeness report add ZERO Supabase reads (assembled from scoring aggregates already in the
+report); no new provider calls; no `select("*")`. GitHub Actions is still the sole recurring executor; web
+routes read prepared outputs only; no new paid service.
+
+### Validation
+typecheck PASS · full suite **366 pass / 1 pre-existing skip / 0 fail** (+58 across A–D) · production build exit
+0 · public-export audit PASS (0 import-closure violations, 0 secret findings; also fixed a latent c4e8e47
+boundary defect). `next lint` remains the pre-existing Next-16 non-issue.
+
+### State
+Production SHA `3087979d…` unchanged; scheduler enabled on it. The A–D redesign is a CANDIDATE on
+`codex/public-repo-repair` (tip `f59de1f`), fully tested but NOT proven in production — promotion is owner-gated
+via the standard pause→pin→dry→bounded-proof-per-league→promote-or-rollback sequence. This candidate also still
+carries the ZSTD + MLB-weather + coverage fixes from `c4e8e47`.
+
+## Session 41 — Bounded pre-promotion audit of candidate `4404521` (2026-07-17 UTC)
+
+Owner directive: before promotion, prove the candidate at `4404521` (tip == `origin/codex/public-repo-repair`)
+actually contains the two repairs required after the failed WNBA proof (WNBA ZSTD parquet decode; MLB weather
+`game_id` compatibility), and review the ≥70 board invariant + the new pipeline framework for product/cost
+correctness. **No production change this session** — SHA still `3087979d…`, scheduler untouched, no proof, no
+migration, no scheduler toggle. Audit-only; no code changed (no fixture needed restoring; inert scaffolding
+retained — see below). This entry CORRECTS two inaccurate Session 40 claims.
+
+### Required repairs — BOTH present in the committed HEAD tree (verified via `git show HEAD:…`)
+- **WNBA ZSTD decode**: `sportsdataverse-wnba.ts` imports `compressors` from `hyparquet-compressors` and passes
+  `PARQUET_COMPRESSORS` at all three parse sites — schedule (L272), player_box (L381), team_box (L503). Pure-JS
+  (fzstd), no external binary; Node-22/GH-Actions safe. ZSTD roundtrip fixtures + malformed + non-ZSTD tests pass.
+- **MLB weather `game_id`**: `mlb.ts` writes `game_id: event.id` paired with `event_id: event.id` at all three
+  weather write sites (L1517, L1635, L2089); conflict target `event_id,weather_date` retained. Fixes the 23502
+  NOT-NULL `game_id` failure. Regression test `mlb-weather.test.ts` passes. No migration applied.
+
+### ≥70 threshold matrix (verified — floor is scoped to Covered Picks ONLY)
+| Consumer | Required score rule | Evidence |
+|---|---|---|
+| Covered Picks reader (`getCoveredPicksOfTheDay`) | ≥70, clamp raisable-only | `read-service.ts` floor always applied |
+| Covered Picks snapshot build | ≥70 (filter + validate → reject sub-70, retain prior) | `public-snapshots.ts` `enforceCoveredPicksFloor` |
+| Covered Picks API / frontend | ≥70 (param clamped; options floor-and-up) | `covered-picks/route.ts`, `covered-picks-shell.tsx` |
+| Parlay Options (reader/snapshot/API) | **NO floor — all scored** | `getParlayOptions` filters only on explicit param; snapshot uses `rows: parlayOptions.rows` |
+| Parlay Builder | all scored (non-null `covered_score`, incl. sub-70) | `parlay-builder-shell.tsx` `scoredOnly` filters null only |
+| Manual Analyzer (`/api/parlay-analysis`) | all incl. sub-70 + per-leg readiness | augments same scored record; no floor, no re-score |
+| Board generation | ≥70 hard invariant | `board-invariant.ts` |
+
+No fixture was manufactured to survive the floor: the MLB/WNBA e2e tests assert the floor's *exclusion*
+behavior on an unchanged ~40 fixture (board empty / snapshot fallback); `public-snapshots.test.ts` added
+`covered_score:72` only to covered-picks-route mock rows (a route that legitimately requires ≥70). **Nothing to
+restore.**
+
+### CORRECTION to Session 40 — the pipeline framework is PARTIALLY wired
+Verified by call-site grep (non-test, non-pipeline importers):
+- **WIRED & affecting production output**: `board-invariant` (reader/snapshot/API/frontend), `run-health` +
+  `health-gate` + `readiness-classifier` + `completeness-report` (via `assessRunHealth`/`buildCompletenessReport`
+  in `github-actions-pipeline.ts`), and a **hand-rolled** bounded reconcile loop (`MAX_RECONCILE_ATTEMPTS=3`,
+  strictly-decreasing outstanding) in `github-actions-pipeline.ts`. Health gate is hold-only — it cannot make a
+  blocked prop publishable; it only publishes-or-retains-prior, and provider-absent never counts as degradation.
+- **BUILT + TESTED but NOT WIRED (zero non-test call sites)**: `run-manifest.ts`, `boundary-validation.ts`, the
+  module-form `reconciliation.ts` (superseded by the hand-rolled loop); `field-contracts.ts` and `provenance.ts`
+  are consumed only for TYPE imports. These are inert (zero call sites ⇒ zero runtime/egress cost, structurally),
+  representing staged architecture — retained, not deleted, so the owner can decide wire-vs-prune in a follow-up.
+- **Consequence**: Session 40's claim that RunManifest "kills the coverage-truncation class" / "replaces three
+  overlapping coverage queries with one bounded read" is NOT true in the running path. Production truncation
+  protection is the `db4912f` `start_time >= now-2h` window filter (wired); the three legacy loaders still run.
+
+### CORRECTION to Session 40 — egress claim withdrawn (not measured)
+Session 40's "net egress neutral-to-lower" is retracted as unmeasured. Structural facts only: the unwired modules
+add zero calls (zero call sites); the covered-picks snapshot is *smaller* (filtered ≥70); the WIRED reconcile
+loop can add **up to 2 extra bounded `runRepair` passes** per run when recoverable staleness remains — a bounded
+cost *increase*, not neutral. No `select("*")`; GH Actions remains sole recurring executor.
+
+### Validation (this session, on `4404521`)
+- `npm test` → **366 pass / 0 fail / 1 pre-existing skip** (`event-reconciliation.test.ts` `skip:!ENABLED`,
+  unchanged from baseline `3087979d`). 367 tests total.
+- `tsc --noEmit` → clean (after `rm -rf .next`). `next build` → `✓ Compiled successfully`, exit 0 (the
+  `/odds-api` "Dynamic server usage" lines are pre-existing static-gen fallbacks, not failures).
+- `node scripts/public-export.mjs` → PASS: 0 import-closure violations, 0 secret findings, 0 must-be-absent, 269
+  included / 54 excluded. Working tree clean except untracked `scoring-engine/dist/` (correctly NOT committed).
+
+### VERDICT: **CANDIDATE READY FOR CONTROLLED PROOF**
+Both required repairs are present, wired, and tested; the ≥70 semantics are correct and match the owner's stated
+intent (Covered Picks ≥70; Builder/Options/Analyzer show sub-70); validation is green. Non-blocking follow-up:
+decide whether to wire or prune the inert `run-manifest`/`boundary-validation`/module-`reconciliation` scaffolding
+so docs stop implying a single-work-set enforcement that the running path does not yet have. Production stays
+pinned to `3087979d…`; promotion remains owner-gated via pause→pin→dry→bounded-proof-per-league→promote/rollback.
+
+## Session 42 — Controlled proof ATTEMPTED, BLOCKED (no game window); rolled back to known-good (2026-07-18 UTC)
+
+Owner directive: prove candidate `4404521` in production, promote or roll back. **Result: dry diagnostics passed
+at the candidate, but NO natural qualifying window existed for either league at execution time, so no real proof
+could run without manufacturing a window (forbidden). Owner chose roll-back-to-known-good; production restored to
+the exact pre-session state.** Candidate SHA `440452163fb757c7405f0ea84a33197eb336f3c6`; rollback SHA
+`3087979d00932cadfe57e8c57c2e63ab0d41169d`.
+
+### Candidate selection
+Runtime trees of `4404521` (code candidate) and `80bffc2` (Session-41 audit docs tip) are **identical** (only
+`CLAUDE.md` + `docs/AGENT_HANDOFF.md` differ). Selected the reviewed code-bearing SHA `4404521`; confirmed its
+tree carries ZSTD ×3 + `hyparquet-compressors` import, MLB weather `game_id: event.id` ×3, `board-invariant.ts`,
+and the WNBA `shouldIngest` guard.
+
+### Production state machine this session (all on public repo `CoreyTenacity/Covered-Prop-Analysis`, `production` env)
+1. Captured rollback state: scheduler `true`, SHA `3087979d…`, `WNBA_INGESTION_ENABLED true`, 0 active runs.
+2. Phase 2 pause: `COVERED_GITHUB_SCHEDULER_ENABLED=false` (verified). Private schedulers confirmed disabled
+   (`Covered GitHub Actions live pipeline`, `WNBA data ingestion` both `disabled_manually`); no alternate scheduler.
+3. Phase 3 pin: `COVERED_PRIVATE_PIPELINE_SHA=4404521` (40-hex, on `origin/codex/public-repo-repair`, verified).
+4. Phase 4 dry diagnostics (candidate SHA, `dry_run=true`, write-free — pipeline returns the plan **before**
+   `runSharp()`):
+   - **WNBA dry — run `29630394131`** (success, 27s). Checkout+SHA-verify passed. Game-gate `shouldRun=false`,
+     `reasonCode=schedule_potentially_stale` ("no events for today"), `qualifyingEventCount=0`,
+     `startedEventCount=7`, newest event `2026-07-15T16:00Z`. `summary` all null → no provider calls, no writes.
+   - **MLB dry — run `29630447206`** (success). Same: `shouldRun=false`, `qualifyingEventCount=0`,
+     newest event `2026-07-16T23:10Z`. `summary` all null.
+5. Window finding (Phase 5): at 04:20–04:44Z (00:20 ET, Sat 7/18) **neither league had a qualifying window.**
+   Evidence from rollback-SHA prime-time runs: MLB run `29616826325` (7/17 22:06Z) DID qualify (4 events, sharp
+   outbound=8, inserted=53, scored candidate=40 but **publishable=0** — the degraded board the candidate targets);
+   WNBA run `29620899636` (7/17 23:31Z) was `all_events_started` (All-Star lull). So MLB is daily but 7/18 games
+   were not yet in-window/ingested (earliest window ~11:00Z+); WNBA is in its mid-July break (newest 7/15).
+6. Rollback (owner-selected): restored `COVERED_PRIVATE_PIPELINE_SHA=3087979d…`; verified rollback checkout via a
+   write-free dry dispatch **run `29631054928`** (checkout step `EXP=3087979d…`, success); then re-enabled
+   `COVERED_GITHUB_SCHEDULER_ENABLED=true`. Final state = exact pre-session known-good (scheduler `true`, SHA
+   `3087979d…`, WNBA ingestion `true`, 0 active runs).
+
+### What the dry diagnostics DID and did NOT prove
+- **Proved** (at `4404521`, live public runner): candidate checks out and passes the fail-closed SHA verify; the
+  game-gate correctly and safely skips when no qualifying event exists (no broad/historical work, no provider
+  calls, no writes); league-selection resolves `ok` for both leagues.
+- **Did NOT prove** (needs a live window): runtime ZSTD parquet decode, MLB weather `game_id` write, watermark
+  advancement, matchup-context rebuild, board publication, next-run skip. These remain UNPROVEN in production.
+
+### Resume plan (next session, when a natural window exists)
+Re-run pause→pin(`4404521`)→dry→**real proof**. Gate the real proof on a dry-diagnostic showing
+`qualifyingEventCount>0`: MLB likely qualifies from ~11:00Z+ on a game day once 7/18+ events are ingested; WNBA
+only after the All-Star break ends (watch for `reasonCode` flipping off `all_events_started`/`schedule_potentially_stale`).
+Do NOT widen the 6h window or manufacture a proof. Prove the available league; leave the other pending.
+
+### VERDICT: **BLOCKED BEFORE REAL PROOF** (external: no qualifying game window; candidate not defective)
+No candidate defect was found — the block is purely the absence of a live MLB/WNBA window at execution time.
+Production is on the known-good rollback SHA `3087979d…` with the scheduler enabled; the candidate `4404521`
+remains an owner-gated, dry-verified promotion candidate on `origin/codex/public-repo-repair`.
+
+## Session 43 — Schedule-population wiring fix (Option B), combined onto the final candidate (2026-07-18 UTC)
+
+Root cause from Session 42's read-only investigation: the dedicated authoritative schedule writers
+(`refresh_schedules_live_gate` → MLB Stats API today+tomorrow; WNBA ESPN scoreboard today+tomorrow) ran ONLY in
+disabled private workflows, so the sole enabled recurring path (public Candidate F) could not advance a
+stale/empty `events` horizon, and the game gate returned before the only reactive event writer. Classified
+**EVENT WRITER NOT SCHEDULED** for both leagues (direct DB read: 0 events dated 2026-07-18; horizon ended 7/17).
+
+**Fix (Option B, owner-approved): private pre-gate integration.** `buildGitHubActionsLeagueRunReport`
+(`lib/ops/github-actions-pipeline.ts`) now runs a bounded schedule refresh BEFORE the game gate, so every
+authorized non-dry invocation can advance the horizon the gate then reads. No public-workflow change, no new
+scheduler, no private-scheduler re-enable.
+
+- **Control flow**: capability check → scheduled-but-disabled early-return → `executionAuthorized` (reused by
+  `shouldRun`, not duplicated) → **[new] `if (!dryRun && executionAuthorized)` schedule refresh** → game gate
+  (`windowLoader`) → dry-run plan branch → sharp → repair → score → board → publish. Recorded as a first-class
+  `schedule_refresh` step (`ok`/`warning`/`skipped`/`dry-run`) preserved across every return path.
+- **TTL (30 min, time-based only)** via existing `provider_cache` (`getProviderCacheWithStatus`/`putProviderCache`),
+  versioned key `knowledge:schedule-refresh:v1:<league>`. Fresh marker → skip provider; missing/stale/expired →
+  refresh; **marker written only on success (incl. legit 0-event); provider failure writes NO marker → next
+  cycle retries.** The marker means only "an authoritative refresh succeeded recently" — it NEVER consults the
+  local `events` table, so a partial reactive slate is never mistaken for complete (self-heals within ≤30 min;
+  an empty horizon heals on the first cache-miss cycle).
+- **Bounds**: MLB = 1 Stats API request (today+tomorrow); WNBA = 2 ESPN scoreboard requests (today+tomorrow) via
+  `refreshWnbaScheduleEspn` — **never** the whole-season SDV parquet job. `ensureEvent` unchanged (unchanged-row
+  change-detection deferred as a separate future optimization; the 30-min TTL bounds redundant rewrites).
+- **Failure semantics**: provider fail + qualifying stored events → `warning` step, pipeline continues on stored
+  events; provider fail + stale/empty stored → gate stays skipped, nothing forced/bypassed. Gate stays
+  authoritative; no new gate reason code.
+
+Tests: +16 in `github-actions-pipeline.test.ts` (ordering-before-gate, stale self-heal, zero-event no-op,
+both provider-failure modes, dry-run skip, disabled-run skip, MLB today+tomorrow bound, provider_cache
+fresh/missing/stale/expired, marker-only-on-success, failure-no-marker, within-TTL skip, WNBA-ESPN-not-SDV,
+WNBA non-espn fallback). Refresher injected via `runners.runScheduleRefresh` (no-op in unit tests → no real
+provider/Supabase).
+
+Validation on the schedule-wiring candidate: `npm test` **382 pass / 0 fail / 1 pre-existing skip** (383 total,
++16); `tsc --noEmit` clean; `next build` ✓ Compiled successfully; `public-export.mjs` PASS (0 import-closure
+violations, 0 secrets). Only `lib/ops/github-actions-pipeline.ts` + its test changed (runtime); `scoring-engine/dist`
+untracked/uncommitted; no `.claude/launch.json`.
+
+**Final combined candidate** = `4404521` (reviewed enrichment: ZSTD + weather + board-floor) + this one
+schedule-wiring commit. Production remains on rollback `3087979d…`, scheduler enabled; NOT pinned/proved this
+session. **Phase A caveat (corrected):** a future first integrated real invocation is NOT "schedule-only" merely
+because of the hour — a fresh read-only diagnostic must first prove whether the refreshed today/tomorrow events
+fall inside the 6h gate; if that cannot be guaranteed, classify it as a combined bounded schedule + possible
+downstream pipeline proof and enumerate all authorized provider calls/writes before executing.
+
+## Session 44 — Comprehensive final-completion audit (read-only) (2026-07-18 UTC)
+
+Purpose: stop discovering one missing dependency at a time — enumerate EVERY remaining blocker to declare
+MLB/WNBA scoring+scheduling production-stable. No production change; verified against source + read-only prod data.
+
+### Production ground truth (bounded read-only DB)
+- Output **frozen at 2026-07-17T23:08Z** (last successful scoring+publication). All three `:latest` snapshot
+  aliases exist and `is_stale:false` but are the 7/17 versions; nothing since (event horizon went stale after 7/17).
+- `scored_props`: 475 total, 232 updated in last 24h, **WNBA publishable=174, MLB publishable=4**, 29 with
+  `covered_score>=70`. Scoring works; MLB is weak (the enrichment gaps the candidate targets).
+- `events`: **0 rows for 7/18 and 7/19** (both leagues); newest MLB `2026-07-17T23:16Z`, WNBA `2026-07-17T23:30Z`.
+- **`grading_results`: 0 rows — the model grader has NEVER run.**
+
+### NEW finding — model grading is UNWIRED (same defect class as the schedule refresh was)
+`gradeCompletedScoredProps` (`lib/knowledge/grading-service.ts`) is the only writer of `grading_results`, and it
+has **zero callers** — no workflow, no `knowledge` job, no CLI, no cron route (`app/api/cron` has only the WNBA
+schedule *diagnostic*; `vercel.json` crons `[]`). `grading_results` feeds `buildModelPerformanceFacts` (the
+model-performance snapshot) AND `user-settlement.ts` (provider-backed user-pick grading, read-only consumer). So
+model-performance is permanently empty and provider-backed settlement has nothing to consume.
+**`docs/AUTO_GRADING_STATUS.md`'s "scheduled grading … now in place" is inaccurate for the current enabled
+executor** and is corrected there. This is a small, finite wiring fix (trigger the existing grader), not an
+architecture gap.
+
+### Verified-sound (no action): game gate, SharpAPI (proven, 475 scored), scoring blockers (hard: unmatched/
+missing_*/stale_features/missing_matchup_context; soft: injury/stale_odds — no silent stale scoring), ≥70
+threshold matrix end-to-end (Covered Picks ≥70; Parlay Options/Builder retain sub-70; Analyzer sub-70+readiness),
+snapshot versioned+`:latest` with prior-retention on hold, failure/recovery auto-heals for every stage EXCEPT
+grading. Governance clean (main unchanged, boundary/secret/export PASS, no alternate scheduler, no pending migration).
+
+### Consolidated remaining work (dependency-ordered)
+| # | Issue | League | Sev | Fix/proof | Code? | Prod write? | Blocks completion? |
+|---|---|---|---|---|---|---|---|
+| 1 | Schedule population unproven in prod (prod `3087979d` lacks it → frozen since 7/17) | both | Critical | pin `8b266f4`; real run advances `events` | done (candidate) | yes | YES |
+| 2 | MLB weather `game_id` unproven (prod 23502) | MLB | High | MLB proof: `mlb_weather.game_id=event.id` | done (4404521) | yes | YES |
+| 3 | WNBA ZSTD decode unproven (prod failed) | WNBA | High | WNBA proof: parquet parses, logs advance | done (4404521) | yes | YES |
+| 4 | coverage/recent-features/matchup unproven post-fix | both | High | combined proof: blockers drop | done | yes | YES |
+| 5 | **Model grading unwired → model-performance/settlement empty** | both | Medium | **wire grader into enabled executor** + 1 run | YES (new, small) | yes | blocks model-perf, not core board |
+| 6 | Inert framework (run-manifest/boundary-validation/module-reconciliation/contracts runtime) | both | Low | wire-or-prune (cost-free) | optional | no | no |
+| 7 | `ensureEvent` rewrites unchanged rows (`updated_at`) | both | Low | change-detection (deferred; TTL bounds it) | optional | — | no |
+
+### Classification: **B — SMALL FINITE FIX SET REMAINS** (no material architecture gaps)
+Core scheduling/scoring/board/threshold machinery is sound and largely proven for WNBA. Outstanding = prove the
+built schedule+enrichment candidate in prod, plus one small grading-wiring fix (same class already solved for
+schedule refresh).
+
+### Finish-line plan (one candidate, one coordinated proof)
+Bundle a **grading-wiring commit on top of `8b266f4`** → final candidate = `4404521` + schedule-wiring +
+grading-wiring (+ inert-framework decision). Then: implement+unit-test grading wiring → push → owner-gated
+pause→pin→verify→dry→**one bounded MLB real run** (schedule+weather+logs+scoring+board+grade completed games)→
+**one bounded WNBA real run** (schedule+ZSTD+logs+scoring+board+grade)→read-only before/after→TTL/next-run skip→
+promote or restore `3087979d`. DONE criteria: schedule self-heals; enrichment freshness (weather game_id, ZSTD
+logs advance, blockers drop); MLB publishable rises; threshold matrix holds; publication advances `:latest` only
+on success; grading populates `grading_results` idempotently + model-performance reflects it; next-run skips prevent
+repeat SDV downloads/refreshes; per-cycle provider/write bounds hold.
+
+### Pre-proof scope facts established this session (for the eventual proof)
+- Candidate `8b266f4` runtime delta vs `4404521` = ONLY `lib/ops/github-actions-pipeline.ts` + its test (rest docs).
+- `dryRun=true` does NOT run the schedule refresh; new `v1` cache keys absent in prod (first run forced to refresh).
+- **A real run is NOT schedule-only**: Sharp runs UNCONDITIONALLY once the gate qualifies (`run_scoring=false`
+  disables repair/enrichment/score/board, but not Sharp; `config_limit` clamped to ≥1 so it cannot be zeroed).
+  No window can be certified schedule-only without game-time evidence (retracted the "guaranteed overnight" claim).
+- Schedule 30-min TTL gates only the refresh, not Sharp/repair (those have their own cadence guards).
+
+## Session 45 — Grading + Model-Performance lifecycle wiring (bundled into the final candidate) (2026-07-18 UTC)
+
+Closes the last lifecycle gap from Session 44 (the model grader `gradeCompletedScoredProps` had 0 callers;
+`grading_results`=0; Model Performance therefore permanently empty). Implemented on top of `8b266f4`; no
+production change. Full design + implementation traced from source.
+
+### Implementation (runtime: `lib/knowledge/grading-service.ts` + `lib/ops/github-actions-pipeline.ts`)
+- **Defer fix (grading-service.ts):** the two transient-missing cases (`stat_source_missing` = no player log yet;
+  `missing_final_stat` = log present, stat null) no longer write a terminal `no_grade` row — they now DEFER
+  (write nothing, `gradeStatus:"deferred"`). Required because `grading_results` has a DB `unique(scored_prop_id)`
+  (migration 202607060002), so a terminal no_grade would permanently block the eventual grade. Genuinely-terminal
+  cases (missing current_prop/event, unsupported_market, missing_participant) still write no_grade.
+- **Bounded wrapper `gradeRecentCompletions` (grading-service.ts):** drives grading by RECENTLY-COMPLETED EVENTS
+  (`status in completed/final/closed`, `start_time >= now - lookbackHours` default 36h), skips events already
+  fully recorded (cheap count compare → forward progress, no re-scan/stall), processes at most `maxEvents`
+  (default 5) events/invocation and fully drains each. Internal hard per-invocation bound = the independent
+  grading control (no new public workflow input); never a historical backfill; genuinely-old legacy stays
+  owner-gated.
+- **Pipeline wiring (github-actions-pipeline.ts):** a bounded `grade` step runs PRE-GATE (before schedule refresh
+  and the game gate) so completed picks are graded even with no qualifying upcoming game and a stale schedule
+  never blocks grading. Guarded `!dryRun && executionAuthorized && league∈{MLB,WNBA}`; best-effort (failure →
+  `warning`, never blocks the pregame pipeline; scoring failure cannot erase already-committed grades). Injectable
+  via `runners.runGrade`.
+- **Model-Performance refresh:** when grading materially changed state (≥1 graded/terminal write) AND the run is
+  publishing snapshots, the pipeline republishes ONLY the model-performance route
+  (`collectPublicSnapshotPublicationSummaries({publish:true, heldRoutes:["covered-picks","parlay-options"]})`) —
+  so model-performance reflects new grades even on a day with completed games but no board run. Reuses the proven
+  version→`:latest`→prior-retention machinery. Idempotent with the board's own republish on qualifying runs.
+
+### Idempotency / outcome semantics (verified)
+DB `unique(scored_prop_id)` + the per-row existence check = duplicate rows structurally impossible (app + DB).
+OVER/UNDER/PUSH from `resultFor`; MLB (hits/total_bases/K/runs/RBIs) and WNBA (points/reb/ast/PRA/threes) stat
+extraction unit-tested. VOID/postponed/canceled: not modeled — such events aren't "completed" so they are skipped
+(never mis-graded); a genuine DNP defers until it ages out of the window (stays ungraded, never wrong). No
+migration proposed (the needed constraint already exists).
+
+### Cost / safety
+Grading uses ONLY stored `player_game_logs` (no provider calls, no SharpAPI, no SDV parquet, no enrichment). Per
+cycle: ≤`maxEvents` events, cheap count-compare skips finished events; steady state ≈ no-op. Model-performance
+republish reads the 3 route sources + writes 1 versioned snapshot + `:latest` (bounded). `dryRun=true` = zero
+grading, zero model-performance, zero writes.
+
+### Validation
+`npm test` **400 pass / 0 fail / 1 pre-existing skip** (+18: 10 grading-service + 8 pipeline-wiring); `tsc` clean;
+`next build` ✓; `public-export.mjs` PASS (0 import-closure violations, 0 secrets). Runtime files changed vs
+`8b266f4`: `grading-service.ts` + `github-actions-pipeline.ts` (+ their tests). Final candidate = enrichment
+(`4404521`) + schedule wiring + grading/model-performance wiring.
+
+Production remains `3087979d…` / scheduler `true` — NOT pinned/proved. One coordinated owner-gated MLB+WNBA proof
+now covers schedule + enrichment + scoring/threshold + publication + grading + model-performance.
+
+## Session 46 — FINAL COORDINATED PROOF IN FLIGHT (pin-first); production HELD mid-proof (2026-07-18 UTC)
+
+**READ FIRST — production is in a NON-DEFAULT controlled-proof state, NOT promoted, NOT rolled back:**
+- `COVERED_PRIVATE_PIPELINE_SHA = b48d923ea09544c9ed1c59b7da0eb4ab8eed9820` (final candidate, PINNED)
+- `COVERED_GITHUB_SCHEDULER_ENABLED = false` (PAUSED — no automatic runs)
+- Rollback SHA (restore on failure) = `3087979d00932cadfe57e8c57c2e63ab0d41169d`
+- `origin/main` unchanged `23f665955b55a9e862f7f2efa8205538c5426013`; private schedulers `disabled_manually`; 0 active runs.
+- **DO NOT re-enable the scheduler or change the SHA until the proof reaches the single Phase 9 promote/rollback
+  decision. DO NOT manually alter event status, logs, grading rows, or snapshots.**
+
+Final candidate `b48d923` = enrichment `4404521` (WNBA ZSTD + MLB weather `game_id` + coverage + ≥70 board) +
+schedule wiring (`8b266f4`) + grading/model-performance wiring. The proof was RESEQUENCED to pin-first because a
+frozen `3087979d` cannot produce pregame/postgame inputs — the candidate must run to create them.
+
+### PROVEN LIVE so far (Phases 0–5, all PASS)
+- **Phase 2 dry** (run 29654511845): checkout `b48d923` verified; zero writes.
+- **Phase 3 MLB foundation** (run 29654559044; `run_scoring=false,run_board=false`): schedule **self-healed** —
+  `schedule_refresh eventsWritten:31` (MLB events 0→11 for 7/18, 0→15 for 7/19); gate qualified naturally
+  (`qualifyingEventCount:11`); `grade` bounded no-op; `sharp configLimit=1`; **no** repair/score/board.
+  `schedule-refresh:v1:mlb` TTL marker written (~30 min).
+- **Phase 4 MLB full** (run 29654677076; `run_scoring=true,run_board=true`): **MLB weather repair PROVEN** — 7
+  `mlb_weather` rows, `game_id == event_id` on all, **no 23502/FK**; **schedule TTL skip PROVEN**
+  (`schedule_refresh: skipped, skippedByTtl:true`); enrichment bounded (reconcile 2 attempts); scoring
+  publishable 3→13 with truthful blockers; **publication safety PROVEN** — the first post-freeze run is
+  legitimately degraded, health gate **HELD covered-picks+parlay (their `:latest` retained prior 7/17)** while
+  model-performance advanced.
+- **Phase 5 WNBA** (probe run 29654898836 + enrichment run 29654988315; `run_scoring=true,run_board=true`):
+  **ESPN schedule path** (`espn-wnba eventsWritten:6`, no SDV for discovery); **ZSTD parquet decode PROVEN in
+  production** — schedule/player_box/team_box parquet all parsed with **no `unsupported compression codec: ZSTD`**
+  (`gameLogsInserted:334`, `teamLogsInserted:28`, bytes/rows measured); **stale-only ingestion** correctly
+  triggered; enrichment reconciled (`outstanding:0`); **health healthy → all 3 snapshots published/advanced to
+  2026-07-18T18:08Z**.
+
+### REMAINING (Phases 6B → 9) — exact resume procedure for the next agent (codex)
+Grading + Model Performance are a proven bounded no-op until a candidate-era MLB game is officially Final (grading
+runs pre-gate, so it needs matured status+logs). Goal: **minimum TWO real invocations after the first game is
+Final.** Authoritative status source = **MLB Stats API** (`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=2026-07-18&endDate=2026-07-18`,
+public read-only; do NOT dispatch a workflow just to check status). Candidate-era 7/18 MLB gamePks (earliest
+first): **824657 (18:20Z), 823441, 822790, 824331, 824169, 824088, 825059, 824738, 824899, 823763, 824412**.
+
+1. **Wait until MLB Stats API shows ≥1 of those gamePks `abstractGameState=Final` (or statusCode F/O).**
+   **UPDATE 2026-07-18T23:30Z: postgame input is READY NOW — 8 of 11 candidate-era games are already Final
+   (824657, 823441, 822790, 824331, 824088, 825059, 824899, 823763), 3 still live. Codex can proceed directly to
+   step 2/3 (no waiting).** (Re-confirm Final status at run time; do not dispatch a workflow merely to check.)
+2. Reverify controlled state (SHA `b48d923`, scheduler `false`, 0 active, main unchanged).
+3. **Phase 6B maturation — exactly ONE:** `gh workflow run covered-production-pipeline.yml -R CoreyTenacity/Covered-Prop-Analysis
+   -f league=MLB -f dry_run=false -f config_limit=1 -f run_scoring=true -f run_board=false`. (grade-first no-op if
+   not yet matured → schedule refresh advances the completed event's status to final → enrichment fetches final
+   `player_game_logs` → scoring; **no** board publish.) Then STOP.
+4. Read-only verify a candidate-era event now has: status in completed/final/closed; candidate-era scored_props;
+   final `player_game_logs` stat needed by grading; **no** grading_result yet. If not matured → report the exact
+   missing prerequisite; DO NOT blindly rerun.
+5. **Phase 6C blast-radius gate:** reproduce `gradeRecentCompletions` (≤36h window `now-36h`, `status in
+   (completed,final,closed)`, `maxEvents=5`): list eligible events, the ≤5 selected, their scored_prop count,
+   already-graded count, MAX new grading rows. Confirm NOT a legacy 475-row backfill. If unexpectedly broad → STOP.
+6. **Phase 7 grading — exactly ONE:** `... -f league=MLB -f dry_run=false -f config_limit=1 -f run_scoring=false
+   -f run_board=false`. Expected: bounded grading writes grading_results; model-performance-only republish if
+   state changed; schedule TTL skip or refresh; ≤1 due Sharp if gate qualifies. Must NOT run
+   repair/enrichment/scoring/board/covered-picks+parlay publication.
+7. Verify read-only: grading rows written for the ≤5 events; no duplicate `scored_prop_id` (DB `unique` + app
+   check); no legacy backfill; transient missing-stat DEFERRED (no terminal no_grade row); OVER/UNDER/PUSH match
+   stored line/result. Model Performance: if grades inserted, a new `model-performance` version + `:latest`
+   advanced only after the version write; covered-picks/parlay `:latest` NOT advanced by the standalone refresh.
+8. **Phase 8 steady-state (read-only where possible):** WNBA stale-only `shouldIngest=false` now (newest wnba
+   game_log date `2026-07-15` >= most-recent-completed wnba game → no repeat whole-season parquet); schedule
+   30-min TTL suppresses a near-term refresh; already-graded events excluded from the next bounded selection.
+9. **Phase 9 — single decision.** Promote (keep `b48d923` pinned; set `COVERED_GITHUB_SCHEDULER_ENABLED=true`;
+   verify first scheduled run checks out `b48d923`; private schedulers stay disabled) ONLY if all of: schedule
+   self-heal ✓ (done), MLB weather ✓ (done), WNBA ZSTD/stale-only ✓ (done), bounded grading on candidate-era
+   completed games proven, Model Performance updated from new grades, scoring/threshold semantics correct,
+   publication coherent, no repeated expensive work. On material failure: keep scheduler `false`, restore
+   `COVERED_PRIVATE_PIPELINE_SHA=3087979d…`, verify rollback, only then re-enable scheduler; do not alter snapshots.
+
+Docs on the repair branch may advance past `b48d923` with docs-only commits (runtime-identical); the PROVEN/PINNED
+candidate is `b48d923`. Note: a local monitor script in the prior session polled MLB Stats API to auto-resume —
+codex has no access to it; use step 1 above directly.
+
+## Session 47 — POSTGAME SETTLEMENT FIX IMPLEMENTED (2026-07-18 UTC)
+
+The read-only trace confirmed a real lifecycle defect: the schedule refresh can change a game to `completed`,
+but the only automatic MLB player-log writer was behind the pregame gate and its live-window filter excluded
+games more than two hours old. The result was a completed event with scored props but no final player logs, so
+grading deferred indefinitely until another pregame window.
+
+The repair branch now contains a separate bounded postgame settlement stage. Its order is:
+`grade → schedule_refresh → postgame_settlement → pregame gate → Sharp/repair/scoring/board`.
+Settlement is MLB-only for this change, scans at most 15 recent candidate events from a 36-hour completed/final/
+closed window, selects at most 5 events, derives only the players needed by ungraded supported scored props,
+and makes at most one game-log fetch per targeted player plus an optional bounded player-ID search. Persistence
+is restricted to the exact target event, player, provider, and scheduled game date; it cannot perform the broad
+season insertion behavior of `refreshMlbPlayerLogs`. It does not run WNBA ingestion, Sharp, scoring, board, or
+publication. Provider failures are surfaced as a warning and retried on the next authorized cycle.
+
+The expected lifecycle is intentionally two-cycle: cycle N settles final player logs after schedule refresh;
+cycle N+1's pre-gate grading sees those logs and writes grading results. Already-graded scored props are excluded,
+transient missing stats remain deferred, and dry-run/unauthorized execution performs no settlement provider call
+or write. Production remains unchanged and held at `b48d923…` with `COVERED_GITHUB_SCHEDULER_ENABLED=false`;
+the fix has not been run against production and must not be treated as part of the pinned candidate until the
+owner-gated proof is repeated after review.
+
+Validation on the repair branch: focused settlement/pipeline tests pass (`111/111`), the full repository suite
+passes (`408/409`, with one intentional environment-gated skip), `pnpm exec tsc --noEmit` passes, and `pnpm build`
+passes. Public-export, private-boundary, and secret audits all pass (0 violations/findings). Do not dispatch
+production workflows, enable the scheduler, alter production rows, or push `main` as part of that validation.
+
+## Session 48 — MINIMAL SCHEMA-COMPATIBILITY FIX READY (2026-07-18 UTC)
+
+The first authorized real postgame maturation run on the public V2 cutover reached both the bounded settlement
+and grading stages but failed closed on PostgreSQL `42703`: `scored_props.market_type` does not exist. The
+production schema relationship is `scored_props.current_prop_id` → `current_props.id`; `current_props.market_type`
+is the canonical market field. The base scored-prop columns used by these paths (`id`, `current_prop_id`,
+`model_version_id`, `player_id`, `game_id`, `market_id`, `line`, `risk_flags`, `league_id`, `sport_id`,
+`created_at`) and the later `event_id`, `participant_id`, and `participant_type` additions are present in the
+applied migrations. No migration is required.
+
+### Implementation
+
+On top of `fe6a2510872897284dc0f159b89f3dc950444250`, the repair removes `market_type` from the `scored_props`
+select in both `lib/knowledge/grading-service.ts` and `lib/knowledge/enrichment/jobs.ts`. Grading and bounded
+postgame settlement now derive the market only from the related `current_props` row. The grading fallback for
+missing current props is now the honest `"unknown"` value; normal grading outcomes and stored scored lines are
+unchanged. A small dependency seam was added only to the grading function so tests can exercise exact query and
+write behavior without production database access.
+
+Regression coverage proves: no invalid scored-prop market selection; canonical current-prop market resolution;
+OVER/UNDER/PUSH outcomes; authoritative scored lines; missing-stat deferral with no terminal write; settlement
+event/player bounds; and already-graded settlement exclusion. A focused search found no other production-relevant
+`scored_props.market_type` reference in the two lifecycle paths.
+
+### Validation
+
+- Focused grading/enrichment tests: **31 pass / 0 fail**.
+- Full repository suite: **410 pass / 0 fail / 1 intentional environment-gated skip**.
+- TypeScript: **clean**.
+- Production build: **completed successfully**.
+- Public export audit: **PASS** — 270 included / 54 excluded, 0 import-closure violations, 0 missing required
+  files, 0 must-be-absent violations, 0 secret findings.
+- Private-boundary audit: **PASS** — 0 violations.
+- Independent current-tree credential scan: **0 matches**. The only two historical pattern hits are the
+  intentionally fake secret fixture in the public-export test commits; no real credential value was printed or
+  exposed.
+
+### Controlled-state and candidate status
+
+Production was not touched: V2 remains pinned to `fe6a251…`, legacy V1 remains the invalid
+`RETIRED_STALE_RUN_GUARD`, and `COVERED_GITHUB_SCHEDULER_ENABLED=false`. No workflow was dispatched, no
+Supabase write/migration/backfill occurred, and no scheduler or `main` change was made. The working tree retains
+only the pre-existing untracked `scoring-engine/dist/`; `.claude/launch.json` is not tracked.
+
+The schema-fix runtime change is committed as `de5da10` and pushed only to `origin/codex/public-repo-repair`.
+The full candidate SHA is `de5da10` (runtime diff from `fe6a251…` is limited to this schema fix and its tests;
+this handoff update is documentation-only). Do not update production V2 or resume the proof until the owner
+approves the new final candidate.
+
+## Session 49 — FINAL MLB POSTGAME SETTLEMENT CORRECTNESS FIX (2026-07-19 UTC)
+
+On top of the production-proven `e08fb2c…` candidate, the repair branch now carries the minimal settlement
+correctness fix for event-scoped MLB postgame maturation. The bounded selector now derives required stat groups
+from the scored market (`pitcher_strikeouts` → pitching; the supported batter markets → hitting), unions those
+groups for multi-market players, and passes the exact MLB provider event ID into settlement. Missing MLB identities
+are resolved only against participants in that selected event's MLB Stats API box score; no identity row is
+written by this path. The Matt Boyd `Matt`/`Matthew` name variant is covered by the event-local match.
+
+Settlement continues to scan at most 15 events in the 36-hour completed/final/closed window, select at most 5,
+fetch only required groups for scored-prop players, and persist only exact selected event/player/date rows. Each
+target reports `settled`, `deferred-provider-data`, `deferred-identity`, or `provider-error`; unresolved targets
+raise the best-effort warning and remain retryable. No scoring, grading, board/publication, WNBA ingestion, or
+schedule behavior was changed.
+
+Production remains unchanged and held: V2 is `e08fb2c…`, V1 is `RETIRED_STALE_RUN_GUARD`, and the GitHub scheduler
+is disabled. No production workflow, Supabase write, migration, backfill, private-main push, or rollback was
+performed. The final private repair commit is the only candidate to review before resuming the proof.
+
+## Session 50 — WNBA STALE-SCHEDULE CATCH-UP FIX READY (2026-07-19 UTC)
+
+The source-freshness investigation established that SportsDataverse's current schedule parquet contains
+July 12+ rows but leaves their completion flags false, while the corresponding team/player box parquets are
+newer. The WNBA ingestion therefore could not attach those box rows to the already-completed ESPN events and
+reported them as `skippedNoEvent`. The stale-only planner also considered any sufficiently old event, including
+one still marked scheduled, to be a completed reference and could repeatedly redownload the season artifacts.
+
+The new tightly scoped WNBA repair keeps valid SDV schedule mappings unchanged, then adds a bounded fallback for
+unresolved schedule rows in the current incremental window. It first uses the shared ESPN external event ID and
+existing `source_mappings`; when that is unavailable it uses an exact scheduled-date/home-team/away-team match
+against existing WNBA events whose status is `completed`, `final`, or `closed`. It never creates an event,
+promotes a scheduled/in-progress event, or writes ESPN provenance onto SDV logs. Player/team box persistence still
+uses provider `sportsdataverse-wnba` and the canonical existing event ID.
+
+The planner now queries and evaluates only `completed`/`final`/`closed` events. This preserves stale-only behavior:
+an uncovered completed event triggers one bounded SDV ingestion, successful box persistence advances the watermark,
+and the next cycle skips the whole-season download when no newer completed event exists.
+
+Focused regression coverage includes the July 12 stale-status shape, ESPN event-ID reuse, exact date/team fallback,
+scheduled-event rejection, missing/ambiguous-match safety, SDV provenance and canonical event IDs, valid schedule
+behavior, and status-aware planner advancement. Validation: **420/420 full-suite tests pass with 1 intentional
+environment-gated skip**, focused WNBA tests pass, TypeScript is clean, production build passes, public-export audit
+passes with 270 included / 54 excluded / 0 closure violations / 0 secret findings, and the private-boundary audit
+passes with 0 violations.
+
+Production remains unchanged and held: V2 is `978de09544f5211bf6a7cbe6843feab69c1b4718`, V1 is
+`RETIRED_STALE_RUN_GUARD`, and `COVERED_GITHUB_SCHEDULER_ENABLED=false`. No ingestion, scheduler, Supabase
+write, migration, backfill, or production proof was run. The only untracked working-tree item remains the
+pre-existing `scoring-engine/dist/`; `.claude/launch.json` remains excluded. The next step is owner review of
+the new repair commit, followed by the single approved public maintenance run and final autopilot decision.
+
+## Session 51 — CONSOLIDATED MLB COVERAGE REPAIR READY (2026-07-20 UTC)
+
+On top of the current stabilized autopilot candidate, the repair branch now contains one consolidated private
+MLB coverage fix. Sharp ingestion uses a persistent fair first-page/continuation scheduler: fresh due configs
+retain page-one capacity, saved cursors receive continuation capacity, both queues rotate deterministically, total
+outbound requests remain capped at 8, and each config is limited to at most 2 pages per invocation. Existing
+6.5-second spacing and fail-safe provider/rate-limit stops remain intact. The pipeline report now includes page
+counts and deferred-by-budget/page-cap counts.
+
+MLB log enrichment now derives pitching/hitting requests from the scored market, unions groups for multi-market
+players, orders current/future players by nearest start before recent past/unknown rows, and enforces the same
+bounded 6–12 player window on targeted repair calls. The run report exposes selected player IDs, provider calls,
+and stat-group fetches. Query-time active-prop bounds continue to exclude the old historical active backlog from
+coverage/scoring pools without deleting rows or changing scoring formulas.
+
+MLB identity repair now prefers explicit gamePk/source mappings, then an exact Eastern-date/home/away event match;
+ambiguity fails closed. Team resolution uses canonical event sides and event-specific lineup/probable-pitcher
+evidence, derives the opposite team deterministically, and rejects stale teams outside the selected event.
+Neither this path nor the settlement path creates duplicate events, performs cleanup/backfill, or touches WNBA
+ingestion, grading semantics, snapshot thresholds, schedulers, or production data.
+
+Focused and full validation passed: **122/122 focused tests**, **433/434 full-suite tests with 1 intentional
+environment-gated skip**, TypeScript clean, Next production build passed, OpenNext Cloudflare build passed,
+public-export audit passed (270 included / 55 excluded / 0 closure violations / 0 secret findings), private
+boundary audit passed (0 violations), and `git diff --check` passed. The exact private candidate is
+`5123c3bd4dfedb2ce3675d7de635ce76437ea5ff` before this documentation-only handoff amendment.
+
+Production was not touched: no provider job, workflow dispatch, Supabase write, migration, backfill, scheduler,
+pin, rollback, public frontend deployment, or private-main push was performed. The separate local Covered Picks
+frontend fix remains unstaged, as does the pre-existing untracked `scoring-engine/dist/`; `.claude/launch.json`
+remains excluded. Push only this private candidate to `origin/codex/public-repo-repair` after the handoff update.
+
+## Session 52 — SHARED SHARP PAGE-COVERAGE CANDIDATE (2026-07-21 UTC)
+
+The private repair branch extends the already-shared MLB/WNBA fair Sharp rotation with one bounded page-size
+correction. A provider-only comparison of the same current WNBA DraftKings player-rebounds configuration returned
+10 records with `hasMore=true` at the former page size of 10, versus 78 records with `hasMore=false` at 100.
+The production runner now requests the provider-supported 100-row page for both MLB and WNBA. The hard eight
+outbound-request limit, 6.5-second spacing, persisted fair first-page/continuation rotation, and two-page
+per-config cap are unchanged; no scoring, threshold, snapshot, scheduler, WNBA-ingestion, migration, or
+backfill behavior changed.
+
+Focused Sharp/pipeline tests pass (87/87), including explicit MLB and WNBA assertions for the shared 100-row
+argument. Final validation passes: 438/439 tests with one intentional environment-gated skip, TypeScript,
+Next production build, OpenNext Cloudflare build, public/private boundary audits, secret scan, and `git diff
+--check`. Production remains paused on V2 `a27e4bf…`; V1 remains `RETIRED_STALE_RUN_GUARD`; no production
+workflow, Supabase write, scheduler change, private-main push, or public deployment was performed.
+
+## Session 53 — BOUNDED LIVE IDENTITY-REPAIR CORRECTION READY (2026-07-21 UTC)
+
+The first controlled proof of the 100-row shared Sharp coverage candidate showed the intended coverage gain but
+also exposed a recurring-cost defect: `runLivePreScoreRepair` passed every current-prop ID plus all active event
+and player IDs into `repairSharpCurrentPropIdentities`. The matcher's unioned ID queries therefore expanded the
+repair to the full current universe (400 rows), then repeated unresolved rows in later reconciliation work.
+
+The correction leaves Sharp ingestion, its 100-row page, fair shared MLB/WNBA pagination, scoring, publication,
+and scheduler behavior unchanged. Live identity repair now selects only current/future rows that lack a canonical
+identity field or are not `strongly_resolved`, orders them by nearest start, and selects no more than **25** with
+the existing persisted `provider_cache` rotating cursor. It passes only that selected `currentPropIds` slice to
+the matcher — never expanding selection through event or player IDs. Started/past rows are excluded by the
+selector itself. Reports expose candidate, selected, deferred, rotation, and repair counts; a complete universe
+has zero candidates and makes no identity writes. Incomplete rows remain retryable and rotate fairly on later
+cycles.
+
+Focused identity/live-repair/Sharp tests pass (31/31). Final validation: **442/443** repository tests pass with
+one intentional skip; TypeScript, Next production build, OpenNext Cloudflare build, private-boundary audit,
+public-export/secret audit, and `git diff --check` pass. Production was not touched: V2 remains
+`43de479…`, V1 remains `RETIRED_STALE_RUN_GUARD`, and the public scheduler remains disabled. The separate
+local Covered Picks frontend work and untracked `scoring-engine/dist/` remain unstaged; `.claude/launch.json`
+remains excluded. The next approved action is a single bounded natural-window proof, not a pin or dispatch now.
+
+## Session 54 — EARLY SHARED PROP-DISCOVERY CANDIDATE READY (2026-07-22 UTC)
+
+The recurrent pipeline no longer makes safe prop preparation wait for the six-hour pregame scoring window.
+For each authorized non-dry MLB/WNBA run, the order is now: postgame grading/settlement as separately bounded
+work, 30-minute-TTL schedule refresh, **due-only shared Sharp discovery** (100 rows/page, existing eight-request
+cap, 6.5-second spacing, persisted fair first/continuation rotation), then one capped current/future identity
+slice (at most 25) before the pregame decision. The runner no longer forces all configs past their persisted
+cadence; incomplete continuation configs remain eligible until their saved cursor is drained.
+
+The pregame gate remains intact. Player-game-log refresh, recent features, matchup/team/weather context,
+reconciliation, scoring, board generation, and publication still execute only inside the qualifying window.
+The post-gate repair is told that the early identity slice has already run, so a single pipeline invocation never
+expands identity work into a second batch. Outside the window, discovery safely advances current/future coverage
+and exits without scoring or publication. Sharp discovery failure remains fail-closed for downstream work; an
+identity-preparation warning remains visible and is retried by the existing gated repair.
+
+Validation: focused pipeline/identity tests 70/70, shared Sharp rotation/matching tests 23/23, full repository
+suite 442/443 with one intentional environment-gated skip, TypeScript clean, Next production build and OpenNext
+Cloudflare build pass, public-export audit 270 included / 56 excluded / 0 closure violations / 0 secrets, private
+boundary audit 0 violations, and `git diff --check` pass. The public-export manifest now explicitly keeps the
+private identity-selection test out of the public tree. No production action has occurred: V2 remains
+The controlled public proof then pinned V2 to
+`8fd63a4a18b35cc1f9417e232dca3e053b9309ff` with scheduling still false and ran public workflow
+`29882798827` (manual MLB, scoring/board/publication false). It checked out that exact SHA, refreshed 32 MLB
+events, made exactly 8 outbound Sharp calls under the existing cap, inserted/updated 144 current-prop rows,
+and repaired exactly 25 of 144 incomplete current/future identities (119 deferred with a persisted cursor).
+The window then correctly skipped outside six hours; no pre-score repair, scoring, board, or snapshot write ran.
+Four provider calls returned transient HTTP 400s for hits/total-bases on both books. Identical strict, rate-spaced
+provider-only reads immediately afterward succeeded (100 hits rows with a cursor; 52 total-bases rows), so the
+configs remain due for the normal bounded retry rather than requiring a code/config change.
+
+V2 remains pinned to that SHA, V1 remains `RETIRED_STALE_RUN_GUARD`, and public scheduling is now **true**;
+private cron-bearing workflows remain manually disabled. The next scheduled cycle is the only remaining
+observation, not a reason to pause the product. The separate local Covered Picks frontend work and
+`scoring-engine/dist/` remain unstaged.
+
+## Session 55 — COVERED PICKS PUBLICATION CONTRACT FIX (2026-07-22 UTC)
+
+Covered Picks now keeps healthy 70+ rows even when a league is marked held for route health. The publication
+assembler no longer drops the entire league from the Covered Picks snapshot; it relies on the existing
+row-level eligibility gate (`publishable` + score floor + future start) instead. This preserves the intended
+league isolation contract for the combined snapshot while preventing a degraded league from suppressing a
+healthy row from that same league or from the other league.
+
+Validation on the local repair branch passed: focused `lib/ops/public-snapshots.test.ts` and
+`lib/ops/github-actions-pipeline.test.ts`, full `pnpm test` (442 pass / 1 skip / 0 fail), `next build`, and
+`opennextjs-cloudflare build`. The dry-run public export audit also passed with 0 closure violations and 0
+secret findings. Production state was not changed.
+
+## Session 56 — FINAL NATURAL CERTIFICATION COMPLETE (2026-07-22 UTC)
+
+The first natural scheduled run on the promoted candidate completed successfully and certified the final live
+state. Public production controls remained coherent throughout: `COVERED_PRIVATE_PIPELINE_SHA_V2` stayed pinned
+to `974593870ae0cec3b1ddc9152ffbd8b0694d3269`, `COVERED_PRIVATE_PIPELINE_SHA` stayed
+`RETIRED_STALE_RUN_GUARD`, public `COVERED_GITHUB_SCHEDULER_ENABLED` stayed `true`, and the private repo
+scheduler stayed disabled. Private `origin/main` remained unchanged at
+`23f665955b55a9e862f7f2efa8205538c5426013`.
+
+Natural scheduled run `29964366478` checked out the certified SHA exactly and exercised the intended bounded
+production order. WNBA discovery stayed bounded: schedule refresh ran, shared Sharp discovery ran with the
+existing request budget, identity repair stayed capped, background WNBA ingestion was skipped because the stored
+logs already covered the most recent completed game, and the pregame gate / scoring / board / publication path
+completed normally. Covered Picks published `2` rows instead of falling back to empty, Parlay published `104`,
+and Model Performance published `116`. No cross-league suppression regression was observed, no broad backfill
+occurred, and the stale queued artifact `29533138921` remained isolated and non-executable. Production is now
+certified at `COVERED FLOW REMEDIATED — EARLY DISCOVERY + AUTOPILOT RESTORED`.
+
+## Session 57 — 24-HOUR EARLY DISCOVERY WINDOW (2026-07-24 UTC)
+
+The prop discovery path now uses a shared rolling 24-hour window instead of an Eastern-calendar-day gate. The
+planner in `lib/providers/prop-refresh-plan.ts` now admits events from `now` through `now + 24h`, and the
+SharpAPI payload merge in `lib/providers/sharpapi-refresh.ts` uses the same rolling window so cached discovery
+can accumulate across cycles without waiting for a new calendar day. This change stays out of schedule
+cataloging, enrichment, scoring, and publication.
+
+Validation passed on the focused boundary tests:
+`lib/providers/prop-refresh-plan.test.ts`, `lib/providers/prop-refresh-plan.season.test.ts`, and
+`lib/providers/sharpapi-refresh.test.ts`, plus `pnpm exec tsc --noEmit`.
+
+Live GitHub history accessible from this session currently shows public scheduled runs on the public repository
+head `cfad008a903109da0e09ffc6427d49b2cf3dfb6f`. I did not obtain a matching live scheduled run for candidate
+`611e8a8d3dca2197eac28dc5e61c0921a082afaa` from the tools available here, so that certification remains
+unproven in this environment even though the discovery-horizon code change is complete.
+
+## Session 58 — COMBINED PRODUCT-QUALITY + 24-HOUR DISCOVERY LIVE CERTIFICATION (2026-07-24 UTC)
+
+The production V2 pin was manually updated to `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`, and the first
+natural scheduled run after that change completed successfully. Public workflow run `30059909149` was
+schedule-triggered, ran from public head `cfad008a903109da0e09ffc6427d49b2cf3dfb6f`, and checked out the
+private repo exactly at `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`. The run preserved the normal gate
+behavior: no overlapping executable production run was present, the private checkout verification passed,
+and the WNBA cycle remained a healthy skip because the current schedule had no events in today's window.
+
+The rolling 24-hour discovery change remained intact in the live code path, and the previously certified
+Manual Analyzer / Covered Picks product-quality fixes stayed in place. No scheduler, scoring, identity-repair
+cap, or publication regression was observed during this certification run.
+
+## Session 59 — READ-ONLY LIVE FRONTEND / COVERAGE VERIFICATION (2026-07-25 UTC)
+
+Current public deployment is live, but the public knowledge snapshots are still empty at the API layer.
+Verified responses from the production frontend (`covered-opennext-proof` Worker; account-specific
+`*.workers.dev` hostname intentionally not repeated here) show:
+
+- `GET /api/knowledge/covered-picks?limit=250&includeVariantBooks=true` → `snapshotVersion=covered-picks:30133272938.1`, `status=fallback`, `snapshot_source=published`, `count=0`
+- `GET /api/knowledge/parlay-options?limit=250&includeVariantBooks=true` → `snapshotVersion=parlay-options:30133272938.1`, `status=fallback`, `snapshot_source=published`, `count=0`
+
+The rendered HTML shells are correct: Covered Picks exposes only `70+`, `80+`, and `90+`; Manual Analyzer
+exposes `All scores`, `Sub-70`, `70+`, `80+`, and `90+`. Browser automation was blocked by the local macOS
+bootstrap permission in this environment, so the live browser DOM was validated through the rendered HTML and
+API responses instead.
+
+Relational live state is not empty, but it is narrow:
+
+- MLB has current/scored supply and the scoring layer remains active, but the current live mix is still narrow
+  and WNBA is empty.
+- `public-snapshot:covered-picks:latest`, `public-snapshot:parlay-options:latest`, `board-health:latest`,
+  `board-build:latest`, and `today-board:latest` all reflect the empty published-snapshot state rather than
+  the available relational supply.
+
+Conclusion at handoff: the product is improved, but it is not live-certified as a broad multi-game, multi-market
+system yet. The next agent should focus on the remaining coverage/exposure gap between relational prop supply
+and the public snapshot layer, not on scheduler or scoring changes.
+
+## Session 60 — SNAPSHOT/PREPARED-SLATE FIX READY FOR PROMOTION; DOC-ANCHOR + REPO-METADATA CORRECTIONS (2026-07-26/27 UTC)
+
+### Repository-state correction (docs were stale, repository state wins)
+
+`CLAUDE.md`'s "Current handoff anchor" pointed at `eef63e1…` (Session 56). The actual repair-branch tip is
+`ef54794080e7014fd5247d250b59de1f25991cf8` — 9 commits ahead, linear, no divergence (`git merge-base
+--is-ancestor eef63e1… HEAD` confirmed). `origin/main` is unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`
+(re-fetched and verified this session). `CLAUDE.md` is corrected to the real tip.
+
+A stray local file `.git/refs/remotes/origin/HEAD 2` (a macOS duplicate-file accident, the same class of
+artifact as the previously-documented `lib/ops/github-actions-pipeline 2.ts`) was breaking `git fetch`/
+`git rev-parse origin/main` with "bad object" / "did not send all necessary objects" errors. Its content was
+byte-identical to the real `HEAD` ref (`ref: refs/remotes/origin/main`), so it was deleted; fetch and rev-parse
+now work normally. This was local git metadata only — no remote or tracked-content change.
+
+### The three un-promoted commits directly fix the Session 59 symptom
+
+Session 59 found live public snapshots empty (`covered-picks`/`parlay-options` both `published`/`count=0`)
+despite nonzero relational MLB supply, with production still pinned to Session 58's
+`6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`. The repair branch already contains, on top of that SHA and pushed
+to `origin/codex/public-repo-repair` in a prior session, three commits that are the direct fix:
+
+- `f505fa1` — a published `:latest` snapshot with zero rows no longer pins as a permanent hit; it's now
+  treated as a miss (falls through to the bounded relational fallback) when the read is the unpinned `:latest`
+  alias. An explicitly pinned/versioned snapshot is unaffected (immutability preserved).
+- `5ae2e8b` — a two-stage gate (`lib/ops/github-actions-pipeline.ts`, `lib/knowledge/enrichment/jobs.ts`,
+  `lib/knowledge/scoring-service.ts`) so remaining-today + all-tomorrow (Eastern) props prepare, score, and
+  publish without waiting on the 6-hour pregame window; the window itself still gates the volatile-only refresh
+  pass. The same explicit Eastern boundary (`lib/knowledge/prepared-slate-window.ts`) is also applied in the
+  public read layer (`lib/knowledge/read-service.ts`) so no stage — repair, scoring, or public read/fallback —
+  can leak an out-of-scope (day-after-tomorrow-or-later) event.
+- `ef54794` — SharpAPI request accounting counts every physical HTTP request (not one per logical call),
+  classifies 400/429/timeout/5xx distinctly, and enforces the request budget pre-request instead of post-hoc.
+
+None of this has been promoted to `COVERED_PRIVATE_PIPELINE_SHA_V2` or proven live yet — production is still
+running Session 58's SHA and is expected to still show the Session 59 symptom until promotion is approved and
+a natural run is observed.
+
+### Fresh full validation on current HEAD (`ef54794…`), this session
+
+Found and fixed one real but harmless test-fixture defect while re-validating: `lib/scoring/scoring-service.test.ts`'s
+`fakeProp()` helper hardcoded `start_time: "2026-07-26T18:00:00.000Z"` as its default "future" event start. As
+real wall-clock time passed that instant, three tests that rely on the default being in the future
+(`already_fresh`, stale-context-no-rescore, unscored-always-scored) started failing with `past_start_time`
+instead. This is a test-fixture time-bomb, not a production defect — the production boundary math
+(`preparedSlateEventWindow`) already computes everything relative to an injected `now: Date`, never a literal
+date. Fixed by making the default relative to `Date.now()` (matching the same file's pre-existing
+`baseCurrentProp` pattern) rather than a literal string. Grepped the rest of the repo for the same class of
+defect (hardcoded `2026-0[1-9]-[0-9][0-9]T` literals compared against real time): the only other hits are in
+`lib/ops/github-actions-pipeline.test.ts`, which are static report-fixture field values never compared against
+`Date.now()` — not at risk. Zero hardcoded date literals exist anywhere in production (non-test) source.
+
+Full validation after the fix, on `ef54794…` plus the two uncommitted doc/test changes above:
+- `pnpm exec tsc --noEmit`: clean, 0 errors.
+- `pnpm test`: **500 pass / 0 fail / 1 intentional skip**.
+- `pnpm build`: clean.
+- `pnpm cf:build` (OpenNext): clean.
+
+Production was not touched: V2 remains `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`, V1 remains
+`RETIRED_STALE_RUN_GUARD`, public scheduler unchanged, private schedulers stay disabled, private `origin/main`
+unchanged. The only untracked working-tree item is the pre-existing `scoring-engine/dist/`.
+
+### Next steps (owner-gated)
+
+1. Regenerate and re-certify the deterministic public export on this HEAD (Phase C).
+2. Prepare (draft PR only, not merged) a public-repo sync that explicitly preserves
+   `.github/workflows/covered-production-pipeline.yml` (public-owned, has no private-repo counterpart).
+3. Prepare, but do not execute, the `COVERED_PRIVATE_PIPELINE_SHA_V2` promotion plan to `ef54794…` and its
+   bounded natural-run proof — this remains an explicit owner-approval boundary.

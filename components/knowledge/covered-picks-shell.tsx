@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { PickCard } from "@/components/knowledge/pick-card";
 import { coveredPicksScoreFilterOptions } from "@/lib/knowledge/pipeline/board-invariant";
+import { coveredPicksDateOptions } from "@/components/knowledge/parlay-builder-catalog";
 import { filterCoveredPicksSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { CoveredPickRow, CoveredPicksResponse } from "@/lib/knowledge/read-types";
 
@@ -49,6 +50,7 @@ export function CoveredPicksShell() {
   const [authUser, setAuthUser] = useState<{ id: string; displayName: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [visibleCount, setVisibleCount] = useState(10);
   const [sport, setSport] = useState("");
   const [league, setLeague] = useState("");
   const [date, setDate] = useState(easternToday());
@@ -146,9 +148,16 @@ export function CoveredPicksShell() {
     excludeUnsupportedMarkets: false,
     startTimeFrom: null,
     startTimeTo: null,
-    limit: 6,
+    limit: 250,
     includeVariantBooks: false,
   }), [data, date, sport, league, marketType, sportsbook, minimumCoveredScore, confidenceLabel, riskLabel]);
+
+  const dateOptions = useMemo(() => coveredPicksDateOptions(data?.rows ?? []), [data?.rows]);
+  const visibleRows = useMemo(() => displayedRows.slice(0, visibleCount), [displayedRows, visibleCount]);
+
+  useEffect(() => {
+    setVisibleCount(10);
+  }, [date, sport, league, marketType, sportsbook, minimumCoveredScore, confidenceLabel, riskLabel, data?.rows]);
 
   const marketOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -234,13 +243,16 @@ export function CoveredPicksShell() {
       </header>
 
       <section className="knowledge-filter-bar">
-        <input
-          type="date"
+        <select
           value={date}
           onChange={(event) => setDate(event.target.value)}
           aria-label="Pick date"
           className="knowledge-search"
-        />
+        >
+          {dateOptions.map((option) => (
+            <option key={option.value || "all"} value={option.value}>{option.label}</option>
+          ))}
+        </select>
         <select value={sport} onChange={(event) => setSport(event.target.value)}>{sports.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <select value={league} onChange={(event) => setLeague(event.target.value)}>{leagues.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <select value={marketType} onChange={(event) => setMarketType(event.target.value)}>{marketOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
@@ -258,22 +270,35 @@ export function CoveredPicksShell() {
 
       {loading ? <div className="empty-state"><strong>Loading Covered Picks of the Day…</strong><span>Pulling the latest ranked scored props from the backend read layer.</span></div> : null}
       {!loading && error ? <div className="empty-state"><strong>Couldn’t load Covered Picks of the Day.</strong><span>{error}</span></div> : null}
-      {!loading && !error && !displayedRows.length ? <div className="empty-state"><strong>No Covered Picks are available right now.</strong><span>Scored props may already exist, but none have cleared the 70+ Covered Score board floor yet. The board publishes fewer picks rather than lowering the floor. Try widening the other filters.</span></div> : null}
+      {!loading && !error && !displayedRows.length ? <div className="empty-state"><strong>No Covered Picks are available right now.</strong><span>Scored props may already exist, but none have cleared the 70+ Covered Score board floor yet. The board publishes fewer picks rather than lowering the floor. Try widening the other filters or switch the date.</span></div> : null}
 
-      {!loading && !error && displayedRows.length ? (
-        <section className="opportunity-grid" aria-live="polite">
-          {displayedRows.map((pick, index) => (
-            <PickCard
-              key={pick.scored_prop_id}
-              pick={pick}
-              rank={index + 1}
-              canSave={Boolean(authUser)}
-              saveHref="/login?next=%2Ftoday"
-              saveState={savedPickIds[pick.current_prop_id] ? "saved" : savingPickId === pick.current_prop_id ? "saving" : "idle"}
-              saveMessage={saveMessages[pick.current_prop_id]}
-              onSave={savePick}
-            />
-          ))}
+      {!loading && !error && visibleRows.length ? (
+        <section aria-live="polite">
+          <div className="opportunity-grid">
+            {visibleRows.map((pick, index) => (
+              <PickCard
+                key={pick.scored_prop_id}
+                pick={pick}
+                rank={index + 1}
+                canSave={Boolean(authUser)}
+                saveHref="/login?next=%2Ftoday"
+                saveState={savedPickIds[pick.current_prop_id] ? "saved" : savingPickId === pick.current_prop_id ? "saving" : "idle"}
+                saveMessage={saveMessages[pick.current_prop_id]}
+                onSave={savePick}
+              />
+            ))}
+          </div>
+          {visibleRows.length < displayedRows.length ? (
+            <div className="empty-state empty-state--compact">
+              <button
+                type="button"
+                className="save-button"
+                onClick={() => setVisibleCount((current) => Math.min(current + 10, displayedRows.length))}
+              >
+                Show 10 more
+              </button>
+            </div>
+          ) : null}
         </section>
       ) : null}
     </div>

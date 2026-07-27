@@ -1,4 +1,5 @@
 import { jsonRouteResponse } from "@/lib/api/route-response";
+import { clampCoveredPicksFloor } from "@/lib/knowledge/pipeline/board-invariant";
 import { getCoveredPicksOfTheDay } from "@/lib/knowledge/read-service";
 import {
   canUseCoveredPicksSnapshot,
@@ -41,7 +42,9 @@ export async function GET(request: Request) {
     league: url.searchParams.get("league"),
     marketType: url.searchParams.get("marketType"),
     sportsbook: url.searchParams.get("sportsbook"),
-    minimumCoveredScore: parseNumber(url.searchParams.get("minimumCoveredScore")),
+    // Covered Picks hard floor: the API can raise the minimum but never lower it
+    // below 70. Nothing sub-70 is ever served, regardless of the requested param.
+    minimumCoveredScore: clampCoveredPicksFloor(parseNumber(url.searchParams.get("minimumCoveredScore"))),
     minimumConfidenceScore: parseNumber(url.searchParams.get("minimumConfidenceScore")),
     scoreLabel: url.searchParams.get("scoreLabel"),
     confidenceLabel: url.searchParams.get("confidenceLabel"),
@@ -80,7 +83,7 @@ export async function GET(request: Request) {
     },
     buildFallbackResponse: async () => {
       const payload = await getCoveredPicksOfTheDay({
-        limit: 100,
+        limit: 250,
         includeDetails: false,
         includeGrading: false,
         includeVariantBooks: true,

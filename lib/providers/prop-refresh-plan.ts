@@ -59,10 +59,6 @@ const sportKeyToSport: Record<string, "MLB" | "WNBA" | "NFL" | "NBA"> = {
   americanfootball_nfl: "NFL",
 };
 
-function easternDate(value: Date) {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
-}
-
 export type PlannedPropRequest = {
   sportKey: string;
   eventId: string;
@@ -72,6 +68,20 @@ export type PlannedPropRequest = {
   regions: string[];
   maximumCost: number;
 };
+
+const MS_PER_HOUR = 3_600_000;
+
+export function discoveryWindowBounds(now = new Date(), horizonHours = 24) {
+  const start = now.getTime();
+  const end = start + Math.max(0, horizonHours) * MS_PER_HOUR;
+  return { start, end };
+}
+
+export function isWithinDiscoveryWindow(value: number | Date | string, now = new Date(), horizonHours = 24) {
+  const time = typeof value === "number" ? value : new Date(value).getTime();
+  const { start, end } = discoveryWindowBounds(now, horizonHours);
+  return Number.isFinite(time) && time >= start && time <= end;
+}
 
 function marketForPass(event: ProviderEvent, pass: number) {
   const available = approvedPropMarkets[event.sportKey] ?? [];
@@ -106,8 +116,7 @@ export function buildPropRefreshPlan(events: ProviderEvent[], options: {
   sportBudgets?: Partial<Record<string, number>>;
 } = {}) {
   const now = options.now ?? new Date();
-  const targetDate = easternDate(now);
-  const horizon = now.getTime() + (options.horizonHours ?? 48) * 60 * 60 * 1000;
+  const horizonHours = options.horizonHours ?? 24;
   const maximumTotalCost = options.maximumTotalCost ?? 15;
   const allowedSportKeys = options.allowedSportKeys ? new Set(options.allowedSportKeys) : null;
   const requests: PlannedPropRequest[] = [];
@@ -120,13 +129,7 @@ export function buildPropRefreshPlan(events: ProviderEvent[], options: {
       const sport = sportKeyToSport[event.sportKey];
       return sport ? isSportInSeason(sport, now) : false;
     })
-    .filter((event) => {
-      const start = new Date(event.commenceTime).getTime();
-      return Number.isFinite(start)
-        && start >= now.getTime()
-        && start <= horizon
-        && easternDate(new Date(start)) === targetDate;
-    });
+    .filter((event) => isWithinDiscoveryWindow(new Date(event.commenceTime).getTime(), now, horizonHours));
 
   const bySport = new Map<string, ProviderEvent[]>();
   for (const event of candidates) {

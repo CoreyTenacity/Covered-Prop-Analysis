@@ -10,7 +10,26 @@ Claude Code should:
 
 Only add Claude-specific guidance if it is truly necessary for this repository.
 
-Current handoff anchor: branch `codex/public-repo-repair`. Run `git rev-parse HEAD` and `git rev-parse origin/codex/public-repo-repair` to confirm the exact current tip (they should match). `origin/main` is unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Before making changes, re-read `docs/AGENT_HANDOFF.md` and preserve the non-main repair workflow.
+>> ACTIVE HANDOFF (2026-07-26, Session 60) — PREPARED-SLATE SNAPSHOT FIX READY, NOT YET PROMOTED. Read
+>> `docs/AGENT_HANDOFF.md` Session 60 FIRST. Production `COVERED_PRIVATE_PIPELINE_SHA_V2` is still pinned to
+>> `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f` (Session 58) and has NOT been advanced. Session 59 (2026-07-25)
+>> found the live public snapshots empty (`covered-picks`/`parlay-options` both `published`/`count=0`) despite
+>> nonzero relational MLB supply. The repair branch's un-promoted commits `f505fa1`/`5ae2e8b`/`ef54794` (on top
+>> of Session 58's SHA) are the direct fix for that exact symptom: a zero-row published `:latest` snapshot no
+>> longer pins as a permanent hit, and every public read path now shares one explicit Eastern prepared-slate
+>> window instead of relying only on the 6-hour pregame gate. This fix has not yet been promoted to
+>> `COVERED_PRIVATE_PIPELINE_SHA_V2` or proven live — that promotion is an explicit owner-approval boundary.
+>> Private repo scheduler remains disabled; private `origin/main` remains
+>> `23f665955b55a9e862f7f2efa8205538c5426013`, unchanged.
+
+Current handoff anchor: branch `codex/public-repo-repair`, tip `ef54794080e7014fd5247d250b59de1f25991cf8`
+(`origin/codex/public-repo-repair` matches — verified via `git rev-parse HEAD origin/codex/public-repo-repair`
+this session). This tip is 9 commits ahead of the previously-recorded anchor `eef63e1…` (Session 56), linear
+with no divergence (`git merge-base --is-ancestor eef63e1… HEAD` confirmed). `origin/main` remains unchanged at
+`23f665955b55a9e862f7f2efa8205538c5426013`. Before making any further changes, re-read `docs/AGENT_HANDOFF.md`
+and preserve the non-main repair workflow.
+
+The historical Session 42–45 notes below are retained as archive only.
 
 ---
 

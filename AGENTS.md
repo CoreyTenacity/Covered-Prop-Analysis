@@ -75,6 +75,13 @@ real audit — see `docs/GHA_BUDGET_AUDIT_FINDINGS.md`.)
 - Current scheduled spend is **0** (schedulers gated off). Re-enabling as-is would cost **~4,800 min/month
   ≈ 2.4x the cap** — do not enable without the cost fixes in `docs/GHA_BUDGET_PHASE2_DESIGN.md`.
 - If a proposed schedule approaches or exceeds 2,000 minutes, flag it rather than enabling it.
+- **Public-minutes cost strategy (session 15):** the intended direction is to run the bulk of recurring
+  production Actions minutes in the PUBLIC repo (`Covered-Prop-Analysis`), where standard-runner minutes are free
+  and unlimited, keeping private-repo production Actions usage near zero. Scoring stays a private Cloudflare
+  Worker (zero GitHub minutes). This shift is Supabase- and Cloudflare-neutral (same work, same DB/Worker calls);
+  run **frequency/per-run egress** — not minute cost — remains the lever that protects the Supabase (~5 GB/mo)
+  and Cloudflare free tiers, so cadence stays bounded regardless of free minutes. Full detail + free-tier
+  validation: `docs/GHA_PUBLIC_MINUTES_STRATEGY.md`.
 
 ### Supabase egress and Vercel Fluid Active CPU — hard rule
 

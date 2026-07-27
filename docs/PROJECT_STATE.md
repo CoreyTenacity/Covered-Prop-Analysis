@@ -1,8 +1,55 @@
-# Project State — 2026-07-14 (audit appended 2026-07-15)
+# Project State — 2026-07-14 (audit appended 2026-07-15; superseded current-state 2026-07-18 below)
 
 This document tracks known data population issues and operational state.
 The 2026-07-15 audit section below is VERIFIED with read-only code inspection + live Supabase reads
 and CORRECTS several 2026-07-14 hypotheses (notably: headshots are NOT a covered-score input).
+
+---
+
+## CURRENT STATE — 2026-07-26/27 (Session 60) — SNAPSHOT-FIX READY, PROMOTION PENDING
+
+The 2026-07-22 certification below described production as certified and healthy. Session 59 (2026-07-25)
+found the live public snapshots (`covered-picks`, `parlay-options`) empty (`published`/`count=0`) despite
+nonzero relational MLB supply — the certification below is superseded and should not be read as current.
+The fix is committed on `codex/public-repo-repair` at `ef54794080e7014fd5247d250b59de1f25991cf8` (pushed) but
+**not yet promoted** to `COVERED_PRIVATE_PIPELINE_SHA_V2` (still Session 58's `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`)
+or proven live. See `docs/AGENT_HANDOFF.md` Session 60 for full detail.
+
+## CURRENT STATE — 2026-07-22 (CERTIFIED FINAL PRODUCTION) — SUPERSEDED BY SESSION 59/60 ABOVE
+
+- **Production certified:** `COVERED_PRIVATE_PIPELINE_SHA_V2=974593870ae0cec3b1ddc9152ffbd8b0694d3269`,
+  `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`, `COVERED_GITHUB_SCHEDULER_ENABLED=true`.
+  Private schedulers remain disabled; private `origin/main` remains `23f665955b55a9e862f7f2efa8205538c5426013`.
+- **Certified natural run:** `29964366478` (`schedule`, success) checked out the certified V2 exactly and completed
+  the bounded early-discovery / scoring / board / publication path without regressions.
+- **Certified outputs:** Covered Picks `published` / 2 rows; Parlay `published` / 104 rows; Model Performance
+  `published` / 116 rows.
+- **Certified operational result:** early discovery, bounded Sharp request budgeting, identity repair, and
+  WNBA background-ingest skip behavior remained healthy; the old whole-league Covered Picks suppression defect
+  did not reproduce.
+- **Do NOT** treat the older 2026-07-18 proof-in-flight notes below as current state; they are historical record
+  only. The certified live state is the one above.
+
+## CURRENT STATE — 2026-07-18 (Session 44 final-completion audit, read-only)
+
+- **Production:** SHA `3087979d…`, scheduler `true`. Output **frozen at 2026-07-17T23:08Z** — the `events`
+  horizon is stale (0 rows for 7/18–7/19, both leagues) because the authoritative schedule writers lived only in
+  disabled private workflows. `scored_props`=475 (WNBA publishable 174, MLB 4); `covered_score>=70`=29.
+- **Fix built, unproven:** candidate `8b266f4` (= `4404521` enrichment repairs + bounded pre-gate schedule
+  refresh, 30-min TTL) makes the sole enabled public executor self-heal the horizon. Not pinned/proved.
+- **Open known issues (dependency-ordered):**
+  1. (Critical) schedule population unproven in production → nothing runs, output frozen.
+  2. (High) MLB weather `game_id`, WNBA ZSTD decode, coverage/recent-features/matchup — code-fixed in `4404521`,
+     production-unproven.
+  3. (**Medium, NEW**) **model grader `gradeCompletedScoredProps` is unwired** (0 callers; `grading_results`=0
+     rows) → model-performance + provider-backed user settlement have no graded data. See
+     `docs/AUTO_GRADING_STATUS.md` correction. Small wiring fix, bundle into the final candidate.
+  4. (Low) inert `lib/knowledge/pipeline` scaffolding (run-manifest/boundary-validation/module-reconciliation/
+     contracts runtime) — 0 wired call sites; cost-free; wire-or-prune later.
+  5. (Low) `ensureEvent` rewrites unchanged rows; bounded by the 30-min schedule TTL; change-detection deferred.
+- **Classification: B — SMALL FINITE FIX SET REMAINS.** Finish line = one bundled final candidate
+  (`8b266f4` + grading wiring) + one coordinated owner-gated MLB+WNBA proof. Detail + DONE criteria:
+  `docs/AGENT_HANDOFF.md` Session 44. No production changes without explicit owner approval.
 
 ---
 
