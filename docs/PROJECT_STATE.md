@@ -6,7 +6,17 @@ and CORRECTS several 2026-07-14 hypotheses (notably: headshots are NOT a covered
 
 ---
 
-## CURRENT STATE — 2026-07-26/27 (Session 60) — SNAPSHOT-FIX READY, PROMOTION PENDING
+## CURRENT STATE — 2026-07-27 (Session 61) — LIVE AND CERTIFIED
+
+Go-live complete. Public PR `CoreyTenacity/Covered-Prop-Analysis#11` merged (public `main` =
+`b3c33b47bfb89d01366f3fea3973f60e42f2cc3b`), Cloudflare deployment healthy, `COVERED_PRIVATE_PIPELINE_SHA_V2`
+promoted to `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`. Natural run `30291332625`
+(2026-07-27T17:54Z–17:58Z, success) published Covered Picks (5 rows, floor 71), Parlay (100 rows), Model
+Performance (244 rows) — the Session 59 empty-snapshot symptom is resolved and proven live. See
+`docs/AGENT_HANDOFF.md` Session 61 for full evidence. Rollback SHA on file:
+`6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f` (not needed this session).
+
+## SUPERSEDED — 2026-07-26/27 (Session 60) — SNAPSHOT-FIX READY, PROMOTION PENDING
 
 The 2026-07-22 certification below described production as certified and healthy. Session 59 (2026-07-25)
 found the live public snapshots (`covered-picks`, `parlay-options`) empty (`published`/`count=0`) despite

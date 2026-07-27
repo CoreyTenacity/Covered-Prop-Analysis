@@ -880,6 +880,57 @@ export async function refreshMlbCompletedGames(now = new Date()) {
   return { league: "MLB", completed };
 }
 
+type MlbLogRefreshClass = "pitcher" | "batter" | "unclassified";
+
+// Classifies a candidate by which stat groups their active props actually need
+// (reusing statGroupsForSettlementMarket's market-type mapping via the already-
+// computed requiredStatGroupsByPlayerId) rather than players.primary_position,
+// which is empty/null for the majority of stored MLB players (confirmed: 584 of
+// 890, 66%) and is therefore not a usable classification signal at scale.
+export function classifyMlbPlayerForLogs(
+  player: Pick<MlbPlayerRow, "id">,
+  requiredStatGroupsByPlayerId: Record<string, MlbPostgameStatGroup[]>,
+): MlbLogRefreshClass {
+  const groups = requiredStatGroupsByPlayerId[player.id] ?? [];
+  const hasPitching = groups.includes("pitching");
+  const hasHitting = groups.includes("hitting");
+  if (hasPitching && !hasHitting) return "pitcher";
+  if (hasHitting && !hasPitching) return "batter";
+  return "unclassified";
+}
+
+// Bounded fair allocation: reserve half of totalBudget for each class so one
+// class's rotation dynamics (a perpetually-refilling "missing feature"
+// priority queue) cannot consume the entire shared per-run budget and starve
+// the other class's regular refresh indefinitely -- proven live against
+// production data: MLB pitchers reached 90% player_game_logs coverage while
+// batters sat at 46%, and the shared regular-rotation cursor
+// (knowledge:cursor:mlb:refresh_player_game_logs:players:regular) had not
+// advanced in 17 days because batters' perpetually-refilling "missing"
+// priority queue consumed nearly the entire shared window every run. Unused
+// reservation spills over one slot at a time to whichever class still has
+// eligible candidates beyond its base share; the total never exceeds
+// totalBudget, and a class with no candidates wastes nothing.
+export function allocateBoundedClassSlots(input: {
+  pitcherPoolSize: number;
+  batterPoolSize: number;
+  totalBudget: number;
+}): { pitcherBudget: number; batterBudget: number } {
+  const { pitcherPoolSize, batterPoolSize, totalBudget } = input;
+  const reserved = Math.max(1, Math.floor(totalBudget / 2));
+  let pitcherBudget = Math.min(reserved, pitcherPoolSize);
+  let batterBudget = Math.min(reserved, batterPoolSize);
+  let leftover = totalBudget - pitcherBudget - batterBudget;
+  while (leftover > 0) {
+    const pitcherRoom = pitcherPoolSize - pitcherBudget;
+    const batterRoom = batterPoolSize - batterBudget;
+    if (pitcherRoom <= 0 && batterRoom <= 0) break;
+    if (batterRoom >= pitcherRoom) batterBudget += 1; else pitcherBudget += 1;
+    leftover -= 1;
+  }
+  return { pitcherBudget, batterBudget };
+}
+
 export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   playerIds?: string[];
   missingOrStaleOnly?: boolean;
@@ -937,7 +988,20 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   const maxPlayerItemsPerRun = Math.min(baseSliceSize, 12);
   const livePriorityCount = scopedPlayers.filter((player) => priorities.playerIds.has(player.id) || priorities.playerNames.has(normalizeName(player.canonical_name))).length;
   const missingRecentPriorityCount = scopedPlayers.filter((player) => missingRecentPriorityPlayerIds.has(player.id) || missingRecentPriorityNames.has(normalizeName(player.canonical_name))).length;
-  const playerWindow: RefreshWindow<(typeof scopedPlayers)[number]> = targetedPlayerIds.size
+  type PlayerWindowWithAllocation = RefreshWindow<(typeof scopedPlayers)[number]> & {
+    allocation: null | {
+      pitcherPoolSize: number;
+      batterPoolSize: number;
+      unclassifiedPoolSize: number;
+      pitcherBudget: number;
+      batterBudget: number;
+      unclassifiedBudget: number;
+      pitcherSelectedIds: string[];
+      batterSelectedIds: string[];
+      unclassifiedSelectedIds: string[];
+    };
+  };
+  const playerWindow: PlayerWindowWithAllocation = targetedPlayerIds.size
     ? (() => {
         const targetedLimit = typeof options?.limit === "number" && Number.isFinite(options.limit)
           ? Math.max(1, Math.floor(options.limit))
@@ -950,23 +1014,72 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
           nextIndex: 0,
           total: scopedPlayers.length,
           priorityOnly: false,
+          allocation: null,
         };
       })()
-    : await takeLiveFirstWindow({
-        cacheKey: "knowledge:cursor:mlb:refresh_player_game_logs:players",
-        provider: "mlb-stats-api",
-        items: scopedPlayers,
-        isPriority: (player) =>
+    : await (async () => {
+        const isPriorityFor = (player: (typeof scopedPlayers)[number]) =>
           missingRecentPriorityPlayerIds.has(player.id)
           || missingRecentPriorityNames.has(normalizeName(player.canonical_name))
           || priorities.playerIds.has(player.id)
-          || priorities.playerNames.has(normalizeName(player.canonical_name)),
-        sliceSize: Math.min(Math.max(baseSliceSize, Math.min(Math.max(missingRecentPriorityCount, livePriorityCount), 8)), maxPlayerItemsPerRun),
-        maxPriorityItems:
-          missingRecentPriorityCount > 0
-            ? Math.min(Math.max(missingRecentPriorityCount, 6), 8)
-            : Math.max(2, Math.floor(baseSliceSize / 2)),
-      });
+          || priorities.playerNames.has(normalizeName(player.canonical_name));
+
+        const pitcherPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "pitcher");
+        const batterPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "batter");
+        const unclassifiedPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "unclassified");
+
+        const { pitcherBudget, batterBudget } = allocateBoundedClassSlots({
+          pitcherPoolSize: pitcherPool.length,
+          batterPoolSize: batterPool.length,
+          totalBudget: maxPlayerItemsPerRun,
+        });
+
+        async function windowFor(pool: typeof scopedPlayers, budget: number, cacheSuffix: string) {
+          if (!budget || !pool.length) {
+            return { items: [] as (typeof scopedPlayers)[number][], start: 0, end: 0, nextIndex: 0, total: pool.length, priorityOnly: false };
+          }
+          const priorityCount = pool.filter(isPriorityFor).length;
+          return takeLiveFirstWindow({
+            cacheKey: `knowledge:cursor:mlb:refresh_player_game_logs:players:${cacheSuffix}`,
+            provider: "mlb-stats-api",
+            items: pool,
+            isPriority: isPriorityFor,
+            sliceSize: budget,
+            maxPriorityItems: priorityCount > 0 ? Math.min(Math.max(priorityCount, Math.ceil(budget / 2)), budget) : Math.max(1, Math.floor(budget / 2)),
+          });
+        }
+
+        const [pitcherWindow, batterWindow] = await Promise.all([
+          windowFor(pitcherPool, pitcherBudget, "pitcher"),
+          windowFor(batterPool, batterBudget, "batter"),
+        ]);
+        // Unclassified players (a player whose active props need both/neither
+        // stat group) only run with whatever budget genuinely goes unused by
+        // both reserved classes, so they can never displace a classified
+        // player from the fair split.
+        const unclassifiedBudget = Math.max(0, maxPlayerItemsPerRun - pitcherWindow.items.length - batterWindow.items.length);
+        const unclassifiedWindow = await windowFor(unclassifiedPool, unclassifiedBudget, "unclassified");
+
+        return {
+          items: [...pitcherWindow.items, ...batterWindow.items, ...unclassifiedWindow.items],
+          start: pitcherWindow.start,
+          end: unclassifiedWindow.end,
+          nextIndex: batterWindow.nextIndex,
+          total: scopedPlayers.length,
+          priorityOnly: pitcherWindow.priorityOnly && batterWindow.priorityOnly,
+          allocation: {
+            pitcherPoolSize: pitcherPool.length,
+            batterPoolSize: batterPool.length,
+            unclassifiedPoolSize: unclassifiedPool.length,
+            pitcherBudget,
+            batterBudget,
+            unclassifiedBudget,
+            pitcherSelectedIds: pitcherWindow.items.map((p) => p.id),
+            batterSelectedIds: batterWindow.items.map((p) => p.id),
+            unclassifiedSelectedIds: unclassifiedWindow.items.map((p) => p.id),
+          },
+        };
+      })();
   const playerItems = playerWindow.items;
   let logsUpserted = 0;
   let emptyFetches = 0;
@@ -1111,6 +1224,11 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     priorityOnlyWindow: playerWindow.priorityOnly,
     sampleMissingRecentPlayers: liveCoverage.sampleMissingPlayerNames,
     playerCursor: { start: playerWindow.start, nextIndex: playerWindow.nextIndex, total: playerWindow.total },
+    // Explicit batter/pitcher allocation visibility (null in targeted mode,
+    // where a caller-supplied playerIds list bypasses the fair split
+    // entirely) -- so a stuck or imbalanced rotation is visible in the run
+    // report itself rather than only discoverable by a manual DB audit.
+    classAllocation: playerWindow.allocation,
     logsUpserted,
     emptyFetches,
   };

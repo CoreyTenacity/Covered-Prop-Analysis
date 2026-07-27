@@ -126,8 +126,71 @@ export function clamp(value: number, min: number, max: number) {
 }
 
 export function numeric(value: unknown) {
+  // `Number(null) === 0`, so without this explicit check a genuinely missing
+  // (SQL NULL) feature column is silently treated as a measured zero -- e.g. a
+  // pitcher with no stored strikeout-rate data reads as "0% strikeout rate"
+  // instead of "unknown". Only null/undefined mean "missing" here; a real
+  // numeric zero (Number(0) === 0) still passes through unchanged below.
+  if (value === null || value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Structured direction-aware edge.
+ *
+ * Kept in base.ts (public-safe) because it is pure math with no tuned values --
+ * the sign of `projection - line` (or its inverse for Less/Under) is fully
+ * determined by the already-published prop fields. The *policy* of how much
+ * positive credit an edge magnitude earns lives elsewhere (see
+ * scoring-internals.ts's edgeMagnitudeCredit), so this file exposes only the
+ * classification, not the scoring weight.
+ *
+ *   - favorable   = projection agrees with the selected side
+ *   - unfavorable = projection opposes the selected side (must never earn positive edge credit)
+ *   - neutral     = projection equals the line exactly
+ *   - unavailable = projection/line/direction is missing or invalid
+ */
+export type EdgeDirection = "favorable" | "neutral" | "unfavorable" | "unavailable";
+
+export type DirectionalEdge = {
+  /** Signed edge (positive = agrees with pick, negative = opposes). Null if unavailable. */
+  signedEdge: number | null;
+  /** |signedEdge| for reporting only; NEVER use this directly for positive score credit
+   *  -- an unfavorable edge has a large magnitude but must earn zero credit. */
+  absoluteMagnitude: number;
+  direction: EdgeDirection;
+  /** The normalized direction actually used for the computation, or null if the input
+   *  direction was invalid/missing. */
+  normalizedDirection: "More" | "Less" | null;
+};
+
+/** Normalize provider-side direction aliases (More/Over/Less/Under, any case) to the
+ *  canonical two-value contract used across scoring, snapshots, and explanations. */
+export function normalizePropDirection(value: unknown): "More" | "Less" | null {
+  if (typeof value !== "string") return null;
+  const lower = value.trim().toLowerCase();
+  if (lower === "more" || lower === "over") return "More";
+  if (lower === "less" || lower === "under") return "Less";
+  return null;
+}
+
+export function computeDirectionalEdge(input: {
+  projection: number | null | undefined;
+  line: number | null | undefined;
+  direction: unknown;
+}): DirectionalEdge {
+  const projection = numeric(input.projection);
+  const line = numeric(input.line);
+  const normalizedDirection = normalizePropDirection(input.direction);
+  if (projection === null || line === null || normalizedDirection === null) {
+    return { signedEdge: null, absoluteMagnitude: 0, direction: "unavailable", normalizedDirection };
+  }
+  const raw = normalizedDirection === "Less" ? line - projection : projection - line;
+  const rounded = Number(raw.toFixed(2));
+  const absoluteMagnitude = Math.abs(rounded);
+  const direction: EdgeDirection = rounded > 0 ? "favorable" : rounded < 0 ? "unfavorable" : "neutral";
+  return { signedEdge: rounded, absoluteMagnitude, direction, normalizedDirection };
 }
 
 export function recommendationForCoveredScore(coveredScore: number) {

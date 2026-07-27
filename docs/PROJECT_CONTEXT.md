@@ -2,7 +2,37 @@
 
 Covered is a sports prop analysis app built around reusable stored knowledge, not inline one-off lookups.
 
-## Current handoff state — 2026-07-26/27 (Session 60) — FIX READY, NOT YET PROMOTED
+## Current handoff state — 2026-07-27 (Session 63) — COVERAGE FIXES READY, NOT YET PROMOTED
+
+**Read `docs/AGENT_HANDOFF.md` Session 63 first.** Live production (V2 `182f6ca…`, unchanged) is the Session 61
+certified state, which surfaced real, narrow coverage: MLB Covered Picks dominated by `pitcher_strikeouts` (MLB
+batter features starved 46% vs pitchers' 90%, now fixed with a fair batter/pitcher allocation policy), and
+WNBA absent from Covered Picks (a persistent crowding-out risk in the combined-league scan, now fixed; plus a
+transient same-day "hasn't been scored yet" state that resolves on its own once WNBA's cron window runs). WNBA
+`player_pra`/`player_threes` confirmed via a bounded live diagnostic to be a genuine provider-catalog gap, not a
+code defect — disabled in the fallback config. None of this is promoted yet.
+
+## Prior handoff state — 2026-07-27 (Session 61) — LIVE AND CERTIFIED
+
+**Read `docs/AGENT_HANDOFF.md` Session 61 first.** The go-live sequence is complete. Public PR
+`CoreyTenacity/Covered-Prop-Analysis#11` merged to `main` (`b3c33b47bfb89d01366f3fea3973f60e42f2cc3b`,
+previously `470a1c3c60c6200dadf4180981717e79df73668b`), the Cloudflare deployment is healthy, and
+`COVERED_PRIVATE_PIPELINE_SHA_V2` is promoted to `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`. The first
+natural scheduled run on the promoted SHA (`30291332625`, 2026-07-27T17:54Z) published real, nonzero,
+correctly-bounded Covered Picks (5 rows, floor 71), Parlay (100 rows), and Model Performance (244 rows)
+snapshots — the Session 59 empty-snapshot symptom is resolved and proven live, not just fixed in code.
+
+Live controls: `COVERED_PRIVATE_PIPELINE_SHA_V2=182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`,
+`COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`, `COVERED_GITHUB_SCHEDULER_ENABLED=true`, private repo
+scheduler disabled, private `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Rollback
+SHA on file if a future release-blocking defect appears: `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`.
+
+Known, explicitly out-of-scope carryovers: WNBA volatile-refresh remains a documented no-op; the global
+context-invalidation marker remains un-scoped; 2 pre-existing Dependabot alerts on the public repo were not
+addressed (owner-restricted this release); a stale `queued` workflow artifact (`29533138921`, 2026-07-16)
+remains present and proven non-blocking again this session.
+
+## Prior handoff state — 2026-07-26/27 (Session 60) — FIX READY, NOT YET PROMOTED
 
 **Read `docs/AGENT_HANDOFF.md` Session 60 first.** The Session 59 empty-snapshot symptom (below) has a direct,
 already-committed fix sitting on `codex/public-repo-repair` at `ef54794080e7014fd5247d250b59de1f25991cf8`

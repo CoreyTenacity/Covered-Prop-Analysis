@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
-import { compareMlbLivePlayerStartTimes, loadUnresolvedFutureMlbEventTeamPriorities, orderMlbTeamsForRosterRefresh, settleMlbPlayerLogsForEvents, statGroupsForSettlementMarket, takeLiveFirstWindow } from "./mlb.ts";
+import { allocateBoundedClassSlots, classifyMlbPlayerForLogs, compareMlbLivePlayerStartTimes, loadUnresolvedFutureMlbEventTeamPriorities, orderMlbTeamsForRosterRefresh, settleMlbPlayerLogsForEvents, statGroupsForSettlementMarket, takeLiveFirstWindow } from "./mlb.ts";
 
 type Store = {
   currentProps: Array<Record<string, unknown>>;
@@ -54,6 +54,64 @@ test("MLB player-log selection keeps the bounded window and cannot let past play
     assert.equal(window.items.length, 6);
     assert.equal(window.items.every((player) => player.id.startsWith("future")), true);
   });
+});
+
+// classifyMlbPlayerForLogs: reuses statGroupsForSettlementMarket's market-type
+// mapping (via requiredStatGroupsByPlayerId) rather than players.primary_position,
+// which is empty/null for 66% of stored MLB players and is therefore not usable
+// as a classification signal at production scale.
+test("classifyMlbPlayerForLogs: a player whose active props need only pitching stat groups is classified as pitcher", () => {
+  const result = classifyMlbPlayerForLogs({ id: "p1" }, { p1: ["pitching"] });
+  assert.equal(result, "pitcher");
+});
+
+test("classifyMlbPlayerForLogs: a player whose active props need only hitting stat groups is classified as batter", () => {
+  const result = classifyMlbPlayerForLogs({ id: "p1" }, { p1: ["hitting"] });
+  assert.equal(result, "batter");
+});
+
+test("classifyMlbPlayerForLogs: a player with no required stat groups (e.g. no current Sharp-active prop) is unclassified, not guessed", () => {
+  const result = classifyMlbPlayerForLogs({ id: "p1" }, {});
+  assert.equal(result, "unclassified");
+});
+
+test("classifyMlbPlayerForLogs: a player needing both hitting and pitching stat groups is unclassified rather than arbitrarily assigned", () => {
+  const result = classifyMlbPlayerForLogs({ id: "p1" }, { p1: ["hitting", "pitching"] });
+  assert.equal(result, "unclassified");
+});
+
+// allocateBoundedClassSlots: the fair-allocation policy proven necessary by the
+// live 90%-pitcher/46%-batter player_game_logs coverage gap and the 17-day-stalled
+// regular-rotation cursor (both confirmed against production data).
+test("allocateBoundedClassSlots: an ample pool on both sides gets an even reserved split", () => {
+  const result = allocateBoundedClassSlots({ pitcherPoolSize: 154, batterPoolSize: 245, totalBudget: 12 });
+  assert.equal(result.pitcherBudget, 6);
+  assert.equal(result.batterBudget, 6);
+});
+
+test("allocateBoundedClassSlots: unused pitcher reservation spills over to batters when pitchers have fewer eligible candidates than their reserved share", () => {
+  const result = allocateBoundedClassSlots({ pitcherPoolSize: 2, batterPoolSize: 245, totalBudget: 12 });
+  assert.equal(result.pitcherBudget, 2);
+  assert.equal(result.batterBudget, 10);
+  assert.equal(result.pitcherBudget + result.batterBudget, 12, "total bound must never be exceeded");
+});
+
+test("allocateBoundedClassSlots: unused batter reservation spills over to pitchers symmetrically", () => {
+  const result = allocateBoundedClassSlots({ pitcherPoolSize: 154, batterPoolSize: 1, totalBudget: 12 });
+  assert.equal(result.batterBudget, 1);
+  assert.equal(result.pitcherBudget, 11);
+  assert.equal(result.pitcherBudget + result.batterBudget, 12);
+});
+
+test("allocateBoundedClassSlots: both pools empty allocates nothing and never exceeds the total bound", () => {
+  const result = allocateBoundedClassSlots({ pitcherPoolSize: 0, batterPoolSize: 0, totalBudget: 12 });
+  assert.equal(result.pitcherBudget, 0);
+  assert.equal(result.batterBudget, 0);
+});
+
+test("allocateBoundedClassSlots: never allocates more than totalBudget even when both pools are enormous", () => {
+  const result = allocateBoundedClassSlots({ pitcherPoolSize: 10000, batterPoolSize: 10000, totalBudget: 12 });
+  assert.equal(result.pitcherBudget + result.batterBudget, 12);
 });
 
 function withMlbSupabaseEnv(store: Store, run: () => Promise<void>) {

@@ -20,6 +20,22 @@ const basketballFocusedMarkets: DefaultSharpMarket[] = [
   { marketType: "player_rebounds_assists", providerMarketType: "player_rebounds_assists", enabled: false, tier: "secondary" },
 ];
 
+// A bounded, authorized live diagnostic (2 physical SharpAPI requests, WNBA/
+// DraftKings, one per market) confirmed both player_pra and player_threes
+// return a well-formed, successful (200) but genuinely EMPTY response
+// (`data: []`) for WNBA -- not a 400/normalization/identity defect, a
+// provider-catalog gap specific to WNBA's market coverage. Disabled here so
+// the fallback default matches the corresponding live odds_pull_configs
+// change (prepared, not yet applied -- see docs/AGENT_HANDOFF.md) instead of
+// continuing to spend 2 of WNBA's 8 per-cycle Sharp requests on markets that
+// return nothing. NBA was not diagnosed and keeps its own array below
+// unchanged -- this finding is WNBA-specific, not a basketball-wide one.
+const wnbaFocusedMarkets: DefaultSharpMarket[] = basketballFocusedMarkets.map((market) =>
+  market.marketType === "player_pra" || market.marketType === "player_threes"
+    ? { ...market, enabled: false, tier: "secondary" as const }
+    : market,
+);
+
 const mlbFocusedMarkets: DefaultSharpMarket[] = [
   { marketType: "batter_hits", providerMarketType: "player_hits", enabled: true, tier: "core" },
   { marketType: "batter_total_bases", providerMarketType: "player_total_bases", enabled: true, tier: "core" },
@@ -50,6 +66,7 @@ function sportForLeague(league: ActiveKnowledgeLeagueCode): KnowledgeSportCode {
 
 function prioritiesForLeague(league: ActiveKnowledgeLeagueCode) {
   if (league === "MLB") return mlbFocusedMarkets;
+  if (league === "WNBA") return wnbaFocusedMarkets;
   return basketballFocusedMarkets;
 }
 
