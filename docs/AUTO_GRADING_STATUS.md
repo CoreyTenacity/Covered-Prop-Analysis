@@ -1,5 +1,18 @@
 # Auto-grading and post-game notes
 
+> **CORRECTION (2026-07-18, Session 44 audit):** the "scheduled grading … now in place" status below is
+> INACCURATE for the current enabled executor. The model grader `gradeCompletedScoredProps`
+> (`lib/knowledge/grading-service.ts`) — the only writer of `grading_results` — has **zero callers**: it is not
+> in the public production pipeline (`covered-production-pipeline.yml` has no grade step), not in the `knowledge`
+> job registry / `cron:run`, and not in any cron route (`app/api/cron` holds only the WNBA schedule *diagnostic*;
+> `vercel.json` crons are `[]`). Read-only production check: **`grading_results` has 0 rows** (model grading has
+> never run). `grading_results` feeds the model-performance snapshot (`buildModelPerformanceFacts`) and is the
+> read-side source for provider-backed user-pick settlement (`lib/auth/user-settlement.ts`); both therefore have
+> no graded data to consume, and provider-backed settlement stays "manual" as the caveat at the bottom notes.
+> Remaining fix: wire the existing grader into the enabled public executor (small, bundled into the final
+> candidate `8b266f4`+grading-wiring — see `docs/AGENT_HANDOFF.md` Session 44). Text below is retained for the
+> user-pick settlement design context, which is real; only the "scheduled model grading is active" claim is wrong.
+
 Status: **server grading connected for confirmed actual values; scheduled grading and grading-note storage are now in place. A provider-backed MLB box-score resolver is now wired in, while broader multi-sport box-score coverage is still pending**.
 
 Saved picks can now retain confidence, player/game identifiers, actual value, grading time, grading status, and a plain-English grading note. The interface also distinguishes pushes and void/DNP outcomes from wins and losses.

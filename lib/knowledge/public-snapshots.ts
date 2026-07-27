@@ -510,7 +510,7 @@ export function filterCoveredPicksSnapshotRows(rows: PublicCoveredPickSnapshotRo
   limit?: number;
   includeVariantBooks?: boolean;
 }) {
-  const limit = Math.min(Math.max(query.limit ?? 25, 1), 100);
+  const limit = Math.min(Math.max(query.limit ?? 25, 1), 250);
   const filtered = rows.flatMap((row) => {
     if (query.sport && row.sport !== query.sport) return [];
     if (query.league && row.league !== query.league) return [];
@@ -595,6 +595,16 @@ export function filterParlayOptionsSnapshotRows(rows: ParlayOptionRow[], query: 
   });
 
   return filtered.slice(0, limit);
+}
+
+export function parlayOptionsSnapshotHasLeagueRows(rows: Array<{ league?: string | null }>, requiredLeagues: string | string[] | null | undefined) {
+  const leagues = Array.isArray(requiredLeagues)
+    ? requiredLeagues
+    : requiredLeagues
+      ? [requiredLeagues]
+      : [];
+  if (!leagues.length) return true;
+  return leagues.every((league) => rows.some((row) => normalizeText(row.league) === normalizeText(league)));
 }
 
 export async function buildModelPerformanceFacts(query: {
@@ -865,7 +875,7 @@ export async function collectPublicSnapshotPublicationSummaries(input: {
       shouldPublish: mayPublish("covered-picks"),
       build: async () => {
         const coveredPicks = await coveredPicksReader({
-          limit: 100,
+          limit: 250,
           includeDetails: false,
           includeGrading: false,
           includeVariantBooks: true,
@@ -966,9 +976,16 @@ export async function resolvePublicSnapshotRoute<TPayload>(input: {
   buildUnavailableResponse: () => TPayload;
   fallbackReason?: string | null;
 }) {
+  // Only the mutable `:latest` alias (no explicit snapshotVersion requested) gets
+  // the empty-snapshot-as-miss treatment below. An explicitly pinned/versioned
+  // snapshot is a historical, immutable read -- if that exact version had zero
+  // rows, that IS the correct answer for that version and must be served as-is,
+  // not silently swapped for live relational data.
+  const isLatestAliasRead = input.snapshotVersion === null;
+  let emptyPublishedSnapshot = false;
   if (input.canUseSnapshot) {
     const snapshot = await input.readSnapshot();
-    if (snapshot) {
+    if (snapshot && (snapshot.rows.length > 0 || !isLatestAliasRead)) {
       return {
         payload: input.buildSnapshotResponse(snapshot),
         cacheProfile: publicSnapshotCacheProfile({ snapshotVersion: input.snapshotVersion }),
@@ -981,10 +998,17 @@ export async function resolvePublicSnapshotRoute<TPayload>(input: {
         effectiveFilterScope: snapshot.effectiveFilterScope,
       } as const;
     }
+    // A published `:latest` snapshot with zero rows (e.g. a nightly board-empty
+    // window, or a publish cycle that ran before the next slate's props landed)
+    // is still a real object -- `snapshot?.payload ?? null` would return it
+    // truthy and permanently pin the route to an empty response. Treat it the
+    // same as a cache miss so the bounded relational fallback below gets a
+    // chance to find rows the publish cycle hasn't caught up to yet.
+    if (snapshot) emptyPublishedSnapshot = true;
   }
 
   if (!publicSnapshotFallbackEnabled()) {
-    console.warn(`[public-snapshot][unavailable] route=${input.route} reason=snapshot-miss-and-fallback-disabled`);
+    console.warn(`[public-snapshot][unavailable] route=${input.route} reason=${emptyPublishedSnapshot ? "empty-snapshot-and-fallback-disabled" : "snapshot-miss-and-fallback-disabled"}`);
     return {
       payload: input.buildUnavailableResponse(),
       cacheProfile: "public-snapshot-unavailable" as const,
@@ -1001,7 +1025,7 @@ export async function resolvePublicSnapshotRoute<TPayload>(input: {
   if (input.fallbackReason) {
     console.warn(`[public-snapshot][fallback] route=${input.route} reason=${input.fallbackReason}`);
   } else {
-    console.warn(`[public-snapshot][fallback] route=${input.route} reason=snapshot-miss`);
+    console.warn(`[public-snapshot][fallback] route=${input.route} reason=${emptyPublishedSnapshot ? "empty-snapshot" : "snapshot-miss"}`);
   }
 
   const payload = await input.buildFallbackResponse();

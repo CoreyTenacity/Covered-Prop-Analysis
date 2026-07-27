@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
-import { getParlayOptions } from "./read-service.ts";
+import { getBoardOpportunities, getCoveredPicksOfTheDay, getParlayOptions } from "./read-service.ts";
 import { createSupabaseFixture, type FixtureRow } from "./supabase-fixture-harness.ts";
+import { preparedSlateEventWindow } from "./prepared-slate-window.ts";
 
 /**
  * Regression coverage for the 2026-07-16 parlay-options publication failure: the unfiltered
@@ -209,5 +210,207 @@ test("regression: getParlayOptions succeeds and returns eligible rows under the 
     const result = await getParlayOptions({ limit: 250, includeVariantBooks: true });
     assert.equal(result.rows.length, 250, "the 300 eligible props must survive both defects and be capped only by the requested `limit`, not silently dropped");
     assert.ok(maxRequestLength < HEADERS_OVERFLOW_THRESHOLD, "the fix must keep every request comfortably under the observed overflow threshold");
+  });
+});
+
+test("getParlayOptions derives team/opponent display from participant + event context when stored team ids are missing, and stays honest when no deterministic team exists", async () => {
+  await withE2eEnv(async () => {
+    const futureIso = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+
+    createSupabaseFixture({
+      current_props: [
+        {
+          id: "prop-derived",
+          latest_snapshot_id: "snapshot-derived",
+          sport_id: "basketball",
+          league_id: "wnba",
+          sportsbook_id: "sportsbook-1",
+          market_id: "market-1",
+          market_instance_key: null,
+          participant_id: "participant-derived",
+          participant_type: "player",
+          player_id: "player-derived",
+          team_id: null,
+          opponent_id: null,
+          opponent_team_id: null,
+          event_id: "event-1",
+          market_type: "player_points",
+          player_name: "Player Derived",
+          team_name: null,
+          opponent_name: null,
+          line: 15.5,
+          direction: "More",
+          side: "over",
+          over_price: -110,
+          under_price: -110,
+          match_confidence: 0.9,
+          match_status: "matched",
+          match_quality_flags: [],
+          start_time: futureIso,
+          updated_at: futureIso,
+          active: true,
+        },
+        {
+          id: "prop-unresolved",
+          latest_snapshot_id: "snapshot-unresolved",
+          sport_id: "basketball",
+          league_id: "wnba",
+          sportsbook_id: "sportsbook-1",
+          market_id: "market-1",
+          market_instance_key: null,
+          participant_id: null,
+          participant_type: "player",
+          player_id: null,
+          team_id: null,
+          opponent_id: null,
+          opponent_team_id: null,
+          event_id: "event-1",
+          market_type: "player_points",
+          player_name: "Player Unresolved",
+          team_name: null,
+          opponent_name: null,
+          line: 12.5,
+          direction: "More",
+          side: "over",
+          over_price: -110,
+          under_price: -110,
+          match_confidence: 0.9,
+          match_status: "matched",
+          match_quality_flags: [],
+          start_time: futureIso,
+          updated_at: futureIso,
+          active: true,
+        },
+      ],
+      participants: [
+        { id: "participant-derived", display_name: "Player Derived", participant_type: "player", player_id: "player-derived", team_id: "team-1", image_url: null, external_ids: {} },
+      ],
+      players: [
+        { id: "player-derived", display_name: "Player Derived", canonical_name: "Player Derived", headshot_url: null, external_ids: {} },
+      ],
+      ...sharedFixtureTables(),
+      events: [{ id: "event-1", display_name: null, scheduled_date: null, start_time: null, status: "scheduled", home_team_id: "team-2", away_team_id: "team-1" }],
+      scored_props: [
+        { id: "scored-derived", current_prop_id: "prop-derived", covered_score: 74, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishability_reasons: [], updated_at: futureIso },
+        { id: "scored-unresolved", current_prop_id: "prop-unresolved", covered_score: 71, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishability_reasons: [], updated_at: futureIso },
+      ],
+    });
+
+    const result = await getParlayOptions({ limit: 25, includeVariantBooks: true });
+    const byId = new Map(result.rows.map((row) => [row.current_prop_id, row]));
+
+    assert.equal(byId.get("prop-derived")?.team_display_name, "Washington Mystics");
+    assert.equal(byId.get("prop-derived")?.opponent_display_name, "Atlanta Dream");
+    assert.equal(byId.get("prop-derived")?.event_display_name, "Washington Mystics at Atlanta Dream");
+    assert.equal(byId.get("prop-unresolved")?.team_display_name, null);
+    assert.equal(byId.get("prop-unresolved")?.opponent_display_name, null);
+    assert.equal(byId.get("prop-unresolved")?.event_display_name, "Washington Mystics at Atlanta Dream");
+  });
+});
+
+// --- Prepared-slate upper bound: public pregame output must never include a
+// day-after-tomorrow-or-later event, regardless of whether that row is
+// freshly scored this run or an already-existing leftover from an earlier
+// run (e.g. a manual/diagnostic scoring dispatch that didn't pass eventIds).
+// getCoveredPicksOfTheDay/getParlayOptions/getBoardOpportunities are the
+// shared choke point for the public snapshot-build AND relational-fallback
+// paths -- proving it here proves both.
+
+function preparedSlateProbeTimes() {
+  const window = preparedSlateEventWindow(new Date());
+  return {
+    todayIso: new Date(Math.min(window.startMs + 60 * 60 * 1000, window.endMs - 5 * 60 * 1000)).toISOString(),
+    tomorrowLateNightIso: new Date(window.endMs - 60 * 1000).toISOString(), // 1 min before the exclusive upper bound
+    dayAfterTomorrowIso: new Date(window.endMs + 60 * 1000).toISOString(), // 1 min after -- must be excluded
+  };
+}
+
+test("getCoveredPicksOfTheDay includes today/tomorrow-late-night events but excludes a day-after-tomorrow-or-later row, even if it is already scored/publishable from an earlier run", async () => {
+  await withE2eEnv(async () => {
+    const { todayIso, tomorrowLateNightIso, dayAfterTomorrowIso } = preparedSlateProbeTimes();
+    const staleUpdatedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+    createSupabaseFixture({
+      current_props: [
+        buildProp(1, todayIso),
+        buildProp(2, tomorrowLateNightIso),
+        buildProp(3, dayAfterTomorrowIso),
+      ],
+      participants: [1, 2, 3].map((i) => ({ id: `participant-${i}`, display_name: `Player ${i}`, participant_type: "player", player_id: `player-${i}`, team_id: "team-1", image_url: null, external_ids: {} })),
+      players: [1, 2, 3].map((i) => ({ id: `player-${i}`, display_name: `Player ${i}`, canonical_name: `Player ${i}`, headshot_url: null, external_ids: {} })),
+      scored_props: [
+        // The day-after-tomorrow row is marked as already scored/publishable
+        // (>=70) with a stale updated_at, simulating a leftover from an
+        // earlier run rather than something this run just produced.
+        { id: "scored-1", current_prop_id: "prop-1", sport_id: "basketball", league_id: "wnba", covered_score: 75, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: todayIso },
+        { id: "scored-2", current_prop_id: "prop-2", sport_id: "basketball", league_id: "wnba", covered_score: 76, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: tomorrowLateNightIso },
+        { id: "scored-3", current_prop_id: "prop-3", sport_id: "basketball", league_id: "wnba", covered_score: 90, confidence_score: 70, data_quality_score: 80, recommendation: "Elite", risk_flags: [], prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: staleUpdatedAt },
+      ],
+      ...sharedFixtureTables(),
+    });
+
+    const result = await getCoveredPicksOfTheDay({ limit: 25, includeVariantBooks: true, includeDetails: false, includeGrading: false });
+    const ids = result.rows.map((row) => row.current_prop_id);
+    assert.ok(ids.includes("prop-1"), "today's event must be included");
+    assert.ok(ids.includes("prop-2"), "tomorrow 11:59pm Eastern event must be included");
+    assert.ok(!ids.includes("prop-3"), "a day-after-tomorrow event must be excluded even though it is already scored >=70 and publishable");
+  });
+});
+
+test("getParlayOptions includes today/tomorrow-late-night events but excludes a day-after-tomorrow-or-later row", async () => {
+  await withE2eEnv(async () => {
+    const { todayIso, tomorrowLateNightIso, dayAfterTomorrowIso } = preparedSlateProbeTimes();
+
+    createSupabaseFixture({
+      current_props: [
+        buildProp(1, todayIso),
+        buildProp(2, tomorrowLateNightIso),
+        buildProp(3, dayAfterTomorrowIso),
+      ],
+      participants: [1, 2, 3].map((i) => ({ id: `participant-${i}`, display_name: `Player ${i}`, participant_type: "player", player_id: `player-${i}`, team_id: "team-1", image_url: null, external_ids: {} })),
+      players: [1, 2, 3].map((i) => ({ id: `player-${i}`, display_name: `Player ${i}`, canonical_name: `Player ${i}`, headshot_url: null, external_ids: {} })),
+      scored_props: [
+        { id: "scored-1", current_prop_id: "prop-1", covered_score: 75, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishability_reasons: [], updated_at: todayIso },
+        { id: "scored-2", current_prop_id: "prop-2", covered_score: 76, confidence_score: 70, data_quality_score: 80, recommendation: "Playable", risk_flags: [], prop_state: "publishable", publishability_reasons: [], updated_at: tomorrowLateNightIso },
+        { id: "scored-3", current_prop_id: "prop-3", covered_score: 90, confidence_score: 70, data_quality_score: 80, recommendation: "Elite", risk_flags: [], prop_state: "publishable", publishability_reasons: [], updated_at: dayAfterTomorrowIso },
+      ],
+      ...sharedFixtureTables(),
+    });
+
+    const result = await getParlayOptions({ limit: 25, includeVariantBooks: true });
+    const ids = result.rows.map((row) => row.current_prop_id);
+    assert.ok(ids.includes("prop-1"), "today's event must be included");
+    assert.ok(ids.includes("prop-2"), "tomorrow 11:59pm Eastern event must be included");
+    assert.ok(!ids.includes("prop-3"), "a day-after-tomorrow event must be excluded");
+  });
+});
+
+test("getBoardOpportunities includes today/tomorrow-late-night events but excludes a day-after-tomorrow-or-later row", async () => {
+  await withE2eEnv(async () => {
+    const { todayIso, tomorrowLateNightIso, dayAfterTomorrowIso } = preparedSlateProbeTimes();
+
+    createSupabaseFixture({
+      current_props: [
+        buildProp(1, todayIso),
+        buildProp(2, tomorrowLateNightIso),
+        buildProp(3, dayAfterTomorrowIso),
+      ],
+      players: [1, 2, 3].map((i) => ({ id: `player-${i}`, display_name: `Player ${i}`, canonical_name: `Player ${i}`, headshot_url: null, external_ids: {} })),
+      teams: [
+        { id: "team-1", name: "Washington Mystics", abbreviation: "WAS", logo_url: null, external_ids: {} },
+        { id: "team-2", name: "Atlanta Dream", abbreviation: "ATL", logo_url: null, external_ids: {} },
+      ],
+      scored_props: [
+        { id: "scored-1", current_prop_id: "prop-1", player_id: "player-1", team_id: "team-1", opponent_team_id: "team-2", event_id: "event-1", sport_id: "basketball", league_id: "wnba", covered_score: 75, projection: 20, line: 18.5, edge_score: 5, confidence_score: 70, trend_score: 0, data_quality_score: 80, recommendation: "Playable", risk_flags: [] },
+        { id: "scored-2", current_prop_id: "prop-2", player_id: "player-2", team_id: "team-1", opponent_team_id: "team-2", event_id: "event-1", sport_id: "basketball", league_id: "wnba", covered_score: 76, projection: 20, line: 18.5, edge_score: 5, confidence_score: 70, trend_score: 0, data_quality_score: 80, recommendation: "Playable", risk_flags: [] },
+        { id: "scored-3", current_prop_id: "prop-3", player_id: "player-3", team_id: "team-1", opponent_team_id: "team-2", event_id: "event-1", sport_id: "basketball", league_id: "wnba", covered_score: 90, projection: 20, line: 18.5, edge_score: 5, confidence_score: 70, trend_score: 0, data_quality_score: 80, recommendation: "Elite", risk_flags: [] },
+      ],
+    });
+
+    const result = await getBoardOpportunities({ limit: 25 });
+    const ids = result.map((row) => row.id);
+    assert.ok(ids.includes("scored-1"), "today's event must be included");
+    assert.ok(ids.includes("scored-2"), "tomorrow 11:59pm Eastern event must be included");
+    assert.ok(!ids.includes("scored-3"), "a day-after-tomorrow event must be excluded");
   });
 });

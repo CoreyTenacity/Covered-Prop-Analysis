@@ -2,7 +2,98 @@
 
 Covered is a sports prop analysis app built around reusable stored knowledge, not inline one-off lookups.
 
-## Current handoff state — 2026-07-16 (session 13)
+## Current handoff state — 2026-07-26/27 (Session 60) — FIX READY, NOT YET PROMOTED
+
+**Read `docs/AGENT_HANDOFF.md` Session 60 first.** The Session 59 empty-snapshot symptom (below) has a direct,
+already-committed fix sitting on `codex/public-repo-repair` at `ef54794080e7014fd5247d250b59de1f25991cf8`
+(pushed to `origin/codex/public-repo-repair`): a zero-row published `:latest` snapshot no longer pins as a
+permanent hit, and every public read path (Covered Picks, Parlay, board, relational fallback) now shares one
+explicit Eastern prepared-slate boundary instead of relying solely on the 6-hour pregame gate. This fix has
+**not** been promoted to `COVERED_PRIVATE_PIPELINE_SHA_V2` or proven live yet — that promotion is an explicit
+owner-approval boundary. Until promoted, production is expected to still show the Session 59 symptom.
+
+The live controls remain the reference point until changed by owner decision:
+`COVERED_PRIVATE_PIPELINE_SHA_V2=6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f` (Session 58's SHA — predates the
+fix above), `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`, `COVERED_GITHUB_SCHEDULER_ENABLED=true`,
+private repo scheduler disabled, and private `origin/main` unchanged at
+`23f665955b55a9e862f7f2efa8205538c5426013`.
+
+The next agent should focus on: (1) re-certifying the deterministic public export on the current tip, (2)
+preparing a draft-PR-only public-repo sync that preserves the public-owned production workflow file, and (3)
+the owner-gated V2 promotion to `ef54794…` plus its bounded natural-run proof — not on further scoring or
+scheduler changes.
+
+## Prior handoff state — 2026-07-25 — LIVE FRONTEND VERIFIED, COVERAGE STILL NARROW
+
+**Read `docs/AGENT_HANDOFF.md` Session 59 first.** The public frontend is live, but the current production
+knowledge snapshots are still empty at the API layer. `covered-picks:latest` and `parlay-options:latest`
+both resolve to published fallback snapshots with `count=0`, even though relational live state still contains
+nonzero MLB supply. The browser shells are correct (`70+` / `80+` / `90+` for Covered Picks; full Manual
+Analyzer score bands), but the public exposure path is not yet surfacing the available rows.
+
+The live controls from the last certification remain the reference point until changed by owner decision:
+`COVERED_PRIVATE_PIPELINE_SHA_V2=6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f`,
+`COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`,
+`COVERED_GITHUB_SCHEDULER_ENABLED=true`, private repo scheduler disabled, and private `origin/main`
+unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`.
+
+The next agent should focus on the remaining coverage/exposure gap between relational prop supply and the
+public snapshot layer, not on scheduler, scoring, or private-pipeline changes.
+
+## Current handoff state — 2026-07-18 (sessions 40–44) — CANDIDATE READY, PROOF PENDING; ONE SMALL FIX LEFT
+
+Production remains pinned to the known-good rollback SHA `3087979d…` with the public scheduler enabled, but its
+event horizon went **stale after 2026-07-17** and all output (scoring + the three `:latest` snapshots) is **frozen
+at 2026-07-17T23:08Z** — because the authoritative schedule writers ran only in disabled private workflows (root
+cause `EVENT WRITER NOT SCHEDULED`, Session 42). The fix (Session 43, Option B) adds a bounded, 30-min-TTL,
+pre-gate schedule refresh to the public pipeline; candidate `8b266f4` = reviewed enrichment `4404521`
+(WNBA ZSTD + MLB weather `game_id` + coverage + ≥70 board) **plus** the schedule wiring — fully unit-tested,
+**production-unproven**. The Session 44 final-completion audit classified the project **B — SMALL FINITE FIX SET
+REMAINS**: the only new code gap is that the **model grader `gradeCompletedScoredProps` is unwired** (0 callers,
+`grading_results`=0 rows), so model-performance + provider-backed user settlement have no graded data (see
+`docs/AUTO_GRADING_STATUS.md` correction). Finish line = one bundled final candidate (`8b266f4` + a small
+grading-wiring commit) proven in ONE coordinated owner-gated MLB+WNBA proof. Full detail, remaining-work table,
+and DONE criteria: `docs/AGENT_HANDOFF.md` Sessions 40–44. Do not pin/prove/promote or change production without
+explicit owner approval.
+
+## Current handoff state — 2026-07-17 (session 32) — FULLY ACTIVATED
+
+**Production automation runs from the PUBLIC repo (Candidate F) and the Manual Analyzer works end-to-end.**
+A genuine scheduled run (`29543076538`) ran the full pipeline from the public repo and published (Cloudflare pid
+`29543076538.1`); public GitHub Actions is the sole scheduler (private disabled), billed to free public minutes,
+with private scoring source never exposed. The Manual Analyzer is restored: the private `covered-scoring-engine`
+Worker is deployed (`https://covered-scoring-engine.<account-subdomain>.workers.dev`), the app's `SCORING_ENGINE_URL`/
+`SCORING_ENGINE_SECRET` bindings are set, and the live UI visibly renders parlay analysis details. Board rows are
+scored/enriched. **Verdict: FULLY ACTIVATED.** Remaining product work: the portrait-mobile responsiveness phase
+(app is not product-complete until that ships). Detail: `docs/AGENT_HANDOFF.md` Session 32.
+
+## Current handoff state — 2026-07-16 (session 17)
+
+**Public-runner architecture resolved to Candidate F (session 17).** A public-repo workflow that checks out the
+private repo at runtime (read-only credential) and runs the existing pipeline on a public-billed standard runner
+is **VIABLE WITH REQUIRED SECURITY GATES** — verified: Actions bill to the repo owning the run (100% public/free,
+zero private minutes), the runner is portable (`run-covered-job.mjs` has no repo-root assumptions; `@/` resolves
+from cwd), and private SOURCE stays out of the public repo/export/artifacts/logs (only ephemeral disk). This
+reuses the current pipeline UNCHANGED and makes reclassifying ingestion/matching/enrichment unnecessary. Trade-off:
+world-readable public Actions logs + the production service-role key in the public repo's (main-restricted)
+Environment secrets. Schedulers still off; no production writes. Detail + gates + impl scope: `docs/AGENT_HANDOFF.md`
+"Session 17".
+
+## Current handoff state — 2026-07-16 (session 14)
+
+**Public repo synced + repairs DEPLOYED LIVE; only production automation remains blocked (session 14).** The
+separate PUBLIC repo `CoreyTenacity/Covered-Prop-Analysis` (which older handoff notes wrongly said was never
+created) exists and was synced from `b8df24c` to **`593781c`**, bringing the `f4beb9e` reader repair + `b12ca11`
+Parlay Builder cache fix + snapshot observability into public source (deterministic export, 0 boundary
+violations, 0 secret findings). **Cloudflare Workers Builds is connected to the public repo and auto-deployed
+that push** — verified by inspecting the deployed JS bundle (the live client now uses `cache:"no-store"`, not
+`force-cache`; 0 `force-cache`/3 `no-store` in the shipped chunk). Post-deploy: `/today` 200; covered-picks
+200/published/15; parlay-options 200/published/**33**; model-performance 200/fallback/0; cron/admin/inngest all
+503. **The public repo `main` is the confirmed deploy trigger — not the old private `deploy-cloudflare.yml`
+branch.** The one remaining blocker: running the recurring **production pipeline** "from the public repo" is
+architecturally impossible (scoring is deliberately private-only and excluded from the export; the public repo
+has no production workflow and no secrets; enabling the private scheduler is disallowed). That needs an owner
+architecture decision on where the scheduler lives. Full detail: `docs/AGENT_HANDOFF.md` "Session 14".
 
 **Public-snapshot publication failures are now immediately observable (session 13, diagnosis-only, no live
 publish).** A same-day read-only diagnostic found the live `parlay-options` snapshot stuck at a 2026-07-14
@@ -225,7 +316,28 @@ Typical flow:
 
 1. league capability registry resolves what can run
 2. Sharp ingestion normalizes live market data into internal rows
-3. enrichment jobs repair identities and populate reusable context tables
+3. the pre-score repair phase repairs identities and runs a **bounded background
+   enrichment** stage (`runBoundedBackgroundEnrichment` in
+   `lib/knowledge/enrichment/jobs.ts`) before the freshness preflight, so
+   team/opponent context and recent features are refreshed instead of being
+   permanently deferred. WNBA: SportsDataverse (ESPN-backed parquet) game logs +
+   ESPN-routed matchup recompute, gated stale-only (whole-season download runs
+   only when a referenced team has a completed game newer than the newest logged
+   game; matchup recompute runs only when referenced-team context is stale). The
+   SportsDataverse parquet files are ZSTD-compressed; ingestion passes
+   `hyparquet-compressors` to `parquetReadObjects` so they decode under the GitHub
+   Actions Node runtime (hyparquet natively decodes only UNCOMPRESSED/SNAPPY).
+   MLB: the six support-refresh functions (lineups, pitchers, weather, ballparks,
+   handedness, bullpen), each internally freshness-skipped/rotating-windowed.
+   `wehoop-wnba`/`stats.nba.com` is NOT the WNBA path (confirmed unreachable from
+   GitHub Actions); identity resolution is provider-agnostic. A systematic
+   enrichment failure surfaces as a `warning` repair step (visible, non-blocking)
+   — it never suppresses legitimately low scores.
+   After schedule refresh, the pipeline also runs an MLB-only, event/date-bounded postgame settlement stage for
+   recent completed scored events whose grading-required final player logs are missing. This stage is independent
+   of the pregame gate, derives only ungraded scored-prop players, and does not invoke WNBA ingestion, Sharp,
+   scoring, board, or publication. Settlement occurs in cycle N; the existing pre-gate grader consumes those logs
+   in cycle N+1.
 4. scoring reads stored context and writes scored output
 5. board build selects publishable rows
 6. GitHub Actions publishes compact public snapshots for the knowledge routes

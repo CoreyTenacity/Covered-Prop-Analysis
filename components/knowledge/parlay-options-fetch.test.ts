@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { fetchParlayOptions } from "./parlay-options-fetch.ts";
-import { buildManualCatalogRows, manualScoreBandMatches, manualScoreBandOptions } from "./parlay-builder-catalog.ts";
+import { buildManualCatalogRows, coveredPicksDateOptions, manualDateOptions, manualScoreBandMatches, manualScoreBandOptions } from "./parlay-builder-catalog.ts";
 import { filterParlayOptionsSnapshotRows } from "@/lib/knowledge/public-snapshots";
 import type { ParlayOptionRow, ParlayOptionsResponse } from "@/lib/knowledge/read-types";
 
@@ -191,7 +191,7 @@ test("the default client filters do not hide all 33 freshly-published eligible r
   assert.equal(filtered.length, 33, "the default filter state must not hide any of the eligible published rows");
 });
 
-function manualRow(score: number, index: number): ParlayOptionRow {
+function manualRow(score: number, index: number, startTime = "2026-07-20T23:00:00.000Z"): ParlayOptionRow {
   return {
     current_prop_id: `manual-${index}`,
     latest_scored_prop_id: `scored-${index}`,
@@ -220,7 +220,7 @@ function manualRow(score: number, index: number): ParlayOptionRow {
     line: 10.5,
     over_price: -110,
     under_price: -110,
-    start_time: `2026-07-20T23:${String(index).padStart(2, "0")}:00.000Z`,
+    start_time: startTime,
     match_status: "matched",
     match_confidence: 0.9,
     match_quality_flags: [],
@@ -244,21 +244,85 @@ test("Manual Analyzer exposes explicit sub-70, 70+, 80+, and 90+ score bands", (
   assert.equal(manualScoreBandMatches(90, "90+"), true);
 });
 
-test("Manual Analyzer keeps more than ten scored props visible by default", () => {
+test("Manual Analyzer date options keep All available first and include Today plus specific dates", () => {
+  const todayEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const tomorrowEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
+
+  const options = manualDateOptions([
+    manualRow(72, 1, `${todayEastern}T23:00:00.000Z`),
+    manualRow(73, 2, `${tomorrowEastern}T23:00:00.000Z`),
+  ]);
+
+  assert.equal(options[0]?.label, "All available");
+  assert.equal(options[0]?.value, "");
+  assert.equal(options[1]?.value, todayEastern);
+  assert.equal(options[2]?.value, tomorrowEastern);
+  assert.ok(options.some((option) => option.value === tomorrowEastern));
+});
+
+test("Covered Picks date options keep All available first and expose Today and Tomorrow only", () => {
+  const todayEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const tomorrowEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
+
+  const options = coveredPicksDateOptions([
+    manualRow(72, 1, `${todayEastern}T23:00:00.000Z`),
+    manualRow(73, 2, `${tomorrowEastern}T23:00:00.000Z`),
+  ]);
+
+  assert.deepEqual(options.map((option) => option.value), ["", todayEastern, tomorrowEastern]);
+});
+
+test("Manual Analyzer default all-available mode keeps current and future rows visible", () => {
   const rows = Array.from({ length: 12 }, (_, index) => manualRow(60 + index, index));
   const catalog = buildManualCatalogRows(rows, {
-    date: "2026-07-20",
+    date: null,
     league: "",
     marketType: "",
     search: "",
     scoreBand: "",
     sortBy: "score",
-    limit: 25,
+    limit: 10,
+  });
+
+  assert.equal(catalog.length, 10);
+  assert.ok(catalog.some((row) => Number(row.covered_score ?? 0) < 70));
+  assert.ok(catalog.some((row) => Number(row.covered_score ?? 0) >= 70));
+});
+
+test("Manual Analyzer can expand beyond ten rows when the caller requests a higher limit", () => {
+  const rows = Array.from({ length: 12 }, (_, index) => manualRow(60 + index, index));
+  const catalog = buildManualCatalogRows(rows, {
+    date: null,
+    league: "",
+    marketType: "",
+    search: "",
+    scoreBand: "",
+    sortBy: "score",
+    limit: 12,
   });
 
   assert.equal(catalog.length, 12);
-  assert.ok(catalog.some((row) => Number(row.covered_score ?? 0) < 70));
-  assert.ok(catalog.some((row) => Number(row.covered_score ?? 0) >= 70));
+  assert.equal(catalog.at(-1)?.covered_score, 60);
 });
 
 test("Manual Analyzer score-band filtering isolates sub-70 and 70+/80+/90+ buckets", () => {
@@ -300,6 +364,46 @@ test("Manual Analyzer score-band filtering isolates sub-70 and 70+/80+/90+ bucke
     marketType: "",
     search: "",
     scoreBand: "90+",
+    sortBy: "score",
+    limit: 25,
+  }).length, 1);
+});
+
+test("Manual Analyzer date filtering still restricts to the selected Eastern day", () => {
+  const todayEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const tomorrowEastern = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
+
+  const rows = [
+    manualRow(72, 1, `${todayEastern}T23:00:00.000Z`),
+    manualRow(74, 2, `${tomorrowEastern}T23:00:00.000Z`),
+  ];
+
+  assert.equal(buildManualCatalogRows(rows, {
+    date: todayEastern,
+    league: "",
+    marketType: "",
+    search: "",
+    scoreBand: "",
+    sortBy: "score",
+    limit: 25,
+  }).length, 1);
+
+  assert.equal(buildManualCatalogRows(rows, {
+    date: tomorrowEastern,
+    league: "",
+    marketType: "",
+    search: "",
+    scoreBand: "",
     sortBy: "score",
     limit: 25,
   }).length, 1);

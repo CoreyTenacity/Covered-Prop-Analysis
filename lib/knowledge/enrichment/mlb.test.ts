@@ -1,12 +1,60 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
-import { loadUnresolvedFutureMlbEventTeamPriorities, orderMlbTeamsForRosterRefresh, takeLiveFirstWindow } from "./mlb.ts";
+import { compareMlbLivePlayerStartTimes, loadUnresolvedFutureMlbEventTeamPriorities, orderMlbTeamsForRosterRefresh, settleMlbPlayerLogsForEvents, statGroupsForSettlementMarket, takeLiveFirstWindow } from "./mlb.ts";
 
 type Store = {
   currentProps: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
   providerCache?: Map<string, Record<string, unknown>>;
 };
+
+test("MLB enrichment stat intent is complete and market-driven", () => {
+  assert.deepEqual(statGroupsForSettlementMarket("pitcher_strikeouts"), ["pitching"]);
+  assert.deepEqual(statGroupsForSettlementMarket("pitcher_outs_recorded"), ["pitching"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_hits"), ["hitting"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_total_bases"), ["hitting"]);
+  assert.deepEqual(
+    [...new Set(["pitcher_strikeouts", "batter_hits"].flatMap(statGroupsForSettlementMarket))],
+    ["pitching", "hitting"],
+  );
+});
+
+test("MLB log priority puts nearest future games before past and unknown players", () => {
+  const now = Date.parse("2026-07-20T12:00:00.000Z");
+  const nearFuture = Date.parse("2026-07-20T13:00:00.000Z");
+  const farFuture = Date.parse("2026-07-20T16:00:00.000Z");
+  const recentPast = Date.parse("2026-07-20T11:00:00.000Z");
+  assert.ok(compareMlbLivePlayerStartTimes(nearFuture, farFuture, now) < 0);
+  assert.ok(compareMlbLivePlayerStartTimes(farFuture, recentPast, now) < 0);
+  assert.ok(compareMlbLivePlayerStartTimes(recentPast, undefined, now) < 0);
+});
+
+test("MLB player-log selection keeps the bounded window and cannot let past players crowd out future players", async () => {
+  const store: Store = { currentProps: [], events: [] };
+  await withMlbSupabaseEnv(store, async () => {
+    const items = [
+      { id: "future-near" },
+      { id: "future-far" },
+      { id: "future-third" },
+      { id: "future-fourth" },
+      { id: "future-fifth" },
+      { id: "future-sixth" },
+      { id: "past-one" },
+      { id: "past-two" },
+      { id: "past-three" },
+    ];
+    const window = await takeLiveFirstWindow({
+      cacheKey: "test:cursor:mlb-player-log-bound",
+      provider: "mlb-stats-api",
+      items,
+      isPriority: (player) => player.id.startsWith("future"),
+      sliceSize: 6,
+      maxPriorityItems: 6,
+    });
+    assert.equal(window.items.length, 6);
+    assert.equal(window.items.every((player) => player.id.startsWith("future")), true);
+  });
+});
 
 function withMlbSupabaseEnv(store: Store, run: () => Promise<void>) {
   const originalUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -607,4 +655,205 @@ test("past or inactive props do not create urgent teams (cursor-fix integration)
     const unresolvedEventPriorities = await loadUnresolvedFutureMlbEventTeamPriorities(NOW);
     assert.equal(unresolvedEventPriorities.teamIds.size, 0);
   });
+});
+
+test("postgame MLB settlement writes only the targeted event/date row, never the full season", async () => {
+  const deleted: unknown[] = [];
+  const inserted: Array<Record<string, unknown>> = [];
+  const result = await settleMlbPlayerLogsForEvents({
+    now: new Date("2026-07-18T12:00:00.000Z"),
+    targets: [{
+      eventId: "event-824657",
+      scheduledDate: "2026-07-18",
+      players: [{
+        id: "player-1",
+        canonical_name: "Batter One",
+        current_team_id: "team-1",
+        primary_position: "First Baseman",
+        external_ids: { "mlb-stats-api": "1001" },
+      }],
+    }],
+    deps: {
+      fetchPlayerGameLog: async () => ({ data: { response: {} } }),
+      extractGameLogRows: () => [
+        { gamePk: "824657", date: "2026-07-18", runs: 2, hits: 1 },
+        { gamePk: "824000", date: "2026-07-17", runs: 4, hits: 2 },
+      ],
+      findEventByProviderId: async (_provider, _league, externalId) => externalId === "824657" ? "event-824657" : "other-event",
+      deleteRows: async (_table, filters) => { deleted.push(filters); },
+      insertRows: async (_table, rows) => { inserted.push(...rows); return []; },
+    },
+  });
+  assert.equal(result.providerCalls, 1);
+  assert.equal(result.logsWritten, 1);
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0]?.event_id, "event-824657");
+  assert.equal(inserted[0]?.game_date, "2026-07-18");
+  assert.match(JSON.stringify(deleted), /event-824657/);
+  assert.match(JSON.stringify(deleted), /2026-07-18/);
+  assert.doesNotMatch(JSON.stringify(inserted), /2026-07-17/);
+});
+
+test("postgame MLB settlement can resolve a missing external id without updating player identity rows", async () => {
+  let searchCalls = 0;
+  let playerUpdateSeen = false;
+  const result = await settleMlbPlayerLogsForEvents({
+    targets: [{
+      eventId: "event-1",
+      scheduledDate: "2026-07-18",
+      players: [{ id: "player-1", canonical_name: "Batter One", current_team_id: null, primary_position: "Outfielder", external_ids: null }],
+    }],
+    deps: {
+      searchPlayer: async () => { searchCalls += 1; return { id: 1001 }; },
+      fetchPlayerGameLog: async () => ({ data: { response: {} } }),
+      extractGameLogRows: () => [{ gamePk: "824657", date: "2026-07-18", runs: 1 }],
+      findEventByProviderId: async () => "event-1",
+      deleteRows: async () => {},
+      insertRows: async () => { playerUpdateSeen = true; return []; },
+    },
+  });
+  assert.equal(searchCalls, 1);
+  assert.equal(result.providerCalls, 2);
+  assert.equal(result.logsWritten, 1);
+  assert.equal(playerUpdateSeen, true, "the only write is the targeted player_game_logs insert, not a players update");
+});
+
+test("postgame settlement uses the scored pitcher market when primary position is missing", async () => {
+  const fetches: Array<{ playerId: number; statType: string }> = [];
+  const inserted: Array<Record<string, unknown>> = [];
+  const result = await settleMlbPlayerLogsForEvents({
+    now: new Date("2026-07-18T12:00:00.000Z"),
+    targets: [{
+      eventId: "event-824657",
+      providerEventId: "824657",
+      scheduledDate: "2026-07-18",
+      players: [{
+        id: "taj",
+        canonical_name: "Taj Bradley",
+        current_team_id: null,
+        primary_position: null,
+        external_ids: { "mlb-stats-api": "671737" },
+        requiredStatGroups: ["pitching"],
+      }],
+    }],
+    deps: {
+      searchPlayer: async () => { throw new Error("market-driven settlement must not search by name"); },
+      fetchPlayerGameLog: async (input) => { fetches.push(input); return { data: { response: {} } }; },
+      extractGameLogRows: () => [{ gamePk: "824657", date: "2026-07-18", strikeOuts: 6 }],
+      findEventByProviderId: async () => "event-824657",
+      deleteRows: async () => {},
+      insertRows: async (_table, rows) => { inserted.push(...rows); return []; },
+    },
+  });
+  assert.deepEqual(fetches.map((fetch) => fetch.statType), ["strikeouts"]);
+  assert.equal(fetches[0]?.playerId, 671737);
+  assert.equal(result.logsWritten, 1);
+  assert.equal(inserted[0]?.event_id, "event-824657");
+  assert.equal(inserted[0]?.strikeouts, 6);
+  assert.equal(result.outcomes[0]?.status, "settled");
+});
+
+test("postgame settlement resolves missing MLB identity from the selected event box score", async () => {
+  let searchCalls = 0;
+  const fetches: Array<{ playerId: number; statType: string }> = [];
+  const inserted: Array<Record<string, unknown>> = [];
+  const result = await settleMlbPlayerLogsForEvents({
+    now: new Date("2026-07-18T12:00:00.000Z"),
+    targets: [{
+      eventId: "event-824657",
+      providerEventId: "824657",
+      scheduledDate: "2026-07-18",
+      players: [{
+        id: "matt",
+        canonical_name: "Matt Boyd",
+        current_team_id: null,
+        primary_position: null,
+        external_ids: null,
+        requiredStatGroups: ["pitching"],
+      }],
+    }],
+    deps: {
+      searchPlayer: async () => { searchCalls += 1; return { id: 999 }; },
+      fetchEventBoxscore: async (providerEventId) => providerEventId === "824657" ? {
+        teams: { home: { players: { "ID571510": { person: { id: 571510, fullName: "Matthew Boyd" } } } }, away: { players: {} } },
+      } : null,
+      fetchPlayerGameLog: async (input) => { fetches.push(input); return { data: { response: {} } }; },
+      extractGameLogRows: () => [{ gamePk: "824657", date: "2026-07-18", strikeOuts: 4 }],
+      findEventByProviderId: async () => "event-824657",
+      deleteRows: async () => {},
+      insertRows: async (_table, rows) => { inserted.push(...rows); return []; },
+    },
+  });
+  assert.equal(searchCalls, 0);
+  assert.deepEqual(fetches, [{ playerId: 571510, playerName: "Matt Boyd", season: 2026, statType: "strikeouts" }]);
+  assert.equal(result.providerCalls, 2, "one event box score plus one bounded pitching log fetch");
+  assert.equal(result.logsWritten, 1);
+  assert.equal(inserted[0]?.strikeouts, 4);
+  assert.equal(result.outcomes[0]?.status, "settled");
+});
+
+test("postgame settlement exposes missing provider data as a retryable warning", async () => {
+  const result = await settleMlbPlayerLogsForEvents({
+    targets: [{
+      eventId: "event-1",
+      scheduledDate: "2026-07-18",
+      players: [{
+        id: "player-1",
+        canonical_name: "Player One",
+        current_team_id: null,
+        primary_position: "Pitcher",
+        external_ids: { "mlb-stats-api": "1001" },
+        requiredStatGroups: ["pitching"],
+      }],
+    }],
+    deps: {
+      fetchPlayerGameLog: async () => ({ data: { response: {} } }),
+      extractGameLogRows: () => [],
+      deleteRows: async () => {},
+      insertRows: async () => [],
+    },
+  });
+  assert.equal(result.warning, true);
+  assert.equal(result.outcomes[0]?.status, "deferred-provider-data");
+  assert.equal(result.failedPlayers[0], "player-1");
+});
+
+test("postgame settlement maps every supported MLB market and unions groups for a multi-market player", async () => {
+  assert.deepEqual(statGroupsForSettlementMarket("pitcher_strikeouts"), ["pitching"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_hits"), ["hitting"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_total_bases"), ["hitting"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_runs"), ["hitting"]);
+  assert.deepEqual(statGroupsForSettlementMarket("batter_rbis"), ["hitting"]);
+  assert.deepEqual(statGroupsForSettlementMarket("unsupported"), []);
+
+  const fetches: string[] = [];
+  const inserted: Array<Record<string, unknown>> = [];
+  const result = await settleMlbPlayerLogsForEvents({
+    now: new Date("2026-07-18T12:00:00.000Z"),
+    targets: [{
+      eventId: "event-1",
+      scheduledDate: "2026-07-18",
+      players: [{
+        id: "two-way",
+        canonical_name: "Two Way",
+        current_team_id: null,
+        primary_position: "Outfielder",
+        external_ids: { "mlb-stats-api": "1001" },
+        requiredStatGroups: ["hitting", "pitching"],
+      }],
+    }],
+    deps: {
+      fetchPlayerGameLog: async (input) => { fetches.push(input.statType); return { data: { response: input.statType } }; },
+      extractGameLogRows: (payload) => (payload as { response?: string }).response === "hits"
+        ? [{ gamePk: "824657", date: "2026-07-18", hits: 2 }]
+        : [{ gamePk: "824657", date: "2026-07-18", strikeOuts: 3 }],
+      findEventByProviderId: async () => "event-1",
+      deleteRows: async () => {},
+      insertRows: async (_table, rows) => { inserted.push(...rows); return []; },
+    },
+  });
+  assert.deepEqual(fetches, ["hits", "strikeouts"]);
+  assert.equal(result.logsWritten, 1);
+  assert.equal(inserted[0]?.hits, 2);
+  assert.equal(inserted[0]?.strikeouts, 3);
 });

@@ -30,10 +30,10 @@ type MlbScheduleGame = {
 
 type SchedulePayload = { dates?: Array<{ date?: string; games?: MlbScheduleGame[] }> };
 type TeamDirectoryPayload = { teams?: Array<{ id?: number; name?: string; abbreviation?: string; venue?: { name?: string; location?: { city?: string; stateAbbrev?: string } } }> };
-type MlbBoxscorePayload = {
+export type MlbBoxscorePayload = {
   teams?: {
-    home?: { players?: Record<string, unknown>; team?: { id?: number; name?: string } };
-    away?: { players?: Record<string, unknown>; team?: { id?: number; name?: string } };
+    home?: { players?: Record<string, { person?: { id?: number; fullName?: string } }>; team?: { id?: number; name?: string } };
+    away?: { players?: Record<string, { person?: { id?: number; fullName?: string } }>; team?: { id?: number; name?: string } };
   };
 };
 
@@ -44,6 +44,7 @@ type SharpPriorityRow = {
   team_name?: string | null;
   event_id?: string | null;
   start_time?: string | null;
+  market_type?: string | null;
 };
 
 type MlbPlayerRow = {
@@ -72,6 +73,18 @@ function isWithinLiveWindow(startTime: string | null | undefined, bounds: { earl
   const startMs = new Date(startTime).getTime();
   if (!Number.isFinite(startMs)) return true;
   return startMs >= bounds.earliestMs && startMs <= bounds.latestMs;
+}
+
+export function compareMlbLivePlayerStartTimes(leftStart: number | undefined, rightStart: number | undefined, nowMs: number) {
+  const leftKnown = typeof leftStart === "number" && Number.isFinite(leftStart);
+  const rightKnown = typeof rightStart === "number" && Number.isFinite(rightStart);
+  const left = leftStart ?? Number.POSITIVE_INFINITY;
+  const right = rightStart ?? Number.POSITIVE_INFINITY;
+  const leftFuture = !leftKnown ? 2 : left >= nowMs ? 0 : 1;
+  const rightFuture = !rightKnown ? 2 : right >= nowMs ? 0 : 1;
+  if (leftFuture !== rightFuture) return leftFuture - rightFuture;
+  if (left !== right) return leftFuture === 0 ? left - right : right - left;
+  return 0;
 }
 
 function safeText(value: unknown) {
@@ -123,7 +136,7 @@ function statLineValue(stat: Record<string, unknown>, ...keys: string[]) {
 
 async function loadLiveSharpPriorities() {
   const rows = await selectRows<SharpPriorityRow>("current_props", {
-    select: "player_id,player_name,team_id,team_name,start_time",
+    select: "player_id,player_name,team_id,team_name,market_type,start_time",
     filters: [
       { column: "provider", value: "sharpapi" },
       { column: "league_id", value: config.leagueId },
@@ -232,7 +245,7 @@ async function loadMissingRecentFeaturePlayerIds(playerIds: string[]) {
 
 async function loadLivePropCoverage() {
   const rows = await selectRows<SharpPriorityRow>("current_props", {
-    select: "player_id,player_name,team_id,team_name,event_id,start_time",
+    select: "player_id,player_name,team_id,team_name,event_id,market_type,start_time",
     filters: [
       { column: "provider", value: "sharpapi" },
       { column: "league_id", value: config.leagueId },
@@ -286,6 +299,16 @@ async function loadLivePropCoverage() {
       .map((row) => String(row.player_name ?? "").trim())
       .filter(Boolean),
   )].slice(0, 10);
+  const requiredStatGroupsByPlayerId: Record<string, MlbPostgameStatGroup[]> = {};
+  for (const row of activeRows) {
+    if (!row.player_id || !row.market_type) continue;
+    const groups = statGroupsForSettlementMarket(row.market_type);
+    if (!groups.length) continue;
+    requiredStatGroupsByPlayerId[row.player_id] = [...new Set([
+      ...(requiredStatGroupsByPlayerId[row.player_id] ?? []),
+      ...groups,
+    ])];
+  }
   return {
     activeRows,
     distinctEventIds,
@@ -295,6 +318,7 @@ async function loadLivePropCoverage() {
     missingRecentPlayerIds,
     missingRecentPlayerNamesNormalized,
     sampleMissingPlayerNames,
+    requiredStatGroupsByPlayerId,
   };
 }
 
@@ -860,6 +884,7 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   playerIds?: string[];
   missingOrStaleOnly?: boolean;
   limit?: number;
+  requiredStatGroupsByPlayerId?: Record<string, MlbPostgameStatGroup[]>;
 }) {
   const adapter = new MlbStatsApiAdapter();
   const players = await selectRows<MlbPlayerRow>("players", {
@@ -878,9 +903,22 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   });
   const mergedPlayers = Array.from(new Map([...resolvedPriorityPlayers, ...players].map((player) => [player.id, player])).values());
   const targetedPlayerIds = new Set((options?.playerIds ?? []).filter((value): value is string => Boolean(value)));
+  const nearestStartByPlayerId = new Map<string, number>();
+  for (const row of liveCoverage.activeRows) {
+    if (!row.player_id || !row.start_time) continue;
+    const startTime = new Date(row.start_time).getTime();
+    if (!Number.isFinite(startTime)) continue;
+    const current = nearestStartByPlayerId.get(row.player_id);
+    if (current === undefined || startTime < current) nearestStartByPlayerId.set(row.player_id, startTime);
+  }
+  const nowMs = now.getTime();
   const orderedPlayers = mergedPlayers
     .filter((player) => !targetedPlayerIds.size || targetedPlayerIds.has(player.id))
     .sort((left, right) => {
+    const leftStart = nearestStartByPlayerId.get(left.id) ?? Number.POSITIVE_INFINITY;
+    const rightStart = nearestStartByPlayerId.get(right.id) ?? Number.POSITIVE_INFINITY;
+    const startOrder = compareMlbLivePlayerStartTimes(leftStart, rightStart, nowMs);
+    if (startOrder !== 0) return startOrder;
     const leftMissing = missingRecentPriorityPlayerIds.has(left.id) ? 1 : 0;
     const rightMissing = missingRecentPriorityPlayerIds.has(right.id) ? 1 : 0;
     if (leftMissing !== rightMissing) return rightMissing - leftMissing;
@@ -896,13 +934,15 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     ? orderedPlayers.filter((player) => missingRecentPriorityPlayerIds.has(player.id) || missingRecentPriorityNames.has(normalizeName(player.canonical_name)))
     : orderedPlayers;
   const baseSliceSize = configuredChunkSize("KNOWLEDGE_MLB_PLAYER_LOGS_PER_RUN", 6, 4, 24);
+  const maxPlayerItemsPerRun = Math.min(baseSliceSize, 12);
   const livePriorityCount = scopedPlayers.filter((player) => priorities.playerIds.has(player.id) || priorities.playerNames.has(normalizeName(player.canonical_name))).length;
   const missingRecentPriorityCount = scopedPlayers.filter((player) => missingRecentPriorityPlayerIds.has(player.id) || missingRecentPriorityNames.has(normalizeName(player.canonical_name))).length;
   const playerWindow: RefreshWindow<(typeof scopedPlayers)[number]> = targetedPlayerIds.size
     ? (() => {
-        const targetedItems = scopedPlayers.slice(0, typeof options?.limit === "number" && Number.isFinite(options.limit)
+        const targetedLimit = typeof options?.limit === "number" && Number.isFinite(options.limit)
           ? Math.max(1, Math.floor(options.limit))
-          : Math.min(scopedPlayers.length || 1, Math.max(baseSliceSize, missingRecentPriorityCount || livePriorityCount || 1)));
+          : maxPlayerItemsPerRun;
+        const targetedItems = scopedPlayers.slice(0, Math.min(maxPlayerItemsPerRun, targetedLimit));
         return {
           items: targetedItems,
           start: 0,
@@ -921,7 +961,7 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
           || missingRecentPriorityNames.has(normalizeName(player.canonical_name))
           || priorities.playerIds.has(player.id)
           || priorities.playerNames.has(normalizeName(player.canonical_name)),
-        sliceSize: Math.min(Math.max(baseSliceSize, Math.min(Math.max(missingRecentPriorityCount, livePriorityCount), 8)), 12),
+        sliceSize: Math.min(Math.max(baseSliceSize, Math.min(Math.max(missingRecentPriorityCount, livePriorityCount), 8)), maxPlayerItemsPerRun),
         maxPriorityItems:
           missingRecentPriorityCount > 0
             ? Math.min(Math.max(missingRecentPriorityCount, 6), 8)
@@ -930,9 +970,12 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   const playerItems = playerWindow.items;
   let logsUpserted = 0;
   let emptyFetches = 0;
+  let providerCalls = 0;
+  let statGroupsFetched = 0;
   for (const player of playerItems) {
     let externalId = Number((player.external_ids ?? {})["mlb-stats-api"] ?? 0);
     if (!externalId) {
+      providerCalls += 1;
       const repaired = await adapter.searchPlayer(player.canonical_name).catch(() => null);
       if (repaired?.id) {
         externalId = repaired.id;
@@ -964,14 +1007,21 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     const cutoffDate: string | null = maxGameDate
       ? easternDate(addDays(new Date(maxGameDate + "T12:00:00Z"), -3))
       : null;
-    const statType = /pitcher/i.test(player.primary_position ?? "") ? "strikeouts" : "hits";
-    const result = await adapter.fetchPlayerGameLog({
+    const requiredGroups = options?.requiredStatGroupsByPlayerId?.[player.id]
+      ?? liveCoverage.requiredStatGroupsByPlayerId[player.id]
+      ?? [];
+    const statGroups: MlbPostgameStatGroup[] = requiredGroups.length
+      ? [...new Set(requiredGroups)]
+      : [/pitcher|(^|[^a-z])p([^a-z]|$)/i.test(player.primary_position ?? "") ? "pitching" : "hitting"];
+    providerCalls += statGroups.length;
+    statGroupsFetched += statGroups.length;
+    const results = await Promise.all(statGroups.map((group) => adapter.fetchPlayerGameLog({
       playerId: externalId,
       playerName: player.canonical_name,
       season: Number(currentMlbSeason(now)),
-      statType,
-    }).catch(() => null);
-    const payloads = !result ? [] : Array.isArray(result.data.response) ? result.data.response : [result.data];
+      statType: group === "pitching" ? "strikeouts" : "hits",
+    }).catch(() => null)));
+    const payloads = results.flatMap((result) => !result ? [] : Array.isArray(result.data.response) ? result.data.response : [result.data]);
     const allRows = payloads.flatMap((payload) => adapter.extractGameLogRows(payload as never));
     const rows = [];
     for (const row of allRows) {
@@ -1012,14 +1062,24 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
       });
     }
     if (rows.length) {
-      const dedupedRows = Array.from(
-        new Map(
-          rows.map((row) => [
-            `mlb-stats-api|${player.id}|${String(row.game_date)}|${String(row.event_id ?? "")}`,
-            row,
-          ]),
-        ).values(),
-      );
+      const mergedRows = new Map<string, (typeof rows)[number]>();
+      for (const row of rows) {
+        const key = `mlb-stats-api|${player.id}|${String(row.game_date)}|${String(row.event_id ?? "")}`;
+        const existing = mergedRows.get(key);
+        if (!existing) {
+          mergedRows.set(key, row);
+          continue;
+        }
+        const merged = { ...existing } as (typeof rows)[number];
+        const statKeys = ["hits", "singles", "doubles", "triples", "total_bases", "runs", "rbis", "home_runs", "walks", "strikeouts", "stolen_bases", "outs_recorded", "innings_pitched", "earned_runs", "hits_allowed", "walks_allowed"] as const;
+        for (const key of statKeys) {
+          if (merged[key] === null || merged[key] === undefined) merged[key] = row[key];
+        }
+        merged.stat_line = { ...(existing.stat_line ?? {}), ...(row.stat_line ?? {}) };
+        merged.raw_payload = { ...(existing.raw_payload ?? {}), ...(row.raw_payload ?? {}) };
+        mergedRows.set(key, merged);
+      }
+      const dedupedRows = [...mergedRows.values()];
       // Scope to overlap window: only touch rows >= cutoffDate.
       // When there are no prior rows (cutoffDate=null), insert everything.
       const windowRows = cutoffDate
@@ -1042,6 +1102,9 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     league: "MLB",
     provider: "mlb-stats-api",
     playersChecked: playerItems.length,
+    selectedPlayerIds: playerItems.map((player) => player.id),
+    providerCalls,
+    statGroupsFetched,
     distinctActivePropPlayers: liveCoverage.distinctPlayerIds.length,
     priorityPlayersMissingRecent: missingRecentPriorityCount,
     resolvedPriorityPlayers: resolvedPriorityPlayers.length,
@@ -1050,6 +1113,320 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     playerCursor: { start: playerWindow.start, nextIndex: playerWindow.nextIndex, total: playerWindow.total },
     logsUpserted,
     emptyFetches,
+  };
+}
+
+export type MlbPostgameStatGroup = "hitting" | "pitching";
+
+/**
+ * Postgame settlement intent is determined by the scored market, not by the
+ * player's catalog metadata. A player may have both groups selected in one
+ * event, so callers must union the returned groups per player.
+ */
+export function statGroupsForSettlementMarket(marketType: string): MlbPostgameStatGroup[] {
+  const normalized = marketType
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/^player_strikeouts$/, "pitcher_strikeouts")
+    .replace(/^player_hits$/, "batter_hits")
+    .replace(/^player_total_bases$/, "batter_total_bases")
+    .replace(/^player_runs$/, "batter_runs")
+    .replace(/^player_rbis$/, "batter_rbis");
+  if (["pitcher_strikeouts", "pitcher_outs_recorded", "pitcher_earned_runs", "pitcher_hits_allowed", "pitcher_walks_allowed"].includes(normalized)) return ["pitching"];
+  if (["batter_hits", "batter_total_bases", "batter_runs", "batter_rbis", "batter_home_runs", "batter_walks", "batter_stolen_bases", "batter_hits_runs_rbis"].includes(normalized)) return ["hitting"];
+  return [];
+}
+
+export type MlbPostgameSettlementPlayer = Pick<MlbPlayerRow, "id" | "canonical_name" | "current_team_id" | "primary_position" | "external_ids"> & {
+  requiredStatGroups?: MlbPostgameStatGroup[];
+};
+
+export type MlbPostgameSettlementTarget = {
+  eventId: string;
+  scheduledDate: string;
+  providerEventId?: string | null;
+  players: MlbPostgameSettlementPlayer[];
+};
+
+export type MlbPostgameSettlementOutcome = {
+  eventId: string;
+  playerId: string;
+  playerName: string;
+  requiredStatGroups: MlbPostgameStatGroup[];
+  status: "settled" | "deferred-provider-data" | "deferred-identity" | "unsupported-market" | "provider-error";
+  reason: string;
+  logsWritten: number;
+};
+
+export type MlbPostgameSettlementResult = {
+  league: "MLB";
+  provider: "mlb-stats-api";
+  eventsTargeted: number;
+  playersTargeted: number;
+  providerCalls: number;
+  logsWritten: number;
+  emptyFetches: number;
+  failedPlayers: string[];
+  outcomes: MlbPostgameSettlementOutcome[];
+  warning: boolean;
+};
+
+/**
+ * Refresh only the final game-log rows required by recently completed scored props.
+ *
+ * This deliberately does not use the rotating/live-window refresher above: completed games
+ * are outside that live window, and a player with no prior row must never cause a whole-season
+ * insertion during postgame settlement. Every delete and insert is bounded by one player,
+ * one canonical event, and one game date.
+ */
+export async function settleMlbPlayerLogsForEvents(input: {
+  targets: MlbPostgameSettlementTarget[];
+  now?: Date;
+  deps?: {
+    searchPlayer?: (playerName: string) => Promise<{ id: number } | null>;
+    fetchPlayerGameLog?: (input: { playerId: number; playerName: string; season?: number; statType: string }) => Promise<{ data: { response: unknown } } | null>;
+    extractGameLogRows?: (payload: never) => Array<Record<string, unknown>>;
+    fetchEventBoxscore?: (providerEventId: string) => Promise<MlbBoxscorePayload | null>;
+    findEventByProviderId?: typeof findEventByProviderId;
+    deleteRows?: typeof deleteRows;
+    insertRows?: typeof insertRows;
+  };
+}): Promise<MlbPostgameSettlementResult> {
+  const now = input.now ?? new Date();
+  const adapter = new MlbStatsApiAdapter();
+  const searchPlayer = input.deps?.searchPlayer ?? ((playerName: string) => adapter.searchPlayer(playerName));
+  const fetchPlayerGameLog = input.deps?.fetchPlayerGameLog ?? ((args: { playerId: number; playerName: string; season?: number; statType: string }) => adapter.fetchPlayerGameLog(args));
+  const extractGameLogRows = input.deps?.extractGameLogRows ?? ((payload: never) => adapter.extractGameLogRows(payload));
+  const fetchEventBoxscore = input.deps?.fetchEventBoxscore ?? ((providerEventId: string) => fetchMlbBoxscore(providerEventId));
+  const findEvent = input.deps?.findEventByProviderId ?? findEventByProviderId;
+  const removeRows = input.deps?.deleteRows ?? deleteRows;
+  const writeRows = input.deps?.insertRows ?? insertRows;
+  const targetsByEventId = new Map(input.targets.map((target) => [target.eventId, target]));
+  const playerContexts = new Map<string, {
+    player: MlbPostgameSettlementPlayer;
+    targets: MlbPostgameSettlementTarget[];
+    requiredStatGroups: Set<MlbPostgameStatGroup>;
+  }>();
+  for (const target of input.targets) {
+    for (const player of target.players) {
+      const context = playerContexts.get(player.id) ?? {
+        player,
+        targets: [],
+        requiredStatGroups: new Set<MlbPostgameStatGroup>(),
+      };
+      context.targets.push(target);
+      const fallbackGroup: MlbPostgameStatGroup = /pitcher/i.test(player.primary_position ?? "") ? "pitching" : "hitting";
+      for (const group of player.requiredStatGroups?.length ? player.requiredStatGroups : [fallbackGroup]) context.requiredStatGroups.add(group);
+      playerContexts.set(player.id, context);
+    }
+  }
+  const players = [...playerContexts.values()];
+  const eventBoxscoreCache = new Map<string, Promise<MlbBoxscorePayload | null>>();
+  const targetDates = new Set(input.targets.map((target) => target.scheduledDate.slice(0, 10)));
+  let providerCalls = 0;
+  let logsWritten = 0;
+  let emptyFetches = 0;
+  const failedPlayers: string[] = [];
+  const outcomes: MlbPostgameSettlementOutcome[] = [];
+
+  const samePlayerName = (left: string, right: string) => {
+    const leftParts = normalizeName(left).split(/\s+/).filter(Boolean);
+    const rightParts = normalizeName(right).split(/\s+/).filter(Boolean);
+    if (!leftParts.length || !rightParts.length) return false;
+    if (leftParts.join(" ") === rightParts.join(" ")) return true;
+    const leftLast = leftParts.at(-1) ?? "";
+    const rightLast = rightParts.at(-1) ?? "";
+    const leftFirst = leftParts[0] ?? "";
+    const rightFirst = rightParts[0] ?? "";
+    return leftLast === rightLast
+      && leftFirst.length >= 3
+      && rightFirst.length >= 3
+      && (leftFirst.startsWith(rightFirst) || rightFirst.startsWith(leftFirst));
+  };
+
+  const resolveEventScopedExternalId = async (player: MlbPostgameSettlementPlayer, targets: MlbPostgameSettlementTarget[]) => {
+    for (const target of targets) {
+      const providerEventId = String(target.providerEventId ?? "").trim();
+      if (!providerEventId) continue;
+      let boxscorePromise = eventBoxscoreCache.get(providerEventId);
+      if (!boxscorePromise) {
+        providerCalls += 1;
+        boxscorePromise = fetchEventBoxscore(providerEventId).catch(() => null);
+        eventBoxscoreCache.set(providerEventId, boxscorePromise);
+      }
+      const boxscore = await boxscorePromise;
+      const participants = [
+        ...Object.values(boxscore?.teams?.home?.players ?? {}),
+        ...Object.values(boxscore?.teams?.away?.players ?? {}),
+      ];
+      const match = participants.find((participant) => samePlayerName(player.canonical_name, participant.person?.fullName ?? "") && Number(participant.person?.id ?? 0) > 0);
+      if (match?.person?.id) return Number(match.person.id);
+    }
+    return 0;
+  };
+
+  const settlementStatAvailable = (row: Record<string, unknown>, group: MlbPostgameStatGroup) => {
+    if (group === "pitching") return safeNumber(statLineValue(row, "strikeOuts", "strikeouts")) !== null;
+    return ["hits", "totalBases", "total_bases", "runs", "rbi", "rbis"].some((key) => safeNumber(statLineValue(row, key)) !== null);
+  };
+
+  for (const context of players) {
+    const player = context.player;
+    const requiredStatGroups = [...context.requiredStatGroups];
+    let externalId = Number((player.external_ids ?? {})["mlb-stats-api"] ?? 0);
+    if (!externalId) {
+      externalId = await resolveEventScopedExternalId(player, context.targets);
+      if (!externalId && context.targets.every((target) => !target.providerEventId)) {
+        providerCalls += 1;
+        const repaired = await searchPlayer(player.canonical_name).catch(() => null);
+        externalId = Number(repaired?.id ?? 0);
+      }
+    }
+    if (!externalId) {
+      emptyFetches += 1;
+      failedPlayers.push(player.id);
+      for (const target of context.targets) {
+        outcomes.push({ eventId: target.eventId, playerId: player.id, playerName: player.canonical_name, requiredStatGroups, status: "deferred-identity", reason: "No MLB identity was resolved from the selected event box score.", logsWritten: 0 });
+      }
+      continue;
+    }
+
+    let fetchFailed = false;
+    const candidateRows: Array<Record<string, unknown>> = [];
+    for (const statGroup of requiredStatGroups) {
+      providerCalls += 1;
+      let result: { data: { response: unknown } } | null = null;
+      try {
+        result = await fetchPlayerGameLog({
+          playerId: externalId,
+          playerName: player.canonical_name,
+          season: Number(currentMlbSeason(now)),
+          statType: statGroup === "pitching" ? "strikeouts" : "hits",
+        });
+      } catch {
+        fetchFailed = true;
+      }
+      const payloads = !result ? [] : Array.isArray(result.data.response) ? result.data.response : [result.data];
+      candidateRows.push(...payloads.flatMap((payload) => extractGameLogRows(payload as never)));
+    }
+    const mergedCandidateRows = Array.from(candidateRows.reduce((merged, row) => {
+      const gameInfo = row.game && typeof row.game === "object" ? row.game as Record<string, unknown> : {};
+      const rawDate = String(row.date ?? row.gameDate ?? gameInfo.gameDate ?? gameInfo.officialDate ?? "").trim().slice(0, 10);
+      const eventExternalId = String(gameInfo.gamePk ?? row.gamePk ?? row.game_id ?? row.gameId ?? "").trim();
+      const key = `${eventExternalId}|${rawDate}`;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, row);
+        return merged;
+      }
+      const existingStat = existing.stat && typeof existing.stat === "object" ? existing.stat as Record<string, unknown> : {};
+      const rowStat = row.stat && typeof row.stat === "object" ? row.stat as Record<string, unknown> : {};
+      merged.set(key, { ...existing, ...row, stat: { ...existingStat, ...rowStat } });
+      return merged;
+    }, new Map<string, Record<string, unknown>>()).values());
+    const rows: Array<Record<string, unknown>> = [];
+
+    for (const row of mergedCandidateRows) {
+      const gameInfo = row.game && typeof row.game === "object" ? row.game as Record<string, unknown> : {};
+      const rawDate = String(row.date ?? row.gameDate ?? gameInfo.gameDate ?? gameInfo.officialDate ?? "").trim();
+      const gameDate = rawDate.slice(0, 10);
+      if (!gameDate || !targetDates.has(gameDate)) continue;
+      const eventExternalId = String(gameInfo.gamePk ?? row.gamePk ?? row.game_id ?? row.gameId ?? "").trim();
+      if (!eventExternalId) continue;
+      const eventId = await findEvent("mlb-stats-api", config.leagueId, eventExternalId);
+      const target = eventId ? targetsByEventId.get(eventId) : undefined;
+      if (!target || target.scheduledDate.slice(0, 10) !== gameDate || !target.players.some((candidate) => candidate.id === player.id)) continue;
+      const targetPlayer = target.players.find((candidate) => candidate.id === player.id);
+      const targetGroups = targetPlayer?.requiredStatGroups?.length ? targetPlayer.requiredStatGroups : requiredStatGroups;
+      if (!targetGroups.every((group) => settlementStatAvailable(row, group))) continue;
+
+      rows.push({
+        sport_id: config.sportId,
+        league_id: config.leagueId,
+        player_id: player.id,
+        team_id: player.current_team_id,
+        opponent_team_id: null,
+        event_id: eventId,
+        game_id: eventId,
+        game_date: gameDate,
+        season: currentMlbSeason(now),
+        provider: "mlb-stats-api",
+        hits: safeNumber(statLineValue(row, "hits")),
+        singles: safeNumber(statLineValue(row, "singles")),
+        doubles: safeNumber(statLineValue(row, "doubles")),
+        triples: safeNumber(statLineValue(row, "triples")),
+        total_bases: safeNumber(statLineValue(row, "totalBases", "total_bases")),
+        runs: safeNumber(statLineValue(row, "runs")),
+        rbis: safeNumber(statLineValue(row, "rbi", "rbis")),
+        home_runs: safeNumber(statLineValue(row, "homeRuns", "home_runs")),
+        walks: safeNumber(statLineValue(row, "baseOnBalls", "walks")),
+        strikeouts: safeNumber(statLineValue(row, "strikeOuts", "strikeouts")),
+        stolen_bases: safeNumber(statLineValue(row, "stolenBases", "stolen_bases")),
+        outs_recorded: safeNumber(statLineValue(row, "outsRecorded", "outs_recorded")),
+        innings_pitched: safeNumber(statLineValue(row, "inningsPitched", "innings_pitched")),
+        earned_runs: safeNumber(statLineValue(row, "earnedRuns", "earned_runs")),
+        hits_allowed: safeNumber(statLineValue(row, "hitsAllowed", "hits_allowed")),
+        walks_allowed: safeNumber(statLineValue(row, "baseOnBalls", "walksAllowed", "walks_allowed")),
+        stat_line: row,
+        raw_payload: row,
+        source_updated_at: new Date().toISOString(),
+      });
+    }
+
+    const dedupedRows = Array.from(new Map(rows.map((row) => [`${String(row.player_id)}|${String(row.event_id)}|${String(row.game_date)}`, row])).values());
+    if (!dedupedRows.length) {
+      emptyFetches += 1;
+      if (!failedPlayers.includes(player.id)) failedPlayers.push(player.id);
+      for (const target of context.targets) {
+        outcomes.push({
+          eventId: target.eventId,
+          playerId: player.id,
+          playerName: player.canonical_name,
+          requiredStatGroups,
+          status: fetchFailed ? "provider-error" : "deferred-provider-data",
+          reason: fetchFailed ? "MLB game-log provider request failed." : "No final stat row containing the required market stat was returned.",
+          logsWritten: 0,
+        });
+      }
+      continue;
+    }
+    for (const row of dedupedRows) {
+      await removeRows("player_game_logs", [
+        { column: "provider", value: "mlb-stats-api" },
+        { column: "player_id", value: player.id },
+        { column: "event_id", value: row.event_id as string },
+        { column: "game_date", value: row.game_date as string },
+      ]);
+      await writeRows("player_game_logs", [row], { returning: "minimal" });
+      logsWritten += 1;
+    }
+    for (const target of context.targets) {
+      const targetRowCount = dedupedRows.filter((row) => row.event_id === target.eventId && row.game_date === target.scheduledDate.slice(0, 10)).length;
+      if (!targetRowCount && !failedPlayers.includes(player.id)) failedPlayers.push(player.id);
+      outcomes.push({
+        eventId: target.eventId,
+        playerId: player.id,
+        playerName: player.canonical_name,
+        requiredStatGroups,
+        status: targetRowCount ? "settled" : (fetchFailed ? "provider-error" : "deferred-provider-data"),
+        reason: targetRowCount ? "Required final stat was persisted for the selected event." : (fetchFailed ? "MLB game-log provider request failed." : "No final stat row containing the required market stat was returned."),
+        logsWritten: targetRowCount,
+      });
+    }
+  }
+
+  return {
+    league: "MLB",
+    provider: "mlb-stats-api",
+    eventsTargeted: input.targets.length,
+    playersTargeted: players.length,
+    providerCalls,
+    logsWritten,
+    emptyFetches,
+    failedPlayers,
+    outcomes,
+    warning: failedPlayers.length > 0,
   };
 }
 
@@ -1627,7 +2004,12 @@ export async function refreshMlbWeather() {
     if (!payload) continue;
     await upsertRows("mlb_weather", [{
       event_id: event.id,
-      game_id: null,
+      // mlb_weather.game_id is NOT NULL; omitting it made every weather upsert
+      // fail with Postgres 23502 (observed live in run 29597712952's background
+      // enrichment weather substage). The internal events.id doubles as the
+      // legacy games.id here (same UUID), so event.id is the correct value. The
+      // conflict target stays event-first (event_id,weather_date) - unchanged.
+      game_id: event.id,
       weather_date: event.scheduled_date,
       temperature_f: payload.data.temperatureF,
       wind_mph: payload.data.windMph,

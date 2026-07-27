@@ -27,11 +27,23 @@
  */
 
 import { parquetReadObjects } from "hyparquet";
+import { compressors } from "hyparquet-compressors";
 import { insertRows, deleteRows, selectRows } from "@/lib/db/supabase-server";
-import { ACTIVE_LEAGUES, ensureEvent, ensurePlayer, ensureTeam, easternDate, addDays } from "@/lib/knowledge/enrichment/shared";
+import { ACTIVE_LEAGUES, ensureEvent, ensurePlayer, ensureTeam, easternDate, addDays, normalizeName } from "@/lib/knowledge/enrichment/shared";
 
 export const SPORTSDATAVERSE_WNBA_PROVIDER = "sportsdataverse-wnba";
 const WNBA_CONFIG = ACTIVE_LEAGUES.WNBA;
+
+// hyparquet only decodes UNCOMPRESSED + SNAPPY natively; any other codec throws
+// "parquet unsupported compression codec: <CODEC>". The SportsDataverse
+// wehoop-wnba-data files are ZSTD-compressed (confirmed live: production run
+// 29601049420 failed with "parquet unsupported compression codec: ZSTD"), so
+// pass hyparquet-compressors' pure-JS `compressors` map (fzstd for ZSTD, plus
+// GZIP/BROTLI/LZ4/etc.) to every parquetReadObjects call. It is dependency-only
+// (no native binary, no system package, no CLI) so it runs unchanged under the
+// GitHub Actions Node 22 runtime. Covering all codecs also future-proofs against
+// the upstream repo switching compression. See PARQUET_COMPRESSORS below.
+const PARQUET_COMPRESSORS = compressors;
 
 // How far back to re-check past the last-ingested date. Catches late
 // box-score corrections without re-processing the whole season - see
@@ -45,6 +57,7 @@ const COMMITS_API_URL = "https://api.github.com/repos/sportsdataverse/wehoop-wnb
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const DOWNLOAD_MAX_ATTEMPTS = 3;
 const DOWNLOAD_BACKOFF_MS = 2_000;
+const COMPLETED_EVENT_STATUSES = new Set(["completed", "final", "closed"]);
 
 function log(level: "info" | "warn" | "error", message: string, fields: Record<string, unknown> = {}) {
   const payload = { provider: SPORTSDATAVERSE_WNBA_PROVIDER, level, message, ...fields, timestamp: new Date().toISOString() };
@@ -135,7 +148,7 @@ async function fetchFileSourceUpdatedAt(datasetPath: string): Promise<string | n
   }
 }
 
-type ScheduleRow = {
+export type ScheduleRow = {
   id: number;
   date: string;
   status_type_completed: boolean;
@@ -152,6 +165,48 @@ type ScheduleRow = {
   venue_address_state: string | null;
   season: number;
 };
+
+export type ExistingWnbaEventCandidate = {
+  id: string;
+  status: string | null;
+  scheduledDate: string;
+  externalId?: string | null;
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+};
+
+export type WnbaEventResolutionInput = {
+  gameId: string;
+  gameDate: string;
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+};
+
+/**
+ * Resolves an unresolved SDV schedule row to an already-known canonical WNBA
+ * event. Provider identity wins; the date/home/away fallback is exact and
+ * rejects ambiguity. This function never creates an event and never treats a
+ * scheduled or live event as settled merely because a box row exists.
+ */
+export function resolveExistingCompletedWnbaEvent(
+  input: WnbaEventResolutionInput,
+  candidates: ExistingWnbaEventCandidate[],
+) {
+  const completed = candidates.filter((candidate) => COMPLETED_EVENT_STATUSES.has((candidate.status ?? "").toLowerCase()));
+  const direct = completed.filter((candidate) => candidate.externalId === input.gameId);
+  if (direct.length === 1) return direct[0].id;
+  if (direct.length > 1) return null;
+
+  const homeName = normalizeName(input.homeTeamName ?? "");
+  const awayName = normalizeName(input.awayTeamName ?? "");
+  if (!input.gameDate || !homeName || !awayName) return null;
+  const exact = completed.filter((candidate) =>
+    candidate.scheduledDate === input.gameDate
+    && normalizeName(candidate.homeTeamName ?? "") === homeName
+    && normalizeName(candidate.awayTeamName ?? "") === awayName,
+  );
+  return exact.length === 1 ? exact[0].id : null;
+}
 
 type PlayerBoxRow = {
   game_id: number;
@@ -226,6 +281,126 @@ export type ScheduleIngestResult = {
   teamIdByExternalId: Map<string, string>;
 };
 
+type ExistingWnbaEventRow = {
+  id: string;
+  status: string | null;
+  scheduled_date: string | null;
+  home_team_id: string | null;
+  away_team_id: string | null;
+};
+
+type ExistingWnbaTeamRow = {
+  id: string;
+  name: string | null;
+  abbreviation: string | null;
+  city: string | null;
+  nickname: string | null;
+};
+
+/**
+ * Loads only existing, status-confirmed completed WNBA events that could
+ * correspond to the current SDV schedule window. The direct source-mapping
+ * lookup uses the shared ESPN event id (the SDV game id in these artifacts).
+ * The date/team fallback is exact and bounded to dates present in this file.
+ */
+export async function loadExistingCompletedWnbaEventMap(rows: ScheduleRow[], watermark: string | null) {
+  const candidateRows = rows.filter((row) => {
+    const gameId = safeText(row.id);
+    const gameDate = safeDateOnly(row.date);
+    if (!gameId || !gameDate) return false;
+    return !watermark || gameDate >= watermark;
+  });
+  const gameIds = [...new Set(candidateRows.map((row) => safeText(row.id)))];
+  const dates = [...new Set(candidateRows.map((row) => safeDateOnly(row.date)))];
+  if (!gameIds.length || !dates.length) return new Map<string, string>();
+
+  const mappedRows = await selectRows<{ external_id: string; entity_id: string }>("source_mappings", {
+    select: "external_id,entity_id",
+    filters: [
+      { column: "provider", value: "espn-wnba" },
+      { column: "entity_type", value: "event" },
+      { column: "league_id", value: WNBA_CONFIG.leagueId },
+      { column: "external_id", operator: "in", value: gameIds },
+    ],
+    limit: Math.max(gameIds.length, 1),
+  }).catch(() => []);
+  const mappedByExternalId = new Map(mappedRows.map((row) => [String(row.external_id), String(row.entity_id)]));
+  const mappedEventIds = [...new Set(mappedRows.map((row) => String(row.entity_id)).filter(Boolean))];
+
+  const mappedEvents = mappedEventIds.length
+    ? await selectRows<ExistingWnbaEventRow>("events", {
+        select: "id,status,scheduled_date,home_team_id,away_team_id",
+        filters: [
+          { column: "league_id", value: WNBA_CONFIG.leagueId },
+          { column: "id", operator: "in", value: mappedEventIds },
+        ],
+        limit: Math.max(mappedEventIds.length, 1),
+      }).catch(() => [])
+    : [];
+  const mappedEventById = new Map(mappedEvents.map((event) => [event.id, event]));
+
+  const eventCandidates = new Map<string, ExistingWnbaEventCandidate>();
+  for (const row of mappedRows) {
+    const event = mappedEventById.get(String(row.entity_id));
+    if (!event) continue;
+    eventCandidates.set(event.id, {
+      id: event.id,
+      status: event.status,
+      scheduledDate: safeDateOnly(event.scheduled_date),
+      externalId: String(row.external_id),
+    });
+  }
+
+  const unresolvedRows = candidateRows.filter((row) => !mappedByExternalId.has(safeText(row.id)));
+  if (unresolvedRows.length) {
+    const fallbackEvents = await selectRows<ExistingWnbaEventRow>("events", {
+      select: "id,status,scheduled_date,home_team_id,away_team_id",
+      filters: [
+        { column: "league_id", value: WNBA_CONFIG.leagueId },
+        { column: "status", operator: "in", value: [...COMPLETED_EVENT_STATUSES] },
+        { column: "scheduled_date", operator: "in", value: dates },
+      ],
+      limit: 1000,
+    }).catch(() => []);
+    const teamIds = [...new Set(fallbackEvents.flatMap((event) => [event.home_team_id, event.away_team_id]).filter((id): id is string => Boolean(id)))];
+    const teams = teamIds.length
+      ? await selectRows<ExistingWnbaTeamRow>("teams", {
+          select: "id,name,abbreviation,city,nickname",
+          filters: [
+            { column: "league_id", value: WNBA_CONFIG.leagueId },
+            { column: "id", operator: "in", value: teamIds },
+          ],
+          limit: Math.max(teamIds.length, 1),
+        }).catch(() => [])
+      : [];
+    const teamsById = new Map(teams.map((team) => [team.id, team]));
+    for (const event of fallbackEvents) {
+      const homeTeam = event.home_team_id ? teamsById.get(event.home_team_id) : null;
+      const awayTeam = event.away_team_id ? teamsById.get(event.away_team_id) : null;
+      eventCandidates.set(event.id, {
+        id: event.id,
+        status: event.status,
+        scheduledDate: safeDateOnly(event.scheduled_date),
+        homeTeamName: homeTeam?.name ?? null,
+        awayTeamName: awayTeam?.name ?? null,
+      });
+    }
+  }
+
+  const resolved = new Map<string, string>();
+  for (const row of candidateRows) {
+    const gameId = safeText(row.id);
+    const resolvedEventId = resolveExistingCompletedWnbaEvent({
+      gameId,
+      gameDate: safeDateOnly(row.date),
+      homeTeamName: row.home_display_name,
+      awayTeamName: row.away_display_name,
+    }, [...eventCandidates.values()]);
+    if (resolvedEventId) resolved.set(gameId, resolvedEventId);
+  }
+  return resolved;
+}
+
 /**
  * Finds the most recent game_date already ingested by this provider, so a
  * daily run only needs to process games since then (plus a small overlap
@@ -257,6 +432,7 @@ export async function ingestSportsDataverseWnbaSchedules(season: number, options
 
   const rows = await parquetReadObjects({
     file: buffer,
+    compressors: PARQUET_COMPRESSORS,
     columns: [
       "id", "date", "status_type_completed",
       "home_id", "home_display_name", "home_abbreviation", "home_score",
@@ -342,8 +518,18 @@ export async function ingestSportsDataverseWnbaSchedules(season: number, options
     eventsUpserted += 1;
   }
 
+  // The SDV schedule artifact can lag the box artifacts' final-status flags.
+  // Reuse only existing Covered events that are already status-confirmed
+  // completed/final/closed; never create or promote an event in this fallback.
+  const existingCompletedEventMap = await loadExistingCompletedWnbaEventMap(rows, watermark);
+  for (const [externalId, eventId] of existingCompletedEventMap) {
+    if (!eventIdByExternalId.has(externalId)) eventIdByExternalId.set(externalId, eventId);
+  }
+
   log("info", "SportsDataverse WNBA schedule ingestion complete", {
-    season, rowsRead: rows.length, completedGames, skippedIncomplete, skippedMalformed, skippedOutsideWindow, eventsUpserted, watermark,
+    season, rowsRead: rows.length, completedGames, skippedIncomplete, skippedMalformed, skippedOutsideWindow, eventsUpserted,
+    existingCompletedEventsReused: existingCompletedEventMap.size,
+    watermark,
   });
 
   return { rowsRead: rows.length, completedGames, skippedIncomplete, skippedMalformed, skippedOutsideWindow, eventsUpserted, sourceUpdatedAt, watermark, eventIdByExternalId, teamIdByExternalId };
@@ -365,6 +551,7 @@ export async function ingestSportsDataverseWnbaPlayerBox(
   const buffer = await downloadParquetFile(datasetPath);
   const rows = await parquetReadObjects({
     file: buffer,
+    compressors: PARQUET_COMPRESSORS,
     columns: [
       "game_id", "game_date", "athlete_id", "athlete_display_name", "team_id",
       "minutes", "points", "rebounds", "assists", "steals", "blocks", "turnovers",
@@ -486,6 +673,7 @@ export async function ingestSportsDataverseWnbaTeamBox(
   const buffer = await downloadParquetFile(datasetPath);
   const rows = await parquetReadObjects({
     file: buffer,
+    compressors: PARQUET_COMPRESSORS,
     columns: [
       "game_id", "game_date", "team_id", "team_display_name", "team_score", "opponent_team_id", "opponent_team_score",
       "rebounds", "offensive_rebounds", "defensive_rebounds", "assists", "steals", "blocks", "turnovers", "total_turnovers",

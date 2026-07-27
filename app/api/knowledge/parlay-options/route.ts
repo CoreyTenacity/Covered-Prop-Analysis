@@ -3,6 +3,7 @@ import { getParlayOptions } from "@/lib/knowledge/read-service";
 import {
   parsePublicSnapshotVersion,
   readPublicSnapshot,
+  parlayOptionsSnapshotHasLeagueRows,
   resolvePublicSnapshotRoute,
 } from "@/lib/knowledge/public-snapshots";
 import type { ParlayOptionRow, ParlayOptionsResponse } from "@/lib/knowledge/read-types";
@@ -41,12 +42,17 @@ export async function GET(request: Request) {
     limit: parseNumber(url.searchParams.get("limit")),
     includeVariantBooks: parseBoolean(url.searchParams.get("includeVariantBooks")) ?? false,
   };
+  const requiredSnapshotLeagues = query.league ? [query.league] : ["mlb", "wnba"];
 
   const resolution = await resolvePublicSnapshotRoute<ParlayOptionsResponse>({
     route: "parlay-options",
     snapshotVersion,
     canUseSnapshot: true,
-    readSnapshot: () => readPublicSnapshot<PublicParlayOptionSnapshotRow>("parlay-options", snapshotVersion),
+    readSnapshot: async () => {
+      const snapshot = await readPublicSnapshot<PublicParlayOptionSnapshotRow>("parlay-options", snapshotVersion);
+      if (snapshot && !parlayOptionsSnapshotHasLeagueRows(snapshot.rows, requiredSnapshotLeagues)) return null;
+      return snapshot;
+    },
     buildSnapshotResponse: (snapshot) => ({
       schemaVersion: snapshot.schemaVersion,
       snapshotVersion: snapshot.snapshotVersion,
@@ -62,8 +68,19 @@ export async function GET(request: Request) {
     } satisfies ParlayOptionsResponse),
     buildFallbackResponse: async () => {
       const payload = await getParlayOptions({
-        limit: 250,
-        includeVariantBooks: true,
+        date: query.date,
+        sport: query.sport,
+        league: query.league,
+        eventId: query.eventId,
+        marketType: query.marketType,
+        sportsbook: query.sportsbook,
+        participantSearch: query.participantSearch,
+        onlyScored: query.onlyScored,
+        onlyMatched: query.onlyMatched,
+        excludeStaleOdds: query.excludeStaleOdds,
+        excludeLowConfidenceMatches: query.excludeLowConfidenceMatches,
+        limit: query.limit ?? 250,
+        includeVariantBooks: query.includeVariantBooks,
       }) as ParlayOptionsResponse;
       return {
         schemaVersion: null,

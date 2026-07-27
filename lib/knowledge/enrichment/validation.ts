@@ -20,10 +20,17 @@ export type CompletenessReport = {
   error?: string;
 };
 
-// external_ids keys are the identity keys each league's log ingestion reads.
-// Verified against lib/knowledge/enrichment/basketball.ts and mlb.ts.
+// external_ids keys reported for informational coverage per league. NOTE: for
+// WNBA this is the current SportsDataverse provider key. The live WNBA log path
+// is SportsDataverse (docs/WNBA_PROVIDER_EVIDENCE_AUDIT.md) and identity
+// resolution is provider-agnostic (ensurePlayer matches by provider mapping,
+// then normalized-name alias, then name variants - see shared.ts), so NO
+// external id "gates" ingestion. The legacy "wehoop-wnba" key belongs to the
+// stats.nba.com adapter that is confirmed unreachable from GitHub Actions and
+// is no longer the WNBA data path; a missing wehoop-wnba id is not a current
+// cause of missing WNBA logs.
 const PLAYER_IDENTITY_KEY: Record<KnowledgeJobLeague, string> = {
-  WNBA: "wehoop-wnba",
+  WNBA: "sportsdataverse-wnba",
   NBA: "nba-com-stats",
   MLB: "mlb-stats-api",
 };
@@ -69,7 +76,9 @@ export async function collectPlayerIdentityCompleteness(league: KnowledgeJobLeag
       checks: [
         check(
           `external_ids.${identityKey}`,
-          `${league} players with ${identityKey} id (gates player-log ingestion)`,
+          // Informational coverage only. Identity resolution is provider-agnostic
+          // (name/alias fallback), so a missing id here does not block ingestion.
+          `${league} players with a ${identityKey} id (informational; ingestion does not require it)`,
           rows.filter((row) => hasExternalId(row.external_ids, identityKey)).length,
           total,
         ),
