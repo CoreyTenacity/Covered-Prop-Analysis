@@ -53,11 +53,9 @@ on:
         options: [none, wnba_incremental_ingest]
         default: none
   schedule:
-    # UTC. July 2026 = EDT (UTC-4). Game-window gating lives INSIDE the pipeline (it skips fast when no
-    # game qualifies), so these windows are bounded to game hours to avoid needless overnight runs.
-    # Staggered by 10 min so WNBA and MLB never fire on the same minute (shared concurrency also serializes).
-    - cron: "0,20,40 22,23,0,1,2,3,4 * * *"       # WNBA — every 20 min, ~6:00pm–1:00am ET
-    - cron: "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"  # MLB — every 20 min, ~12:10pm–1:00am ET
+    # One bounded UTC heartbeat over the union operating window only.
+    # Non-round offsets avoid the confirmed omitted :00/:20/:40 WNBA slots.
+    - cron: "7,27,47 16-23,0-4 * * *"
 
 permissions:
   contents: read
@@ -115,16 +113,10 @@ jobs:
             # Scheduled executions can never enter the manual maintenance path.
             MAINTENANCE_JOB="none"
             DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
-            case "$SCHED" in
-              "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
-              "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
-              *) echo "::error::Unrecognized schedule cron: $SCHED"; exit 1 ;;
-            esac
-            # WNBA-specific gate for scheduled runs; manual dispatch is unaffected.
-            if [ "$LEAGUE" = "WNBA" ] && [ "${WNBA_INGESTION_ENABLED}" != "true" ]; then
-              echo "WNBA scheduled ingestion disabled (WNBA_INGESTION_ENABLED != true); skipping."
-              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-            fi
+            # Heartbeat routing is deterministic in the pinned private tree.
+            # One config per due league guarantees each has an attempted turn;
+            # the private process owns the existing shared hard cap of eight.
+            LEAGUE="auto"; CFG="1"
           fi
           { echo "league=$LEAGUE"; echo "dry_run=$DRY"; echo "config_limit=$CFG";
             echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "publish_public_snapshots=$PUBLISH";
@@ -214,6 +206,7 @@ jobs:
           pnpm run cron:run -- github-actions \
             --trigger "${GITHUB_EVENT_NAME}" \
             --league "${{ steps.params.outputs.league }}" \
+            --wnbaEnabled "${WNBA_INGESTION_ENABLED}" \
             --configLimit "${SHARPAPI_CONFIGS_PER_RUN}" \
             --runScoring "${{ steps.params.outputs.run_scoring }}" \
             --runBoard "${{ steps.params.outputs.run_board }}" \
