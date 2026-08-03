@@ -121,6 +121,7 @@ jobs:
               echo "::error::Rejected repository_dispatch slot."
               exit 1
             fi
+            echo "::notice::Accepted covered heartbeat slot $DISPATCH_SLOT."
             MAINTENANCE_JOB="none"
             DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
             LEAGUE="auto"; CFG="1"; SCHEDULER_HEARTBEAT="true"
