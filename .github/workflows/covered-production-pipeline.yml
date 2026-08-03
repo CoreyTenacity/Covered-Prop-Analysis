@@ -52,12 +52,8 @@ on:
         type: choice
         options: [none, wnba_incremental_ingest]
         default: none
-  schedule:
-    # UTC. July 2026 = EDT (UTC-4). Game-window gating lives INSIDE the pipeline (it skips fast when no
-    # game qualifies), so these windows are bounded to game hours to avoid needless overnight runs.
-    # Staggered by 10 min so WNBA and MLB never fire on the same minute (shared concurrency also serializes).
-    - cron: "0,20,40 22,23,0,1,2,3,4 * * *"       # WNBA — every 20 min, ~6:00pm–1:00am ET
-    - cron: "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"  # MLB — every 20 min, ~12:10pm–1:00am ET
+  repository_dispatch:
+    types: [covered-production-heartbeat]
 
 permissions:
   contents: read
@@ -89,6 +85,11 @@ jobs:
         env:
           SCHED: ${{ github.event.schedule }}
           MAINTENANCE_JOB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.maintenance_job || 'none' }}
+          DISPATCH_TYPE: ${{ github.event.action }}
+          DISPATCH_SCHEMA: ${{ github.event.client_payload.schema }}
+          DISPATCH_SOURCE: ${{ github.event.client_payload.source }}
+          DISPATCH_SLOT: ${{ github.event.client_payload.slot }}
+          DISPATCH_DELIVERY_KEY: ${{ github.event.client_payload.delivery_key }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "$MAINTENANCE_JOB" = "wnba_incremental_ingest" ]; then
@@ -106,29 +107,31 @@ jobs:
               echo "::error::Unsupported maintenance_job value."
               exit 1
             fi
-          else
-            # Scheduler kill-switch — enforced HERE (env vars are available to steps, unlike job `if:`).
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            # Scheduler kill-switch remains authoritative for the only recurring scheduler.
             if [ "${COVERED_GITHUB_SCHEDULER_ENABLED}" != "true" ]; then
-              echo "Scheduler disabled (COVERED_GITHUB_SCHEDULER_ENABLED != true); skipping scheduled run."
+              echo "Scheduler disabled (COVERED_GITHUB_SCHEDULER_ENABLED != true); skipping heartbeat."
               echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            # Scheduled executions can never enter the manual maintenance path.
+            if [ "$DISPATCH_TYPE" != "covered-production-heartbeat" ] || [ "$DISPATCH_SCHEMA" != "covered-production-heartbeat/v1" ] || [ "$DISPATCH_SOURCE" != "cloudflare-cron" ]; then
+              echo "::error::Rejected repository_dispatch contract."
+              exit 1
+            fi
+            if ! printf '%s' "$DISPATCH_SLOT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$' || [ "$DISPATCH_DELIVERY_KEY" != "covered:$DISPATCH_SLOT" ]; then
+              echo "::error::Rejected repository_dispatch slot."
+              exit 1
+            fi
             MAINTENANCE_JOB="none"
             DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
-            case "$SCHED" in
-              "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
-              "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
-              *) echo "::error::Unrecognized schedule cron: $SCHED"; exit 1 ;;
-            esac
-            # WNBA-specific gate for scheduled runs; manual dispatch is unaffected.
-            if [ "$LEAGUE" = "WNBA" ] && [ "${WNBA_INGESTION_ENABLED}" != "true" ]; then
-              echo "WNBA scheduled ingestion disabled (WNBA_INGESTION_ENABLED != true); skipping."
-              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-            fi
+            LEAGUE="auto"; CFG="1"; SCHEDULER_HEARTBEAT="true"
+          else
+            echo "::error::Unsupported event name."
+            exit 1
           fi
+          SCHEDULER_HEARTBEAT="${SCHEDULER_HEARTBEAT:-false}"
           { echo "league=$LEAGUE"; echo "dry_run=$DRY"; echo "config_limit=$CFG";
             echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "publish_public_snapshots=$PUBLISH";
-            echo "maintenance_job=$MAINTENANCE_JOB"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
+            echo "maintenance_job=$MAINTENANCE_JOB"; echo "scheduler_heartbeat=$SCHEDULER_HEARTBEAT"; echo "dispatch_slot=${DISPATCH_SLOT:-}"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
 
       - name: Fail closed if the pinned private SHA is missing/malformed
         if: steps.params.outputs.skip != 'true'
@@ -214,6 +217,9 @@ jobs:
           pnpm run cron:run -- github-actions \
             --trigger "${GITHUB_EVENT_NAME}" \
             --league "${{ steps.params.outputs.league }}" \
+            --schedulerHeartbeat "${{ steps.params.outputs.scheduler_heartbeat }}" \
+            --slot "${{ steps.params.outputs.dispatch_slot }}" \
+            --wnbaEnabled "${WNBA_INGESTION_ENABLED}" \
             --configLimit "${SHARPAPI_CONFIGS_PER_RUN}" \
             --runScoring "${{ steps.params.outputs.run_scoring }}" \
             --runBoard "${{ steps.params.outputs.run_board }}" \
