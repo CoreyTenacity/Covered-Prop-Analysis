@@ -12,6 +12,93 @@ If any of them conflicts with a newer repo-specific instruction from the user, t
 
 Update this file only when durable rules, architecture, supported capabilities, or safety constraints change.
 
+## Owner quality standard — completion, not patches
+
+Covered is treated as a high-value production product, at a quality standard appropriate for a
+$100,000 professional software engagement. The owner does not want incremental patch-by-patch
+handoffs. The objective of an authorized task is not "make the requested code change" — it is
+"deliver the complete requested product outcome at production quality."
+
+**Default operating mode.** Once the owner authorizes a bounded phase or objective, keep working
+within that scope until the phase is genuinely complete. Do not stop after finding the first
+defect, implementing the first fix, passing one focused test, discovering a second related
+defect, finding a responsive/mobile issue during validation, finding an adjacent regression
+caused by the same feature, finding a missing UI state, finding an obvious read-path
+inconsistency, finding an egress/performance problem introduced by the implementation, or finding
+that something works locally but not through the actual user-facing path. Instead: investigate →
+implement → test → inspect → validate → fix discovered in-scope defects → revalidate → complete.
+The owner should not need a fresh prompt for every ordinary engineering iteration.
+
+**Definition of done.** A task is complete only when the requested outcome works end-to-end —
+repository implementation, data/read-path correctness, API correctness, UI correctness,
+responsive/mobile/desktop behavior, loading/empty/error/interaction states, production-shaped
+data, regression coverage, performance, Supabase egress, request efficiency, security/public-repo
+boundaries, production build, and (when deployment is authorized) actual deployed behavior.
+Passing tests alone, a successful build alone, or local verification alone is not completion. A
+deployed feature that is visibly broken on mobile is not complete. A backend fix whose frontend
+was never deployed is not complete. A feature that technically works but is confusing, cramped,
+misleading, stale, or inconsistent is not complete.
+
+**Internal iteration requirement.** When validation discovers an in-scope defect, fix it before
+reporting completion rather than asking "want me to fix X?" when X is clearly part of the
+authorized objective and can be fixed safely without crossing an approval boundary.
+
+**Adjacent defect rule.** Use judgment rather than blindly expanding scope. If a defect is
+directly encountered while exercising the feature being changed, and materially prevents that
+feature from meeting the requested production-quality outcome, treat it as part of the task (e.g.
+responsive clipping in the component being changed, stale data leaking through another rendering
+path for the same feature, duplicate evidence in the same feature, N+1 queries introduced by the
+implementation, a frontend deployment missing the newly implemented frontend). This is not
+authorization for unrelated refactoring or broad cleanup — see "Scope control" conventions this
+file and the project's Claude-specific instructions already establish.
+
+**Hard-stop boundaries.** Stop and request owner authorization only when continuing requires an
+action outside already-authorized scope or a standing governance boundary — this list is
+additional detail on top of, not a replacement for, the "Production safety rules,"
+"Provider-call restrictions," and "Database-write restrictions" sections below: production
+deployment not already authorized; private-main push or merge; migration; destructive database
+operation; duplicate deletion/reconciliation; broad/historical backfill; broad production
+rescoring; scheduler changes; recurring scheduler creation; provider configuration changes;
+additional provider usage outside the authorized budget; paid-service changes; credential
+creation/rotation; scoring-weight changes; threshold reductions; weakening publishability;
+manufacturing picks; unsupported sports; material infrastructure changes. When blocked, complete
+everything possible before stopping and ask for one precise authorization. Do not manufacture
+additional approval checkpoints beyond these.
+
+**Validation standard.** Before declaring a feature complete, actively try to break it: normal,
+empty, stale, incomplete, and boundary-value states; multiple-item state; mobile, tablet, and
+desktop; interaction after selection and repeated interaction; production-shaped data; relevant
+API/read paths. Inspect for clipping, wrapping, stale or contradictory or duplicated information,
+hidden controls, misleading labels, missing context, unnecessary requests, N+1 behavior, payload
+bloat, and regressions on related surfaces. Do not wait for the owner to discover obvious defects
+manually.
+
+**Live product standard.** When a task affects the user-facing application and production
+deployment is authorized, the final validation target is the actual deployed application —
+localhost is useful during implementation but is not sufficient evidence production is correct.
+Distinguish explicitly between repository-verified, local-runtime-verified,
+production-data-shadow-verified, and deployed-production-verified. Never call something "live
+verified" unless the actual deployed product was checked.
+
+**Efficiency standard.** High quality does not mean wasteful investigation. Avoid repeatedly
+rediscovering already-certified architecture, rerunning expensive full suites after every tiny
+edit, repeatedly polling external systems, broad audits without evidence they're needed,
+rewriting working code unnecessarily, reopening settled architectural questions, and token-heavy
+narration. Use focused tests while iterating; run comprehensive validation once the
+implementation stabilizes. Prefer one substantial, well-verified implementation cycle over many
+tiny patches.
+
+**Reporting standard.** Do not narrate routine implementation progress unless interaction is
+required — work quietly through ordinary engineering iterations. Return when the entire
+authorized objective is complete and validated, or a genuine hard-stop boundary prevents further
+progress. If blocked, report: what is already complete, the exact blocker, why it crosses an
+authorization boundary, the exact action requiring approval, and what happens after approval.
+
+**Completion language.** Do not use "READY," "COMPLETE," "CERTIFIED," "LIVE," or "FIXED" unless
+the evidence supports the full meaning of that term. Use conservative status language when
+verification is incomplete — the standard is not "probably works," it is verified, coherent,
+efficient, production-quality behavior across the complete authorized scope.
+
 ## Project architecture
 
 Covered separates responsibilities by layer:

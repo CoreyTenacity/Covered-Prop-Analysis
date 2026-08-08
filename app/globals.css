@@ -1648,7 +1648,8 @@ h1 {
 
   .knowledge-builder-layout,
   .performance-grid,
-  .performance-kpis {
+  .performance-kpis,
+  .opportunity-grid {
     grid-template-columns: 1fr;
   }
 
