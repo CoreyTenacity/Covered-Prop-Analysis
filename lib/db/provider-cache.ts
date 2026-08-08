@@ -37,6 +37,16 @@ function memoStore() {
 }
 
 function isFreshMemoRecord(record: CacheRecord<unknown> | null) {
+  return isProviderCacheRecordFresh(record);
+}
+
+// getProviderCache/getProviderCacheWithStatus return whatever row exists in
+// provider_cache regardless of expiry -- only the in-process memo layer
+// checked freshness. Callers that treat "a record exists" as "the check is
+// still valid" (e.g. the injury-context freshness marker) must apply this
+// explicitly, or a marker past its expires_at is silently treated as current
+// forever.
+export function isProviderCacheRecordFresh(record: CacheRecord<unknown> | null | undefined): boolean {
   if (!record) return false;
   if (record.is_stale) return false;
   const expiresAt = new Date(record.expires_at).getTime();

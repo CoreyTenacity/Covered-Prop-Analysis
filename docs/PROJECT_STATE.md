@@ -1,12 +1,27 @@
 # Project State — 2026-07-14 (audit appended 2026-07-15; superseded current-state 2026-07-18 below)
 
+> **This entire file is stale as of 2026-08-02 (Session 106) and has not been kept current for many
+> sessions.** For actual current state, read `docs/AGENT_HANDOFF.md` Session 106 and
+> `docs/PROJECT_CONTEXT.md`'s Session 106 entry first. This file's own "current state" sections below
+> (newest: Session 65, 2026-07-27/28) predate dozens of sessions of subsequent work and must not be
+> treated as current truth. Retained as historical record only; not actively maintained.
+
 This document tracks known data population issues and operational state.
 The 2026-07-15 audit section below is VERIFIED with read-only code inspection + live Supabase reads
 and CORRECTS several 2026-07-14 hypotheses (notably: headshots are NOT a covered-score input).
 
 ---
 
-## CURRENT STATE — 2026-07-27 (Session 61) — LIVE AND CERTIFIED
+## CURRENT STATE — 2026-07-27/28 (Session 65) — LIVE AND CERTIFIED WITH DIRECTION-AWARE SCORING
+
+Direction-aware scoring release complete. Public main `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`,
+`COVERED_PRIVATE_PIPELINE_SHA_V2 = 933ae62fabc2f8d50adf0e084d422c7d7db47181`, natural certification runs
+success on both MLB (`30311209936`) and WNBA (`30312202350`). Post-promotion production check: 0
+wrong-direction rows are publishable AND ≥70 (was 75 pre-fix). Live Covered Picks: 10 rows across all 3
+WNBA markets, scores 70–91. See `docs/AGENT_HANDOFF.md` Session 65 for full detail. Rollback SHA on file:
+`182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`.
+
+## PRIOR STATE — 2026-07-27 (Session 61) — LIVE AND CERTIFIED
 
 Go-live complete. Public PR `CoreyTenacity/Covered-Prop-Analysis#11` merged (public `main` =
 `b3c33b47bfb89d01366f3fea3973f60e42f2cc3b`), Cloudflare deployment healthy, `COVERED_PRIVATE_PIPELINE_SHA_V2`

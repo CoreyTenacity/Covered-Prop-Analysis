@@ -24,6 +24,8 @@
     "lib/knowledge/sharp-ingestion.ts",
     "lib/knowledge/sharp-odds-ingestion.ts",
     "lib/knowledge/enrichment/jobs.ts",
+    "lib/knowledge/enrichment/injury-pipeline-wiring.test.ts",
+    "lib/knowledge/enrichment/savant-pipeline-wiring.test.ts",
     "lib/ai/explanation-adapter.ts",
     "lib/providers/request-policy.ts",
     "lib/providers/live-board.ts",
@@ -35,6 +37,9 @@
     "components/providers/odds-api-slate.tsx",
     "lib/knowledge/jobs.ts",
     "lib/knowledge/sharp-ingestion-job.ts",
+    "lib/knowledge/event-selection-matrix.test.ts",
+    "lib/knowledge/prototypes/statcast-fixture-scoring.test.ts",
+    "lib/knowledge/recovery/orchestrator.ts",
     "scripts/run-covered-job.mjs",
     "app/api/inngest/route.ts",
     "lib/inngest/index.ts",
@@ -54,7 +59,25 @@
     ".github/workflows/wnba-data-ingestion.yml",
     ".github/workflows/mlb-enrichment-backfill.yml",
     ".github/workflows/validate-targeted-repair.yml",
-    ".github/workflows/deploy-cloudflare.yml"
+    ".github/workflows/deploy-cloudflare.yml",
+    "lib/knowledge/enrichment/feature-provenance.ts",
+    "lib/knowledge/enrichment/feature-provenance.test.ts",
+    "lib/knowledge/enrichment/replay-feature.ts",
+    "lib/knowledge/enrichment/replay-feature.test.ts",
+    "lib/knowledge/enrichment/replay-score.ts",
+    "lib/knowledge/score-replay-provenance.ts",
+    "lib/knowledge/score-replay-provenance.test.ts",
+    "lib/knowledge/enrichment/replay-score.test.ts",
+    "lib/knowledge/enrichment/feature-provenance-fixtures.test.ts",
+    "lib/ops/repair-observability.ts",
+    "lib/ops/repair-observability.test.ts",
+    "scripts/replay-feature.mjs",
+    "scripts/replay-score.mjs",
+    "workers/covered-github-dispatcher/**",
+    "scripts/diagnostic-github-dispatch-credential.mjs",
+    "scripts/dispatch-github-credential-proof.mjs",
+    "scripts/generate-dispatch-credential-proof-patch.mjs",
+    "lib/ops/repository-dispatch-heartbeat.test.ts"
   ],
   "conditional": [],
   "notes": [
@@ -82,6 +105,8 @@
     "render.yaml is private-only in the public export: it describes a Render-based cron-service hosting architecture that AGENTS.md and docs/AGENT_HANDOFF.md no longer document as current (GitHub Actions now owns live orchestration; Cloudflare/OpenNext is the current application-hosting target; Vercel is dormant; Render is not mentioned as active). Its startCommands also invoke `pnpm run cron:run`, which depends on scripts/run-covered-job.mjs (already private-only) and would not function from this export regardless. Retained in the private repository for historical/operational reference since it may still describe a live fallback there -- this is a public-export-only exclusion, not a claim that the file is obsolete in the private repository.",
     ".github/workflows/covered-live-pipeline.yml, mlb-targeted-repair.yml, wnba-data-ingestion.yml, and mlb-enrichment-backfill.yml are private-only in the public export: each invokes `pnpm run cron:run`, which depends on scripts/run-covered-job.mjs (private-only) and the now-removed `cron:run` package.json script (see scripts/public-export.mjs's planPackageJsonForExport). Triggering any of them from a public checkout would fail immediately with a missing-script error, not run anything meaningful. validate-targeted-repair.yml is private-only for the same class of reason: its one run: step directly names lib/ops/github-actions-pipeline.test.ts, which is private-only (paired with the excluded github-actions-pipeline.ts), so the command would error on a missing file if run as specified. diagnostic-mlb-providers.yml and diagnostic-wnba-scoreboard.yml remain public-safe: verified each of their run: steps and referenced scripts have zero private-only dependencies (the two diagnostic .mjs scripts import only Node built-ins).",
     ".github/workflows/deploy-cloudflare.yml is private-only in the public export as of the session that reviewed Cloudflare deployment readiness: Cloudflare Workers Builds (the dashboard's own Git integration) is the intended deployment mechanism for the public repository, and this workflow is a separate, parallel GitHub-Actions-driven deploy path scoped to a private-repo-only branch name (`codex/cloudflare-opennext-proof`) that will never exist in the public repo. Keeping both mechanisms available in the public export risks two independent systems both deploying if a future branch/trigger edit ever aligns them. The workflow also previously hardcoded an account-specific `*.workers.dev` hostname in its success-notification step; that was fixed at the source (replaced with the `CLOUDFLARE_WORKER_URL` repository variable, printing a clear \"not configured\" message and omitting the URL from the notification body when the variable is unset, rather than guessing) so the private repository's own copy of this workflow no longer discloses that hostname, independent of the export decision. Retained in the private repository for its own Cloudflare proof-deployment use; this is a public-export-only exclusion.",
-    "lib/knowledge/prepared-slate-window.ts is public-safe: pure Eastern-calendar-day date math (no Supabase, no scoring/adapter logic, no imports at all). It is the single shared source of the prepared-slate (remaining-today + all-tomorrow Eastern) boundary calculation, imported by both the private lib/ops/github-actions-pipeline.ts (which event IDs to prepare) and the public-safe lib/knowledge/read-service.ts (which rows a public reader/snapshot/relational-fallback may return), so both sides compute the identical bound rather than each maintaining their own. Reveals nothing about scoring, matching, or provider integration."
+    "lib/knowledge/prepared-slate-window.ts is public-safe: pure Eastern-calendar-day date math (no Supabase, no scoring/adapter logic, no imports at all). It is the single shared source of the prepared-slate (remaining-today + all-tomorrow Eastern) boundary calculation, imported by both the private lib/ops/github-actions-pipeline.ts (which event IDs to prepare) and the public-safe lib/knowledge/read-service.ts (which rows a public reader/snapshot/relational-fallback may return), so both sides compute the identical bound rather than each maintaining their own. Reveals nothing about scoring, matching, or provider integration.",
+    "Phase 16 (feature provenance/certification foundation, docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md): lib/ops/repair-observability.ts and lib/knowledge/enrichment/feature-provenance.ts are marked private-only even though neither imports a private-only module (both are standalone: node:crypto plus pure logic, no Supabase, no scoring/adapter/matching code). This is a conservative default, not a proven-necessary exclusion -- neither is currently imported by any public-safe module, so there is no present need to classify them public-safe, and doing so would be a separate, deliberate decision for a future public-sync pass rather than a side effect of this phase. lib/knowledge/enrichment/replay-feature.ts, replay-score.ts, and scripts/replay-feature.mjs/replay-score.mjs ARE genuinely private-only (not just conservatively so): replay-feature.ts imports average()/safeNumber() directly from the private lib/knowledge/enrichment/jobs.ts, and a hypothetical full score-reproduction path would additionally require the private-only adapters (lib/knowledge/adapters/basketball.ts, mlb.ts) -- deliberately not attempted here, see replay-score.ts's documented scope boundary. Their four paired *.test.ts files, plus lib/knowledge/enrichment/feature-provenance-fixtures.test.ts (a dedicated WNBA/MLB provenance fixture suite that calls refreshRecentFeaturesJob directly), follow the same paired-private-test rule as the rest of lib/knowledge/enrichment/*.test.ts above. Phase 17 (docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md, Section 15): lib/knowledge/score-replay-provenance.ts is genuinely private-only (not conservatively so) -- it imports AdapterPropRow/AdapterScoreContext/AdapterScoreOutput types from lib/knowledge/adapters/base.ts and is consumed directly by the private lib/knowledge/scoring-service.ts and by the now-fully-implemented replay-score.ts, which itself imports the private basketball.ts/mlb.ts adapters directly to re-invoke the real scoring formula for deterministic replay.",
+    "workers/covered-github-dispatcher/** and scripts/diagnostic-github-dispatch-credential.mjs are private-only operational tooling: they hold production dispatch wiring and an owner-run credential probe, respectively. lib/ops/repository-dispatch-heartbeat.test.ts is private-only because it deliberately imports the private GitHub Actions pipeline to prove trigger classification; its pure sibling module remains classified by import closure."
   ]
 }

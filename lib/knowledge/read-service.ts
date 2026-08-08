@@ -1,10 +1,14 @@
 import { selectRows, type SupabaseFilter } from "@/lib/db/supabase-server";
 import { clampCoveredPicksFloor } from "@/lib/knowledge/pipeline/board-invariant";
 import { confidenceLabelFor, riskLabelFor } from "@/lib/knowledge/adapters/base";
+import { buildParlayCommentary } from "@/lib/knowledge/commentary";
 import { derivePlayerHeadshotUrl, deriveTeamLogoUrl } from "@/lib/knowledge/media";
 import { calculateEdge } from "@/lib/scoring/covered-score";
 import { preparedSlateEventWindow } from "@/lib/knowledge/prepared-slate-window";
+import { classifyMarketFreshness } from "@/lib/knowledge/market-freshness";
+import { STRICT_ELIGIBILITY_CONTRACT_VERSION } from "@/lib/knowledge/eligibility-contract";
 import type { Confidence, Direction, Opportunity, Sport } from "@/lib/types";
+import type { ParlayOptionEvidence } from "@/lib/knowledge/read-types";
 
 type BaseRow = Record<string, unknown>;
 
@@ -109,6 +113,7 @@ type ScoredPropListRow = Pick<
   ScoredPropRow,
   | "id"
   | "current_prop_id"
+  | "score_input_id"
   | "participant_id"
   | "participant_type"
   | "player_id"
@@ -138,12 +143,14 @@ type ScoredPropParlayRow = Pick<
   ScoredPropRow,
   | "id"
   | "current_prop_id"
+  | "score_input_id"
   | "covered_score"
   | "confidence_score"
   | "data_quality_score"
   | "recommendation"
   | "risk_flags"
   | "prop_state"
+  | "publishable"
   | "publishability_reasons"
   | "updated_at"
 >;
@@ -433,6 +440,75 @@ async function loadMap<T extends { id: string }>(table: string, ids: string[], s
   return new Map(rows.map((row) => [row.id, row]));
 }
 
+/**
+ * Session 99 (owner-directed): the controlling invariant is "no public score
+ * may be exposed unless the score ROW ITSELF was produced or authoritatively
+ * revalidated under the current eligibility contract" -- a freshly-built
+ * strict-v1 SNAPSHOT envelope (Session 98) is not sufficient on its own,
+ * because it says nothing about whether the individual score rows copied
+ * into it were ever actually evaluated under strict-v1's blocker set. A row
+ * scored under an older, weaker rule set (or never stamped at all) can still
+ * carry `publishable: true` with empty `publishability_reasons` --
+ * `scoreCurrentProps` only re-evaluates a prop's completeness when that prop
+ * actually gets rescored, which does not happen automatically just because
+ * the code's own rules changed.
+ *
+ * This is the ONE shared enforcement point every public-facing read (Covered
+ * Picks, Manual Analyzer, board, single-prop detail lookup) funnels through:
+ * given a batch of already-fetched scored-prop rows (each carrying its own
+ * `score_input_id`), returns only the subset whose linked `score_inputs` row
+ * is present AND stamped with the exact current
+ * `STRICT_ELIGIBILITY_CONTRACT_VERSION` in
+ * `feature_payload.scoreEligibilityContractVersion`, AND whose current
+ * scored-prop state is `publishable`. Provenance alone is deliberately not
+ * enough: a score can have been produced under strict-v1 and still be blocked
+ * now (for example, stale features or unavailable injury context). A row with no
+ * `score_input_id` at all (never had a score_inputs row written, or the
+ * link itself is missing) fails closed -- excluded, not assumed valid.
+ *
+ * One bounded batched query (`score_inputs.id IN (...)`), never N+1 -- the
+ * same pattern already used by `loadMap` above and
+ * `explanationsByScoredProp` below.
+ */
+export async function filterRowsWithCurrentScoreContract<T extends {
+  score_input_id?: string | null;
+  prop_state?: string | null;
+  publishable?: boolean | null;
+}>(rows: T[]): Promise<T[]> {
+  const scoreInputIds = [...new Set(rows.map((row) => row.score_input_id).filter((value): value is string => Boolean(value)))];
+  if (!scoreInputIds.length) return [];
+  // Batched the same way every other bounded id-list lookup in this file is
+  // (see SCORED_PROPS_LOOKUP_BATCH_SIZE/chunkIds below) -- an unbounded
+  // `id IN (...)` list here would risk the exact UND_ERR_HEADERS_OVERFLOW
+  // shape this codebase has already hit and fixed for scored_props/
+  // score_explanations lookups.
+  const scoreInputs = (
+    await Promise.all(
+      chunkIds(scoreInputIds, SCORED_PROPS_LOOKUP_BATCH_SIZE).map((batch) =>
+        selectRows<{ id: string; feature_payload: unknown }>("score_inputs", {
+          select: "id,feature_payload",
+          filters: [{ column: "id", operator: "in", value: batch }],
+          limit: batch.length,
+        }).catch(() => []),
+      ),
+    )
+  ).flat();
+  const currentContractIds = new Set(
+    scoreInputs
+      .filter((row) => {
+        const payload = row.feature_payload;
+        return Boolean(payload && typeof payload === "object" && (payload as Record<string, unknown>).scoreEligibilityContractVersion === STRICT_ELIGIBILITY_CONTRACT_VERSION);
+      })
+      .map((row) => row.id),
+  );
+  return rows.filter((row) =>
+    row.score_input_id
+    && currentContractIds.has(row.score_input_id)
+    && row.prop_state === "publishable"
+    && row.publishable !== false,
+  );
+}
+
 async function latestScoredPropsByCurrentProp(currentPropIds: string[]) {
   if (!currentPropIds.length) return new Map<string, ScoredPropRow>();
   const rows = await selectRows<ScoredPropRow>("scored_props", {
@@ -498,12 +574,16 @@ async function latestScoredCompactByCurrentProp(currentPropIds: string[]) {
 
 async function explanationSummariesByScoredProp(scoredPropIds: string[]) {
   if (!scoredPropIds.length) return new Map<string, ScoreExplanationSummary>();
-  const rows = await selectRows<ScoreExplanationSummary>("score_explanations", {
-    select: "scored_prop_id,summary,score_label,confidence_label,risk_label",
-    filters: [{ column: "scored_prop_id", operator: "in", value: scoredPropIds }],
-    limit: scoredPropIds.length,
-  });
-  return new Map(rows.map((row) => [row.scored_prop_id, row]));
+  const map = new Map<string, ScoreExplanationSummary>();
+  for (const batch of chunkIds(scoredPropIds, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<ScoreExplanationSummary>("score_explanations", {
+      select: "scored_prop_id,summary,score_label,confidence_label,risk_label",
+      filters: [{ column: "scored_prop_id", operator: "in", value: batch }],
+      limit: batch.length,
+    });
+    for (const row of rows) map.set(row.scored_prop_id, row);
+  }
+  return map;
 }
 
 async function explanationsByScoredProp(scoredPropIds: string[], options?: { compact?: boolean }) {
@@ -511,12 +591,245 @@ async function explanationsByScoredProp(scoredPropIds: string[], options?: { com
   if (options?.compact) {
     return explanationSummariesByScoredProp(scoredPropIds) as Promise<Map<string, ScoreExplanation>>;
   }
-  const rows = await selectRows<ScoreExplanation>("score_explanations", {
-    select: "scored_prop_id,summary,score_label,confidence_label,risk_label,explanation,reasoning_block,factor_notes,factors,risk_notes,recent_values",
-    filters: [{ column: "scored_prop_id", operator: "in", value: scoredPropIds }],
-    limit: scoredPropIds.length,
-  });
-  return new Map(rows.map((row) => [row.scored_prop_id, row]));
+  const map = new Map<string, ScoreExplanation>();
+  for (const batch of chunkIds(scoredPropIds, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<ScoreExplanation>("score_explanations", {
+      select: "scored_prop_id,summary,score_label,confidence_label,risk_label,explanation,reasoning_block,factor_notes,factors,risk_notes,recent_values",
+      filters: [{ column: "scored_prop_id", operator: "in", value: batch }],
+      limit: batch.length,
+    });
+    for (const row of rows) map.set(row.scored_prop_id, row);
+  }
+  return map;
+}
+
+/**
+ * Batched reader for the ONE authoritative "this sportsbook market/price was
+ * genuinely re-observed at this time" signal: odds_snapshots.pulled_at,
+ * reached via current_props.latest_snapshot_id. latest_snapshot_id is set
+ * ONLY by ingestSharpApiMarketCandidates (sharp-odds-ingestion.ts), and ONLY
+ * on a genuine isMeaningfulChange price/line observation -- every other
+ * current_props writer (repairSharpCurrentPropIdentities identity repair,
+ * team/opponent/event repair, cancellation/status repair) leaves it
+ * untouched. current_props.updated_at is NOT safe to use for freshness: it is
+ * a generic mutation timestamp bumped by those same identity/status-only
+ * writers, which was proven live (production run 31129018935) to let a
+ * stale-priced prop (Kelsey Mitchell, hours-old odds) pass the freshness gate
+ * merely because an identity-repair pass happened to touch the row.
+ */
+async function loadOddsSnapshotPulledAt(snapshotIds: string[]) {
+  const map = new Map<string, string | null>();
+  const ids = [...new Set(snapshotIds.filter((value): value is string => Boolean(value)))];
+  if (!ids.length) return map;
+  for (const batch of chunkIds(ids, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<{ id: string; pulled_at: string | null }>("odds_snapshots", {
+      select: "id,pulled_at",
+      filters: [{ column: "id", operator: "in", value: batch }],
+      limit: batch.length,
+    }).catch(() => []);
+    for (const row of rows) map.set(row.id, row.pulled_at);
+  }
+  return map;
+}
+
+/**
+ * 2026-08-07 (shared-quality-contract consolidation): the ONE read-time
+ * market-freshness re-check, used identically by every public-facing surface
+ * that exposes score-derived output (Covered Picks, Parlay Builder/Analyzer,
+ * single-prop detail). A stored `publishable` row was evaluated at the LAST
+ * scoring pass, which can be hours stale by the time a page is read -- see
+ * loadOddsSnapshotPulledAt's doc comment for why `current.updated_at` is not
+ * a safe freshness proxy. Extracted so no surface can independently omit this
+ * check (getBoardOpportunities previously did, a proven drift -- an unused
+ * board/Analyzer export with a weaker gate than the two callers that share
+ * its role).
+ */
+function passesReadTimeMarketFreshness(input: {
+  latestSnapshotId: string | null | undefined;
+  leagueId: string;
+  pulledAtBySnapshotId: Map<string, string | null>;
+}): boolean {
+  const observedAtIso = input.latestSnapshotId ? input.pulledAtBySnapshotId.get(input.latestSnapshotId) ?? null : null;
+  return classifyMarketFreshness({ observedAtIso, leagueId: input.leagueId }) === "fresh";
+}
+
+/**
+ * Batched reader for score_inputs.feature_payload (structuredInputs),
+ * keyed by score_input_id -- the exact numeric evidence
+ * (last_5_avg/last_10_avg/projection/edge_value/minutes_trend/usage_trend/
+ * match_confidence/data_freshness) every scoring adapter already writes
+ * once at scoring time. Never recomputed here; a second bounded batched
+ * query against the same table filterRowsWithCurrentScoreContract already
+ * reads (kept separate rather than changing that widely-used function's
+ * return shape, since it is also called from saved-picks/board/auth paths
+ * this feature does not touch).
+ */
+async function loadScoreInputFeaturePayloads(scoreInputIds: string[]) {
+  const map = new Map<string, Record<string, unknown>>();
+  const ids = [...new Set(scoreInputIds.filter((value): value is string => Boolean(value)))];
+  if (!ids.length) return map;
+  for (const batch of chunkIds(ids, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<{ id: string; feature_payload: unknown }>("score_inputs", {
+      select: "id,feature_payload",
+      filters: [{ column: "id", operator: "in", value: batch }],
+      limit: batch.length,
+    }).catch(() => []);
+    for (const row of rows) {
+      if (row.feature_payload && typeof row.feature_payload === "object") {
+        map.set(row.id, row.feature_payload as Record<string, unknown>);
+      }
+    }
+  }
+  return map;
+}
+
+type GameLogRow = {
+  player_id: string;
+  game_date: string;
+  points: number | null;
+  rebounds: number | null;
+  assists: number | null;
+  hits: number | null;
+  total_bases: number | null;
+  runs: number | null;
+  rbis: number | null;
+  strikeouts: number | null;
+};
+
+function statValueForMarket(row: GameLogRow, marketType: string): number | null {
+  switch (marketType) {
+    case "player_points": return row.points;
+    case "player_rebounds": return row.rebounds;
+    case "player_assists": return row.assists;
+    case "player_pra":
+      return row.points === null || row.rebounds === null || row.assists === null
+        ? null
+        : row.points + row.rebounds + row.assists;
+    case "batter_hits": return row.hits;
+    case "batter_total_bases": return row.total_bases;
+    case "pitcher_strikeouts": return row.strikeouts;
+    case "batter_runs": return row.runs;
+    case "batter_rbis": return row.rbis;
+    // player_threes and any other market: no stored game-log column for
+    // this stat today -- genuinely unavailable, not derivable, never
+    // fabricated. Callers must treat a null return as "no source", not 0.
+    default: return null;
+  }
+}
+
+/**
+ * Deterministic last-5/last-10 hit counts against each entry's OWN exact
+ * current line, counted directly from already-stored player_game_logs rows
+ * -- never a per-card request (one batched query for every distinct player
+ * in the current result set, reused across however many of that player's
+ * markets/lines appear in it). A player with fewer than 5 (or 10) stored
+ * games reports a smaller sample size rather than a fabricated count.
+ */
+async function loadExactLineHitCounts(entries: Array<{ playerId: string | null; marketType: string; line: number; direction: string | null }>) {
+  type HitCounts = { last5HitCount: number | null; last5SampleSize: number | null; last10HitCount: number | null; last10SampleSize: number | null };
+  const results = new Map<string, HitCounts>();
+  const playerIds = [...new Set(entries.map((entry) => entry.playerId).filter((value): value is string => Boolean(value)))];
+  if (!playerIds.length) return results;
+
+  const logsByPlayer = new Map<string, GameLogRow[]>();
+  for (const batch of chunkIds(playerIds, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const rows = await selectRows<GameLogRow>("player_game_logs", {
+      select: "player_id,game_date,points,rebounds,assists,hits,total_bases,runs,rbis,strikeouts",
+      filters: [{ column: "player_id", operator: "in", value: batch }],
+      orderBy: "game_date.desc",
+      limit: batch.length * 10,
+    }).catch(() => []);
+    for (const row of rows) {
+      const list = logsByPlayer.get(row.player_id) ?? [];
+      list.push(row);
+      logsByPlayer.set(row.player_id, list);
+    }
+  }
+  for (const [playerId, list] of logsByPlayer) {
+    list.sort((a, b) => (a.game_date < b.game_date ? 1 : a.game_date > b.game_date ? -1 : 0));
+    // player_game_logs can carry more than one stored row for the same
+    // game_date (duplicate ingestion writes) -- collapse to one row per date
+    // so last-5/last-10 counts reflect distinct games, never double-counted.
+    const seenDates = new Set<string>();
+    const deduped = list.filter((row) => {
+      if (seenDates.has(row.game_date)) return false;
+      seenDates.add(row.game_date);
+      return true;
+    });
+    logsByPlayer.set(playerId, deduped);
+  }
+
+  for (const entry of entries) {
+    if (!entry.playerId) continue;
+    const key = `${entry.playerId}:${entry.marketType}:${entry.line}:${entry.direction ?? ""}`;
+    if (results.has(key)) continue;
+    const logs = logsByPlayer.get(entry.playerId) ?? [];
+    const values = logs
+      .map((row) => statValueForMarket(row, entry.marketType))
+      .filter((value): value is number => value !== null);
+    if (!values.length) {
+      results.set(key, { last5HitCount: null, last5SampleSize: null, last10HitCount: null, last10SampleSize: null });
+      continue;
+    }
+    const clears = (value: number) => (entry.direction === "Less" ? value <= entry.line : value >= entry.line);
+    const last5 = values.slice(0, 5);
+    const last10 = values.slice(0, 10);
+    results.set(key, {
+      last5HitCount: last5.length ? last5.filter(clears).length : null,
+      last5SampleSize: last5.length || null,
+      last10HitCount: last10.length ? last10.filter(clears).length : null,
+      last10SampleSize: last10.length || null,
+    });
+  }
+  return results;
+}
+
+/**
+ * 2026-08-07 (Analyzer/Covered Picks evidence parity): the ONE evidence-
+ * shaping function, used identically by getParlayOptions and
+ * getCoveredPicksOfTheDay, so "Why this score?" shows the SAME evidence for
+ * the same prop on either surface -- never two independent computations that
+ * can drift. Every field is read directly from already-batched sources
+ * (score_inputs.feature_payload, the exact-line hit-count map, the
+ * explanation's own factors) -- no new query, no per-row fetch, no scoring
+ * recomputation.
+ */
+function buildScoreEvidence(input: {
+  scoreInputId: string | null | undefined;
+  current: { player_id: string | null; market_type: string; line: number; side: string | null; direction: string | null; latest_snapshot_id: string | null };
+  featurePayloadByScoreInputId: Map<string, Record<string, unknown>>;
+  hitCountsByKey: Map<string, { last5HitCount: number | null; last5SampleSize: number | null; last10HitCount: number | null; last10SampleSize: number | null }>;
+  pulledAtBySnapshotId: Map<string, string | null>;
+  explanationFactors: unknown[] | null | undefined;
+}): ParlayOptionEvidence | null {
+  if (!input.scoreInputId) return null;
+  const payload = input.featurePayloadByScoreInputId.get(input.scoreInputId) ?? null;
+  const direction = input.current.side ?? input.current.direction;
+  const hitCountKey = input.current.player_id ? `${input.current.player_id}:${input.current.market_type}:${input.current.line}:${direction ?? ""}` : null;
+  const hitCounts = hitCountKey ? input.hitCountsByKey.get(hitCountKey) ?? null : null;
+  const factorByName = new Map(
+    (input.explanationFactors ?? []).map((factor) => [String((factor as { name?: unknown }).name ?? "").toLowerCase(), factor as { description?: unknown }]),
+  );
+  const freshness = payload?.data_freshness as Record<string, unknown> | undefined;
+  const dataRefreshedAt = typeof freshness?.oddsPulledAt === "string"
+    ? freshness.oddsPulledAt
+    : input.pulledAtBySnapshotId.get(input.current.latest_snapshot_id ?? "") ?? null;
+  return {
+    projection: typeof payload?.projection === "number" ? payload.projection : null,
+    edgeValue: typeof payload?.edge_value === "number" ? payload.edge_value : null,
+    last5Avg: typeof payload?.last_5_avg === "number" ? payload.last_5_avg : null,
+    last10Avg: typeof payload?.last_10_avg === "number" ? payload.last_10_avg : null,
+    last5HitCount: hitCounts?.last5HitCount ?? null,
+    last5SampleSize: hitCounts?.last5SampleSize ?? null,
+    last10HitCount: hitCounts?.last10HitCount ?? null,
+    last10SampleSize: hitCounts?.last10SampleSize ?? null,
+    recentMinutesAvg: typeof payload?.minutes_last_5_avg === "number" ? payload.minutes_last_5_avg : null,
+    minutesTrend: typeof payload?.minutes_trend === "number" ? payload.minutes_trend : null,
+    usageTrend: typeof payload?.usage_trend === "number" ? payload.usage_trend : null,
+    matchupNote: typeof factorByName.get("matchup")?.description === "string" ? String(factorByName.get("matchup")!.description) : null,
+    injuryNote: typeof factorByName.get("injury context")?.description === "string" ? String(factorByName.get("injury context")!.description) : null,
+    dataRefreshedAt,
+  };
 }
 
 async function latestGradingsByScoredProp(scoredPropIds: string[]) {
@@ -642,7 +955,7 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
     ...(typeof query.minimumConfidenceScore === "number" ? [{ column: "confidence_score", operator: "gte" as const, value: query.minimumConfidenceScore }] : []),
   ];
 
-  const scoredRowsSelect = "id,current_prop_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at";
+  const scoredRowsSelect = "id,current_prop_id,score_input_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at";
 
   const scoredRows: ScoredPropListRow[] = query.league
     ? await selectRows<ScoredPropListRow>("scored_props", {
@@ -668,7 +981,11 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
   for (const row of scoredRows) {
     if (!latestByCurrent.has(row.current_prop_id)) latestByCurrent.set(row.current_prop_id, row);
   }
-  const latestScored = [...latestByCurrent.values()];
+  // Session 99: a stored `publishable=true` row is not itself proof the score
+  // was ever evaluated under the CURRENT strict-completeness contract -- see
+  // filterRowsWithCurrentScoreContract's own doc comment for the real
+  // production defect this closes.
+  const latestScored = await filterRowsWithCurrentScoreContract([...latestByCurrent.values()]);
 
   const currentPropIds = latestScored.map((row) => row.current_prop_id);
   const currentProps = await selectRows<CurrentPropRow>("current_props", {
@@ -680,8 +997,21 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
     limit: currentPropIds.length,
   });
   const currentById = new Map(currentProps.map((row) => [row.id, row]));
+  const pulledAtBySnapshotId = await loadOddsSnapshotPulledAt(currentProps.map((row) => row.latest_snapshot_id));
 
-  const explanationMap = await explanationsByScoredProp(latestScored.map((row) => row.id), { compact: true });
+  // 2026-08-07 Analyzer/Covered Picks evidence parity: switched from the
+  // compact (summary/label-only) explanation read to the same full read
+  // getParlayOptions already uses -- factors/reasoning_block are required to
+  // build the same commentary + matchup/injury evidence notes on both
+  // surfaces. Still one batched query for the whole result set, same row
+  // count, just a few more text columns per row.
+  const explanationMap = await explanationsByScoredProp(latestScored.map((row) => row.id));
+  const featurePayloadByScoreInputId = await loadScoreInputFeaturePayloads(
+    latestScored.map((row) => row.score_input_id).filter((value): value is string => Boolean(value)),
+  );
+  const hitCountsByKey = await loadExactLineHitCounts(
+    currentProps.map((row) => ({ playerId: row.player_id, marketType: row.market_type, line: row.line, direction: row.side ?? row.direction })),
+  );
 
   const eventIds = parseIdList(currentProps.map((row) => ({ id: row.event_id })));
   const participantIds = parseIdList(currentProps.map((row) => ({ id: row.participant_id })));
@@ -707,6 +1037,18 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
     if (!current) return [];
     if (!isFutureStartTime(current.start_time)) return [];
     if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
+    // Phase 18 continuation (owner-policy re-audit) Part 1/5: `publishable`
+    // was evaluated at the LAST scoring pass, which can be hours before this
+    // read (scoring only runs on the pregame-gated, rotation-bottlenecked
+    // pipeline cadence -- see market-freshness.ts). A page read happens far
+    // more often than that. Without this re-check, a row that WAS fresh when
+    // scored can sit on Covered Picks, unchanged, long after its market has
+    // gone stale and before the next scoring pass ever re-evaluates it. Same
+    // read-time re-check already applied to getParlayOptions. Uses
+    // odds_snapshots.pulled_at (via latest_snapshot_id), NOT current.updated_at
+    // -- see loadOddsSnapshotPulledAt's doc comment for why updated_at is not
+    // a safe freshness proxy (production run 31129018935 finding).
+    if (!passesReadTimeMarketFreshness({ latestSnapshotId: current.latest_snapshot_id, leagueId: score.league_id, pulledAtBySnapshotId })) return [];
     const explanation = explanationMap.get(score.id);
     const event = current.event_id ? events.get(current.event_id) : undefined;
     const participant = current.participant_id ? participants.get(current.participant_id) : undefined;
@@ -720,9 +1062,18 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
     const market = current.market_id ? markets.get(current.market_id) : undefined;
     const sportsbook = current.sportsbook_id ? sportsbooks.get(current.sportsbook_id) : undefined;
 
-    const scoreLabel = explanation?.score_label ?? null;
-    const confidenceLabel = explanation?.confidence_label ?? null;
-    const riskLabel = explanation?.risk_label ?? null;
+    // 2026-08-07 (Analyzer/Covered Picks label-parity defect found while
+    // adding evidence parity coverage): these three labels used to be read
+    // from the STORED score_explanations row, while getParlayOptions
+    // independently derives them from the live scored_props row
+    // (score.recommendation / confidenceLabelFor / riskLabelFor). The two
+    // can diverge whenever score_explanations wasn't regenerated alongside a
+    // rescore -- proven by a parity test with a fixture that omits
+    // score_explanations.score_label. Now computed identically to
+    // getParlayOptions, from the same authoritative live score row.
+    const scoreLabel = score.recommendation ?? null;
+    const confidenceLabel = confidenceLabelFor(Number(score.confidence_score ?? 0), Number(score.data_quality_score ?? 0));
+    const riskLabel = riskLabelFor(score.risk_flags ?? [], Number(score.data_quality_score ?? 0));
 
     if (query.marketType && current.market_type !== query.marketType) return [];
     if (query.sportsbook) {
@@ -797,6 +1148,27 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
       risk_flags: score.risk_flags,
       grading_result: null,
       last_updated: current.updated_at ?? score.created_at,
+      // Analyzer/Covered Picks parity: same evidence-building function,
+      // same batched sources getParlayOptions uses -- zero extra requests
+      // when a card is expanded, since it's already embedded here.
+      evidence: buildScoreEvidence({
+        scoreInputId: score.score_input_id,
+        current,
+        featurePayloadByScoreInputId,
+        hitCountsByKey,
+        pulledAtBySnapshotId,
+        explanationFactors: explanation?.factors,
+      }),
+      commentary: explanation
+        ? buildParlayCommentary({
+            summary: explanation.summary,
+            reasoningBlock: explanation.reasoning_block,
+            factors: explanation.factors,
+            coveredScore: score.covered_score,
+            recommendation: score.recommendation,
+            scoreLabel,
+          })
+        : null,
     }];
   });
 
@@ -891,6 +1263,7 @@ type ScoredPropBoardRow = Pick<
   ScoredPropRow,
   | "id"
   | "current_prop_id"
+  | "score_input_id"
   | "player_id"
   | "team_id"
   | "opponent_team_id"
@@ -906,6 +1279,9 @@ type ScoredPropBoardRow = Pick<
   | "data_quality_score"
   | "recommendation"
   | "risk_flags"
+  | "prop_state"
+  | "publishable"
+  | "publishability_reasons"
 >;
 
 export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Promise<Opportunity[]> {
@@ -920,7 +1296,7 @@ export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Pro
   ];
 
   const scoredRows = await selectRows<ScoredPropBoardRow>("scored_props", {
-    select: "id,current_prop_id,player_id,team_id,opponent_team_id,event_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,trend_score,data_quality_score,recommendation,risk_flags",
+    select: "id,current_prop_id,score_input_id,player_id,team_id,opponent_team_id,event_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,trend_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons",
     filters: baseFilters,
     orderBy: "updated_at.desc",
     limit: scanLimit,
@@ -930,12 +1306,14 @@ export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Pro
   for (const row of scoredRows) {
     if (!latestByCurrent.has(row.current_prop_id)) latestByCurrent.set(row.current_prop_id, row);
   }
-  const latestScored = [...latestByCurrent.values()];
+  // Session 99: same score-row contract enforcement as getCoveredPicksOfTheDay --
+  // see filterRowsWithCurrentScoreContract's doc comment.
+  const latestScored = await filterRowsWithCurrentScoreContract([...latestByCurrent.values()]);
   if (!latestScored.length) return [];
 
   const currentPropIds = latestScored.map((row) => row.current_prop_id);
   const currentProps = await selectRows<CurrentPropRow>("current_props", {
-    select: "id,player_id,team_id,opponent_team_id,event_id,market_type,player_name,team_name,opponent_name,line,direction,start_time",
+    select: "id,latest_snapshot_id,player_id,team_id,opponent_team_id,event_id,market_type,player_name,team_name,opponent_name,line,direction,start_time",
     filters: [
       { column: "id", operator: "in", value: currentPropIds },
       { column: "active", value: true },
@@ -943,11 +1321,18 @@ export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Pro
     limit: currentPropIds.length,
   });
   const currentById = new Map(currentProps.map((row) => [row.id, row]));
+  // 2026-08-07 shared-quality-contract consolidation: this was the one gate
+  // getCoveredPicksOfTheDay and getParlayOptions both apply that this
+  // function omitted -- a stored `publishable` row can go market-stale
+  // between scoring time and read time. See passesReadTimeMarketFreshness's
+  // doc comment.
+  const pulledAtBySnapshotId = await loadOddsSnapshotPulledAt(currentProps.map((row) => row.latest_snapshot_id));
 
   const activePairs = latestScored.flatMap((score) => {
     const current = currentById.get(score.current_prop_id);
     if (!current || !isFutureStartTime(current.start_time)) return [];
     if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
+    if (!passesReadTimeMarketFreshness({ latestSnapshotId: current.latest_snapshot_id, leagueId: score.league_id, pulledAtBySnapshotId })) return [];
     return [{ score, current }];
   });
   if (!activePairs.length) return [];
@@ -1047,35 +1432,93 @@ export async function getBoardOpportunities(query: BoardOpportunitiesQuery): Pro
   return opportunities;
 }
 
+// Leagues the Manual Analyzer draws from when no explicit league filter is
+// requested (mirrors COVERED_PICKS_LEAGUES above).
+const PARLAY_OPTIONS_LEAGUES = ["mlb", "wnba"] as const;
+
+type ParlayScanScoredPropRow = ScoredPropParlayRow & { league_id: string; event_id: string | null };
+const PARLAY_SCAN_SCORED_SELECT =
+  "id,current_prop_id,score_input_id,league_id,event_id,covered_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,updated_at";
+
 export async function getParlayOptions(query: ParlayOptionsQuery) {
   const limit = Math.min(Math.max(query.limit ?? 100, 1), 250);
   const scanLimit = KNOWLEDGE_LOW_EGRESS_MODE
     ? Math.min(Math.max(limit * 2, 60), 120)
     : 500;
-  const filters: SupabaseFilter[] = [
+
+  // Owner policy correction: the scan used to walk current_props ordered by
+  // start_time.asc. That table has one row PER SPORTSBOOK VARIANT of a prop
+  // (not one per logical prop), so a handful of early-starting games could
+  // fill the entire scanLimit with sportsbook-variant rows before a later-
+  // starting-but-higher-scoring prop was ever fetched from the database --
+  // exactly how a valid, high-scoring relational prop (confirmed reachable
+  // via the un-scan-limited single-prop lookup) was silently absent from a
+  // bounded snapshot built from this same scan. Scanning scored_props instead
+  // (one row per current_prop_id, already carrying covered_score) fixes both
+  // causes at once: it removes the sportsbook-variant multiplication, and it
+  // lets the scan itself be ordered by score instead of by start time. League
+  // splitting (mirroring getCoveredPicksOfTheDay's COVERED_PICKS_LEAGUES
+  // pattern) additionally prevents one league's cron cadence from starving
+  // the other out of the scan window -- bounded to 2 queries, not one per
+  // market/event/score-band.
+  const scoredFilters: SupabaseFilter[] = [
     ...(query.sport ? [{ column: "sport_id", value: query.sport }] : []),
-    ...(query.league ? [{ column: "league_id", value: query.league }] : []),
     ...(query.eventId ? [{ column: "event_id", value: query.eventId }] : []),
+    { column: "publishable", value: true },
+  ];
+  const scoredRows: ParlayScanScoredPropRow[] = query.league
+    ? await selectRows<ParlayScanScoredPropRow>("scored_props", {
+        select: PARLAY_SCAN_SCORED_SELECT,
+        filters: [...scoredFilters, { column: "league_id", value: query.league }],
+        orderBy: "covered_score.desc",
+        limit: scanLimit,
+      })
+    : (
+        await Promise.all(
+          PARLAY_OPTIONS_LEAGUES.map((league) =>
+            selectRows<ParlayScanScoredPropRow>("scored_props", {
+              select: PARLAY_SCAN_SCORED_SELECT,
+              filters: [...scoredFilters, { column: "league_id", value: league }],
+              orderBy: "covered_score.desc",
+              limit: Math.max(Math.ceil(scanLimit / PARLAY_OPTIONS_LEAGUES.length), 40),
+            }),
+          ),
+        )
+      ).flat();
+
+  const latestScoredDeduped = new Map<string, ParlayScanScoredPropRow>();
+  for (const row of scoredRows) {
+    if (!latestScoredDeduped.has(row.current_prop_id)) latestScoredDeduped.set(row.current_prop_id, row);
+  }
+  // Session 99: same score-row contract enforcement as getCoveredPicksOfTheDay --
+  // see filterRowsWithCurrentScoreContract's doc comment.
+  const contractCurrentRows = await filterRowsWithCurrentScoreContract([...latestScoredDeduped.values()]);
+  const latestScored = new Map<string, ParlayScanScoredPropRow>(contractCurrentRows.map((row) => [row.current_prop_id, row]));
+  const currentPropIds = [...latestScored.keys()];
+
+  const currentPropsSharedFilters: SupabaseFilter[] = [
     ...(query.marketType ? [{ column: "market_type", value: query.marketType }] : []),
     ...(query.onlyMatched ? [{ column: "match_status", operator: "in" as const, value: ["matched", "strongly_resolved"] }] : []),
     { column: "active", value: true },
     // Matches isFutureStartTime()'s own semantics (null start_time or strictly in the future).
-    // Without this, `active=true` rows that are days past their start_time (never deactivated)
-    // sort first under start_time.asc and can consume the entire scanLimit budget, starving out
-    // every genuinely-eligible future row before the JS-level isFutureStartTime() filter below
-    // ever sees them -- this is a query-bound fix, not a change to which props are eligible.
     { raw: `or=(start_time.is.null,start_time.gt.${encodeURIComponent(new Date().toISOString())})` },
   ];
 
-  const currentProps = await selectRows<CurrentPropRow>("current_props", {
-    select: "id,latest_snapshot_id,sport_id,league_id,sportsbook_id,market_id,market_instance_key,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_type,player_name,team_name,opponent_name,line,direction,side,over_price,under_price,match_confidence,match_status,match_quality_flags,start_time,updated_at",
-    filters,
-    orderBy: "start_time.asc",
-    limit: scanLimit,
-  });
-
-  const currentPropIds = currentProps.map((row) => row.id);
-  const latestScored = await latestScoredCompactByCurrentProp(currentPropIds);
+  // Batched the same way as latestScoredCompactByCurrentProp's current_prop_id
+  // lookup, and for the identical reason: an unbounded `id=in.(...)` filter
+  // over up to `scanLimit` ids is long enough to overflow undici's header
+  // parser (the exact UND_ERR_HEADERS_OVERFLOW this file's regression test
+  // guards against) -- this join replaced the table that filter used to run
+  // against, so it inherits the same batching requirement.
+  const currentProps: CurrentPropRow[] = [];
+  for (const batch of chunkIds(currentPropIds, SCORED_PROPS_LOOKUP_BATCH_SIZE)) {
+    const batchRows = await selectRows<CurrentPropRow>("current_props", {
+      select: "id,latest_snapshot_id,sport_id,league_id,sportsbook_id,market_id,market_instance_key,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_type,player_name,team_name,opponent_name,line,direction,side,over_price,under_price,match_confidence,match_status,match_quality_flags,start_time,updated_at",
+      filters: [{ column: "id", operator: "in", value: batch }, ...currentPropsSharedFilters],
+      limit: batch.length,
+    });
+    currentProps.push(...batchRows);
+  }
 
   const eventIds = parseIdList(currentProps.map((row) => ({ id: row.event_id })));
   const participantIds = parseIdList(currentProps.map((row) => ({ id: row.participant_id })));
@@ -1096,11 +1539,53 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
     "id,name,abbreviation,logo_url,external_ids",
   );
 
+  // Public-safe commentary is a bounded, read-time reshaping of the SAME
+  // score_explanations row Covered Picks already fetches -- computed once by
+  // the real adapter during scoring, never recomputed here. One batched
+  // lookup for every resolved scored_prop_id, not a per-card fetch.
+  const explanationByScoredPropId = await explanationsByScoredProp([...latestScored.values()].map((row) => row.id));
+  // Expanded-evidence tier (Session 116): two more bounded batched reads,
+  // both keyed off data already produced for this exact result set -- not
+  // per-card, not a new computation, not a scoring change.
+  const featurePayloadByScoreInputId = await loadScoreInputFeaturePayloads(
+    [...latestScored.values()].map((row) => row.score_input_id).filter((value): value is string => Boolean(value)),
+  );
+  const hitCountsByKey = await loadExactLineHitCounts(
+    currentProps.map((row) => ({ playerId: row.player_id, marketType: row.market_type, line: row.line, direction: row.side ?? row.direction })),
+  );
+  const pulledAtBySnapshotId = await loadOddsSnapshotPulledAt(currentProps.map((row) => row.latest_snapshot_id));
+
   const rows = currentProps.flatMap((current) => {
     if (!isFutureStartTime(current.start_time)) return [];
     if (!isBeforePreparedSlateUpperBound(current.start_time)) return [];
     const score = latestScored.get(current.id) ?? null;
     const event = current.event_id ? events.get(current.event_id) : undefined;
+    // Phase 18 (continuation) owner policy #2: Manual Analyzer eligibility.
+    // The Manual Analyzer may show valid props BELOW 70, but it must not show
+    // a prop lacking the integrity required for a truthful numeric score.
+    // "Integrity" is exactly the publishable condition -- all required
+    // identity/event/context/freshness present -- MINUS the Covered Picks
+    // 70-point floor (which is applied separately, only in
+    // getCoveredPicksOfTheDay). So: require the latest scored row to exist and
+    // be publishable (`prop_state === "publishable"`, i.e. ZERO blockers). A
+    // publishable row scoring below 70 IS shown here (the deliberate
+    // difference from Covered Picks); a candidate -- ANY required blocker:
+    // unresolved/ambiguous identity, team==opponent, postponed/canceled/
+    // started event, missing or stale required context, retry-exhausted
+    // matchup, stale market, or missing weather/ballpark for a sensitive
+    // market -- is excluded. Genuinely-optional missing context is a soft
+    // reason (not a blocker), so a publishable row missing only optional
+    // context still appears, disclosed via its labels.
+    if (score?.prop_state !== "publishable") return [];
+    // Owner policy #1: independently re-verify current-market freshness at
+    // READ time against NOW. The stored publishable flag was evaluated at
+    // scoring time, which may since have gone stale. Reads
+    // odds_snapshots.pulled_at (via latest_snapshot_id) directly -- NOT
+    // current.updated_at, which other writers (identity repair, team/event
+    // repair, status repair) also bump without a genuine new price
+    // observation; see loadOddsSnapshotPulledAt's doc comment for the
+    // production defect (run 31129018935) this closes.
+    if (!passesReadTimeMarketFreshness({ latestSnapshotId: current.latest_snapshot_id, leagueId: current.league_id, pulledAtBySnapshotId })) return [];
     const participant = current.participant_id ? participants.get(current.participant_id) : undefined;
     const player = current.player_id ? players.get(current.player_id) : undefined;
     const { team, opponentTeam, teamDisplayName, opponentDisplayName, eventDisplayName } = resolveTeamDisplayContext({
@@ -1134,6 +1619,25 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
     const scoreLabel = score?.recommendation ?? null;
     const confidenceLabel = score ? confidenceLabelFor(Number(score.confidence_score ?? 0), Number(score.data_quality_score ?? 0)) : null;
     const riskLabel = score ? riskLabelFor(score.risk_flags ?? [], Number(score.data_quality_score ?? 0)) : null;
+    const explanation = score ? explanationByScoredPropId.get(score.id) ?? null : null;
+    const commentary = explanation
+      ? buildParlayCommentary({
+          summary: explanation.summary,
+          reasoningBlock: explanation.reasoning_block,
+          factors: explanation.factors,
+          coveredScore: score?.covered_score ?? null,
+          recommendation: score?.recommendation ?? null,
+          scoreLabel,
+        })
+      : null;
+    const evidence = buildScoreEvidence({
+      scoreInputId: score?.score_input_id,
+      current,
+      featurePayloadByScoreInputId,
+      hitCountsByKey,
+      pulledAtBySnapshotId,
+      explanationFactors: explanation?.factors,
+    });
 
     if (query.date && !sameDay(current.start_time, query.date)) return [];
     if (query.sportsbook) {
@@ -1143,7 +1647,10 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
     }
     if (query.participantSearch && !participantDisplayName.toLowerCase().includes(query.participantSearch.toLowerCase())) return [];
     if (query.onlyScored && !score) return [];
-    if (query.excludeStaleOdds && current.updated_at && (Date.now() - new Date(current.updated_at).getTime()) > 3 * 60 * 60 * 1000) return [];
+    if (query.excludeStaleOdds) {
+      const pulledAt = pulledAtBySnapshotId.get(current.latest_snapshot_id) ?? null;
+      if (!pulledAt || (Date.now() - new Date(pulledAt).getTime()) > 3 * 60 * 60 * 1000) return [];
+    }
     if (query.excludeLowConfidenceMatches && (current.match_confidence ?? 0) < 0.75) return [];
 
     return [{
@@ -1190,6 +1697,8 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
       score_label: scoreLabel,
       confidence_label: confidenceLabel,
       risk_label: riskLabel,
+      commentary,
+      evidence,
     }];
   });
 
@@ -1267,11 +1776,19 @@ export async function getParlayOptions(query: ParlayOptionsQuery) {
 
 export async function getCoveredPickDetails(scoredPropId: string) {
   const [score] = await selectRows<ScoredPropRow>("scored_props", {
-    select: "id,current_prop_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at",
+    select: "id,current_prop_id,score_input_id,participant_id,participant_type,player_id,team_id,opponent_id,opponent_team_id,event_id,market_id,sport_id,league_id,covered_score,projection,line,edge_score,confidence_score,data_quality_score,recommendation,risk_flags,prop_state,publishable,publishability_reasons,created_at,updated_at",
     filters: [{ column: "id", value: scoredPropId }],
     limit: 1,
   });
   if (!score) return null;
+  // Session 99: a direct-by-id lookup is a "selected-leg detail" route with
+  // no list-level filtering of its own to inherit -- it must independently
+  // prove the score row was evaluated under the current strict contract,
+  // exactly like every other public surface. See
+  // filterRowsWithCurrentScoreContract's doc comment for why a stored
+  // `publishable=true` alone is not sufficient.
+  const [contractCurrent] = await filterRowsWithCurrentScoreContract([score]);
+  if (!contractCurrent) return null;
 
   const [current, explanation, grading] = await Promise.all([
     selectRows<CurrentPropRow>("current_props", {
@@ -1293,6 +1810,19 @@ export async function getCoveredPickDetails(scoredPropId: string) {
   ]);
 
   if (!current) return null;
+  // 2026-08-07 shared-quality-contract consolidation: the single-prop detail
+  // lookup (the evidence panel / saved-pick hydration source) had NO
+  // future-event, prepared-slate-window, or read-time market-freshness check
+  // at all -- only the strict-v1 contract above. A listing surface (Covered
+  // Picks/Manual Analyzer) filters a row out once it starts or its market
+  // goes stale, but a user can click into detail for an id that WAS eligible
+  // moments earlier; without this, that click could still render a full
+  // evidence panel for a now-started or now-stale prop. Same gates, same
+  // shared helper, as every other surface.
+  if (!isFutureStartTime(current.start_time)) return null;
+  if (!isBeforePreparedSlateUpperBound(current.start_time)) return null;
+  const pulledAtForDetail = await loadOddsSnapshotPulledAt([current.latest_snapshot_id]);
+  if (!passesReadTimeMarketFreshness({ latestSnapshotId: current.latest_snapshot_id, leagueId: score.league_id, pulledAtBySnapshotId: pulledAtForDetail })) return null;
 
   const [eventMap, participantMap, playerMap, marketMap, sportsbookMap] = await Promise.all([
     loadMap<EventRow>("events", current.event_id ? [current.event_id] : [], "id,display_name,scheduled_date,start_time,status,home_team_id,away_team_id"),
@@ -1371,9 +1901,12 @@ export async function getCoveredPickDetails(scoredPropId: string) {
     confidence_score: score.confidence_score,
     data_quality_score: score.data_quality_score,
     recommendation: score.recommendation,
-    score_label: explanation?.score_label ?? null,
-    confidence_label: explanation?.confidence_label ?? null,
-    risk_label: explanation?.risk_label ?? null,
+    // Same label-parity fix as getCoveredPicksOfTheDay: derived from the
+    // live score row, not the (possibly stale/regenerated-later)
+    // score_explanations row.
+    score_label: score.recommendation ?? null,
+    confidence_label: confidenceLabelFor(Number(score.confidence_score ?? 0), Number(score.data_quality_score ?? 0)),
+    risk_label: riskLabelFor(score.risk_flags ?? [], Number(score.data_quality_score ?? 0)),
     explanation_summary: explanation?.summary ?? null,
     factor_breakdown: explanation?.factors ?? [],
     risk_flags: score.risk_flags,
@@ -1384,6 +1917,24 @@ export async function getCoveredPickDetails(scoredPropId: string) {
       grade_reason: grading.grade_reason,
     } : null,
     last_updated: current.updated_at ?? score.created_at,
+    evidence: buildScoreEvidence({
+      scoreInputId: score.score_input_id,
+      current,
+      featurePayloadByScoreInputId: await loadScoreInputFeaturePayloads(score.score_input_id ? [score.score_input_id] : []),
+      hitCountsByKey: await loadExactLineHitCounts([{ playerId: current.player_id, marketType: current.market_type, line: current.line, direction: current.side ?? current.direction }]),
+      pulledAtBySnapshotId: pulledAtForDetail,
+      explanationFactors: explanation?.factors,
+    }),
+    commentary: explanation
+      ? buildParlayCommentary({
+          summary: explanation.summary,
+          reasoningBlock: explanation.reasoning_block,
+          factors: explanation.factors,
+          coveredScore: score.covered_score,
+          recommendation: score.recommendation,
+          scoreLabel: score.recommendation ?? null,
+        })
+      : null,
   };
 }
 

@@ -143,10 +143,42 @@ function matchesSharpPullConfig(config: SharpPullConfig, filters: SharpPullConfi
   return true;
 }
 
+// A single cheap, bounded lookup (ORDER BY updated_at DESC LIMIT 1 -- the same
+// pattern already used elsewhere in this codebase, e.g. refreshMlbPlayerLogs's
+// latest-game-log check) for the most recent write timestamp across every
+// sharpapi odds_pull_configs row. Used as a revision marker so a routine
+// enable/disable edit to the config table is detected automatically on the
+// next load, instead of requiring a human to remember to flip the cache's
+// `is_stale` flag by hand -- that manual step was proven live to be missed:
+// a production config disable sat unenforced for over an hour, spending real
+// Sharp physical requests on markets that were supposed to be off, because
+// nothing re-derived staleness from the config table itself. Returns null
+// (never blocks the caller) if the table is empty or the read fails; a null
+// revision always fails the equality check below, which fails safe toward a
+// fresh reload rather than toward silently trusting a stale cache.
+async function loadSharpPullConfigsRevision(): Promise<string | null> {
+  const rows = await selectRows<{ updated_at: string | null }>("odds_pull_configs", {
+    select: "updated_at",
+    filters: [{ column: "provider", value: "sharpapi" }],
+    orderBy: "updated_at.desc",
+    limit: 1,
+  }).catch(() => []);
+  return rows[0]?.updated_at ?? null;
+}
+
 export async function loadSharpPullConfigs(filters: SharpPullConfigFilters = {}): Promise<SharpPullConfig[]> {
   const cacheKey = sharpPullConfigCacheKey();
-  const cached = await getProviderCache<SharpPullConfig[]>(cacheKey);
-  if (Array.isArray(cached?.payload) && !cached.is_stale && new Date(cached.expires_at).getTime() > Date.now()) {
+  const [cached, currentRevision] = await Promise.all([
+    getProviderCache<SharpPullConfig[]>(cacheKey),
+    loadSharpPullConfigsRevision(),
+  ]);
+  const cacheMatchesCurrentRevision = currentRevision !== null && cached?.source_updated_at === currentRevision;
+  if (
+    Array.isArray(cached?.payload)
+    && !cached.is_stale
+    && new Date(cached.expires_at).getTime() > Date.now()
+    && cacheMatchesCurrentRevision
+  ) {
     return filterSharpPullConfigs(cached.payload, filters);
   }
 
@@ -169,11 +201,21 @@ export async function loadSharpPullConfigs(filters: SharpPullConfigFilters = {})
     metadata: row.metadata ?? {},
   } satisfies OddsPullConfigRow));
   const configs = normalizeSharpPullConfigs(sourceRows);
+  // Only stamp the revision fetched at the top of this call when the DB read
+  // that produced `configs` actually succeeded (`rows` non-null). If it fell
+  // back to the code-side strategy list (DB read failed), storing a real
+  // revision here would let a later successful DB read be skipped as a false
+  // cache hit -- so the fallback path stores null instead, which always
+  // fails the equality check above and forces a fresh reload attempt on the
+  // next call rather than pinning a long-lived cache entry to a revision
+  // nobody actually confirmed against.
+  const revisionForWrite = rows ? currentRevision : null;
   await putProviderCache({
     cacheKey,
     provider: "sharpapi",
     payload: configs,
     expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    sourceUpdatedAt: revisionForWrite,
   });
 
   return filterSharpPullConfigs(configs, filters);

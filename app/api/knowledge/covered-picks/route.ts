@@ -3,6 +3,7 @@ import { clampCoveredPicksFloor } from "@/lib/knowledge/pipeline/board-invariant
 import { getCoveredPicksOfTheDay } from "@/lib/knowledge/read-service";
 import {
   canUseCoveredPicksSnapshot,
+  hydrateCoveredPickSnapshotRow,
   parsePublicSnapshotVersion,
   readPublicSnapshot,
   resolvePublicSnapshotRoute,
@@ -23,14 +24,6 @@ function parseNumber(value: string | null) {
   if (value == null || value === "") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function hydrateCoveredPickSnapshotRow(row: PublicCoveredPickSnapshotRow) {
-  return {
-    ...row,
-    factor_breakdown: [],
-    grading_result: null,
-  };
 }
 
 export async function GET(request: Request) {

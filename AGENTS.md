@@ -147,6 +147,12 @@ Do not change those defaults without an explicit request.
 - Do not make provider calls as part of docs work.
 - For orchestration or validation changes, prefer mocked or controlled tests unless the user approves a live run.
 - Keep Sharp ingestion and enrichment calls bounded and explicit.
+- MLB Baseball Savant/Statcast (`lib/providers/statcast-savant.ts`) is a real, working, owner-approved
+  intended source (Session 106), wired into `runLivePreScoreRepair` as a preflight-gated `savant` stage
+  but **disabled by default** behind `KNOWLEDGE_MLB_SAVANT_ENABLED` (must equal exactly `"true"`; any other
+  value, including unset, stays disabled). It is not set in production as of Session 106. Do not enable it
+  without re-reading `docs/AGENT_HANDOFF.md` Session 106's activation proof package and getting explicit
+  fresh owner sign-off — this is a live-call-enabling change, not a code change.
 
 ## Database-write restrictions
 

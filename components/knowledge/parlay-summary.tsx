@@ -24,9 +24,9 @@ export function ParlaySummary({ summary }: { summary: ParlaySummaryType }) {
         <small>Across currently scored selected legs</small>
       </article>
       <article className="kpi-card">
-        <span>Average match confidence</span>
-        <strong>{summary.average_match_confidence ?? "—"}</strong>
-        <small>Identity/matching confidence from current props</small>
+        <span>Legs with warnings</span>
+        <strong>{summary.legs_with_warnings}</strong>
+        <small>Selected legs carrying at least one disclosed warning</small>
       </article>
       <article className="kpi-card">
         <span>High-confidence legs</span>

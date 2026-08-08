@@ -2,6 +2,7 @@ import { jsonRouteResponse } from "@/lib/api/route-response";
 import { getParlayOptions } from "@/lib/knowledge/read-service";
 import {
   parsePublicSnapshotVersion,
+  filterParlayOptionsSnapshotRows,
   readPublicSnapshot,
   parlayOptionsSnapshotHasLeagueRows,
   resolvePublicSnapshotRoute,
@@ -53,19 +54,22 @@ export async function GET(request: Request) {
       if (snapshot && !parlayOptionsSnapshotHasLeagueRows(snapshot.rows, requiredSnapshotLeagues)) return null;
       return snapshot;
     },
-    buildSnapshotResponse: (snapshot) => ({
-      schemaVersion: snapshot.schemaVersion,
-      snapshotVersion: snapshot.snapshotVersion,
-      publishedAt: snapshot.publishedAt,
-      dataThrough: snapshot.dataThrough,
-      sourceRefreshedAt: snapshot.sourceRefreshedAt,
-      effectiveFilterScope: snapshot.effectiveFilterScope,
-      pipelineRunId: snapshot.pipelineRunId,
-      status: snapshot.status,
-      snapshot_source: "published" as const,
-      count: snapshot.rows.length,
-      rows: snapshot.rows as ParlayOptionRow[],
-    } satisfies ParlayOptionsResponse),
+    buildSnapshotResponse: (snapshot) => {
+      const rows = filterParlayOptionsSnapshotRows(snapshot.rows as ParlayOptionRow[], query);
+      return {
+        schemaVersion: snapshot.schemaVersion,
+        snapshotVersion: snapshot.snapshotVersion,
+        publishedAt: snapshot.publishedAt,
+        dataThrough: snapshot.dataThrough,
+        sourceRefreshedAt: snapshot.sourceRefreshedAt,
+        effectiveFilterScope: snapshot.effectiveFilterScope,
+        pipelineRunId: snapshot.pipelineRunId,
+        status: snapshot.status,
+        snapshot_source: "published" as const,
+        count: rows.length,
+        rows,
+      } satisfies ParlayOptionsResponse;
+    },
     buildFallbackResponse: async () => {
       const payload = await getParlayOptions({
         date: query.date,

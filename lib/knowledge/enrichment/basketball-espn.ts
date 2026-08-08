@@ -188,9 +188,18 @@ export async function refreshWnbaScheduleEspn(now = new Date()) {
  * needs no changes - it already reads .pace and .opponent_defensive_rating
  * from these tables regardless of which job populated them.
  */
-export async function refreshWnbaMatchupFeatures(now = new Date()) {
+export type WnbaMatchupRefreshScope = {
+  /** Natural repair provides only teams referenced by its current prop window. */
+  teamIds?: string[];
+  /** Natural repair provides only events whose opponent context is needed. */
+  eventIds?: string[];
+};
+
+export async function refreshWnbaMatchupFeatures(now = new Date(), scope: WnbaMatchupRefreshScope = {}) {
   const config = ACTIVE_LEAGUES.WNBA;
   const contextDate = easternDate(now);
+  const teamIds = [...new Set((scope.teamIds ?? []).filter(Boolean))];
+  const eventIds = [...new Set((scope.eventIds ?? []).filter(Boolean))];
 
   // W-L record: derived from team_game_logs' own team_total vs the
   // opponent's team_total for the same event, rather than a second events
@@ -208,9 +217,10 @@ export async function refreshWnbaMatchupFeatures(now = new Date()) {
     filters: [
       { column: "league_id", value: config.leagueId },
       { column: "provider", value: SPORTSDATAVERSE_WNBA_PROVIDER },
+      ...(teamIds.length ? [{ column: "team_id", operator: "in" as const, value: teamIds }] : []),
     ],
     orderBy: "game_date.desc",
-    limit: 500,
+    limit: teamIds.length ? Math.min(Math.max(teamIds.length * 40, 80), 500) : 500,
   }).catch(() => []);
 
   const logsByEvent = new Map<string, typeof recentLogs>();
@@ -276,9 +286,10 @@ export async function refreshWnbaMatchupFeatures(now = new Date()) {
     filters: [
       { column: "league_id", value: config.leagueId },
       { column: "start_time", operator: "gte", value: now.toISOString() },
+      ...(eventIds.length ? [{ column: "id", operator: "in" as const, value: eventIds }] : []),
     ],
     orderBy: "start_time.asc",
-    limit: 30,
+    limit: eventIds.length || 30,
   }).catch(() => []);
 
   let matchupRows = 0;

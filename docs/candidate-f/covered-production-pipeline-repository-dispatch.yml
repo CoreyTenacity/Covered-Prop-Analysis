@@ -1,0 +1,238 @@
+# Candidate F production pipeline — PUBLIC repo (CoreyTenacity/Covered-Prop-Analysis).
+# Runs on a free public standard runner, checks out the pinned PRIVATE Covered SHA into a temp dir
+# via a read-only credential, and runs the existing pipeline. Private source never enters the public
+# repo/artifacts/caches/logs. Proven live: WNBA run 29535784558, MLB run 29536975916.
+#
+# PIN NAMESPACE: COVERED_PRIVATE_PIPELINE_SHA_V2 is the active production pin. The legacy
+# COVERED_PRIVATE_PIPELINE_SHA variable is intentionally retired so an unrecoverable queued
+# workflow from the pre-cutover generation fails closed before private checkout.
+#
+# SCHEDULING SAFETY: scheduled runs are gated by the job-level `if:` on COVERED_GITHUB_SCHEDULER_ENABLED,
+# so this file is SAFE TO MERGE while that var is `false` — no scheduled run executes until it flips to
+# `true`. Manual workflow_dispatch always runs regardless.
+
+name: Covered Production Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      league:
+        description: League to run (MLB or WNBA)
+        required: true
+        type: choice
+        options: [WNBA, MLB]
+      dry_run:
+        description: Dry run (no production writes)
+        required: true
+        type: boolean
+        default: true
+      config_limit:
+        description: SharpAPI configs this run (WNBA ~8, MLB ~10; provider margin protected by spacing)
+        required: true
+        type: string
+        default: "1"
+      run_scoring:
+        description: Run scoring phase
+        required: true
+        type: boolean
+        default: true
+      run_board:
+        description: Run board build + snapshot publication
+        required: true
+        type: boolean
+        default: true
+      publish_public_snapshots:
+        description: Publish public snapshots, including standalone Model Performance
+        required: true
+        type: boolean
+        default: true
+      maintenance_job:
+        description: Manual bounded maintenance operation (does not run the production pipeline)
+        required: true
+        type: choice
+        options: [none, wnba_incremental_ingest]
+        default: none
+  repository_dispatch:
+    types: [covered-production-heartbeat]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: covered-production-sharpapi
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # NOTE: the scheduler kill-switch is NOT gated here. Environment-scoped variables
+    # (COVERED_GITHUB_SCHEDULER_ENABLED lives in the `production` Environment) are NOT visible in a
+    # job-level `if:` — the environment only resolves after `if:` passes — so gating here would skip
+    # EVERY scheduled run (observed: run 29540597005 skipped). The kill-switch is enforced inside the
+    # "Resolve run parameters" step instead, where environment vars ARE available.
+    environment: production
+    env:
+      SHARPAPI_MAX_REQUESTS_PER_MINUTE: ${{ vars.SHARPAPI_MAX_REQUESTS_PER_MINUTE }}
+      SHARPAPI_REQUEST_SPACING_MS: ${{ vars.SHARPAPI_REQUEST_SPACING_MS }}
+      KNOWLEDGE_LOW_EGRESS_MODE: ${{ vars.KNOWLEDGE_LOW_EGRESS_MODE }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+      COVERED_GITHUB_SCHEDULER_ENABLED: ${{ vars.COVERED_GITHUB_SCHEDULER_ENABLED }}
+      WNBA_INGESTION_ENABLED: ${{ vars.WNBA_INGESTION_ENABLED }}
+    steps:
+      - name: Resolve run parameters (dispatch inputs, or map schedule cron -> league)
+        id: params
+        env:
+          SCHED: ${{ github.event.schedule }}
+          MAINTENANCE_JOB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.maintenance_job || 'none' }}
+          DISPATCH_TYPE: ${{ github.event.action }}
+          DISPATCH_SCHEMA: ${{ github.event.client_payload.schema }}
+          DISPATCH_SOURCE: ${{ github.event.client_payload.source }}
+          DISPATCH_SLOT: ${{ github.event.client_payload.slot }}
+          DISPATCH_DELIVERY_KEY: ${{ github.event.client_payload.delivery_key }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "$MAINTENANCE_JOB" = "wnba_incremental_ingest" ]; then
+              # This is deliberately a fixed, manual-only operation. Do not turn this into a
+              # generic private-job runner or expose season/full-backfill controls publicly.
+              LEAGUE="WNBA"; DRY="false"; CFG="1"; SCORING="false"; BOARD="false"; PUBLISH="false"
+            elif [ "$MAINTENANCE_JOB" = "none" ]; then
+              LEAGUE="${{ github.event.inputs.league }}"
+              DRY="${{ github.event.inputs.dry_run }}"
+              CFG="${{ github.event.inputs.config_limit }}"
+              SCORING="${{ github.event.inputs.run_scoring }}"
+              BOARD="${{ github.event.inputs.run_board }}"
+              PUBLISH="${{ github.event.inputs.publish_public_snapshots }}"
+            else
+              echo "::error::Unsupported maintenance_job value."
+              exit 1
+            fi
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            # Scheduler kill-switch remains authoritative for the only recurring scheduler.
+            if [ "${COVERED_GITHUB_SCHEDULER_ENABLED}" != "true" ]; then
+              echo "Scheduler disabled (COVERED_GITHUB_SCHEDULER_ENABLED != true); skipping heartbeat."
+              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if [ "$DISPATCH_TYPE" != "covered-production-heartbeat" ] || [ "$DISPATCH_SCHEMA" != "covered-production-heartbeat/v1" ] || [ "$DISPATCH_SOURCE" != "cloudflare-cron" ]; then
+              echo "::error::Rejected repository_dispatch contract."
+              exit 1
+            fi
+            if ! printf '%s' "$DISPATCH_SLOT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$' || [ "$DISPATCH_DELIVERY_KEY" != "covered:$DISPATCH_SLOT" ]; then
+              echo "::error::Rejected repository_dispatch slot."
+              exit 1
+            fi
+            echo "::notice::Accepted covered heartbeat slot $DISPATCH_SLOT."
+            MAINTENANCE_JOB="none"
+            DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
+            LEAGUE="auto"; CFG="1"; SCHEDULER_HEARTBEAT="true"
+          else
+            echo "::error::Unsupported event name."
+            exit 1
+          fi
+          SCHEDULER_HEARTBEAT="${SCHEDULER_HEARTBEAT:-false}"
+          { echo "league=$LEAGUE"; echo "dry_run=$DRY"; echo "config_limit=$CFG";
+            echo "run_scoring=$SCORING"; echo "run_board=$BOARD"; echo "publish_public_snapshots=$PUBLISH";
+            echo "maintenance_job=$MAINTENANCE_JOB"; echo "scheduler_heartbeat=$SCHEDULER_HEARTBEAT"; echo "dispatch_slot=${DISPATCH_SLOT:-}"; echo "skip=false"; } >> "$GITHUB_OUTPUT"
+
+      - name: Fail closed if the pinned private SHA is missing/malformed
+        if: steps.params.outputs.skip != 'true'
+        env:
+          PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+        run: |
+          if ! printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::COVERED_PRIVATE_PIPELINE_SHA_V2 is missing or not a full 40-char SHA. Refusing to run."
+            exit 1
+          fi
+          echo "Pinned private SHA present (value not printed)."
+
+      - name: Check out PRIVATE Covered repo at the pinned SHA (into ./private-covered)
+        if: steps.params.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: CoreyTenacity/Covered
+          ref: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          token: ${{ secrets.COVERED_PRIVATE_REPO_TOKEN }}   # read-only, single-repo, Contents:read
+          path: private-covered
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify checkout is exactly the approved SHA
+        if: steps.params.outputs.skip != 'true'
+        working-directory: private-covered
+        run: |
+          GOT="$(git rev-parse HEAD)"
+          EXP="${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}"
+          if [ "$GOT" != "$EXP" ]; then
+            echo "::error::Private checkout HEAD does not match the approved SHA."
+            exit 1
+          fi
+          echo "Private checkout pinned correctly."
+
+      - name: Set up pnpm
+        if: steps.params.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned because the workspace root has no package.json to auto-detect from (only the PRIVATE
+          # repo is checked out, into ./private-covered). Matches the private packageManager (pnpm@10.13.1).
+          version: 10.13.1
+
+      - name: Set up Node
+        if: steps.params.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Intentionally NO `cache: pnpm` — never cache the private tree's dependencies publicly.
+
+      - name: Install (private checkout, from lockfile)
+        if: steps.params.outputs.skip != 'true'
+        working-directory: private-covered
+        run: pnpm install --frozen-lockfile
+
+      - name: Run bounded WNBA incremental maintenance
+        if: github.event_name == 'workflow_dispatch' && steps.params.outputs.skip != 'true' && steps.params.outputs.maintenance_job == 'wnba_incremental_ingest'
+        working-directory: private-covered
+        env:
+          # Production credentials — main-restricted `production` Environment secrets. Auto-masked in logs.
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WNBA_HISTORY_SEASON: "2026"
+          WNBA_HISTORY_FORCE_FULL_BACKFILL: "false"
+        run: |
+          # This invokes exactly one existing bounded knowledge job; it does not run scoring, board,
+          # snapshot publication, or any unrelated league/job.
+          pnpm run cron:run -- knowledge --job ingest_sportsdataverse_wnba
+
+      - name: Run production pipeline
+        if: steps.params.outputs.skip != 'true' && steps.params.outputs.maintenance_job != 'wnba_incremental_ingest'
+        working-directory: private-covered
+        env:
+          # Production credentials — main-restricted `production` Environment secrets. Auto-masked in logs.
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
+          BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SHARPAPI_CONFIGS_PER_RUN: ${{ steps.params.outputs.config_limit }}
+        run: |
+          # No `set -x`, no `env` dump, no verbose HTTP debug — public logs are world-readable.
+          pnpm run cron:run -- github-actions \
+            --trigger "${GITHUB_EVENT_NAME}" \
+            --league "${{ steps.params.outputs.league }}" \
+            --schedulerHeartbeat "${{ steps.params.outputs.scheduler_heartbeat }}" \
+            --slot "${{ steps.params.outputs.dispatch_slot }}" \
+            --wnbaEnabled "${WNBA_INGESTION_ENABLED}" \
+            --configLimit "${SHARPAPI_CONFIGS_PER_RUN}" \
+            --runScoring "${{ steps.params.outputs.run_scoring }}" \
+            --runBoard "${{ steps.params.outputs.run_board }}" \
+            --dryRun "${{ steps.params.outputs.dry_run }}" \
+            --publishPublicSnapshots "${{ steps.params.outputs.publish_public_snapshots }}" \
+            --pregameWindowHours "6" \
+            --pregameCloseBufferMinutes "5" \
+            --enabled "true"
+
+      - name: Cleanup private checkout (defense in depth; runner is ephemeral anyway)
+        if: always()
+        run: rm -rf private-covered
+
+# Do NOT add: upload-artifact of private-covered, actions/cache of it, `set -x`, env dumps,
+# pull_request / pull_request_target triggers, or any deploy step. See Session 18 leakage matrix.

@@ -2,6 +2,17 @@ import type { CoveredPickRow, ModelPerformanceFactRow, ModelPerformanceResponse,
 
 export const PUBLIC_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 
+/**
+ * Session 99: moved to lib/knowledge/eligibility-contract.ts so the SAME
+ * constant can be shared with the SCORE-ROW-level contract check
+ * (scoring-service.ts / read-service.ts), not just this snapshot-envelope
+ * layer -- Session 98's envelope-only guard proved insufficient on its own
+ * (see that module's own doc comment for the real production evidence).
+ * Re-exported here so every existing import of this name from this file
+ * keeps working unchanged.
+ */
+export { STRICT_ELIGIBILITY_CONTRACT_VERSION } from "@/lib/knowledge/eligibility-contract";
+
 export type PublicSnapshotRouteName = "covered-picks" | "parlay-options" | "model-performance";
 
 export type PublicSnapshotStatus = "published" | "degraded" | "fallback";
@@ -26,6 +37,15 @@ export type PublicSnapshotEnvelope<TRow> = {
   effectiveFilterScope: PublicSnapshotFilterScope;
   pipelineRunId: string | null;
   status: PublicSnapshotStatus;
+  /**
+   * Which strict-completeness eligibility contract (see
+   * STRICT_ELIGIBILITY_CONTRACT_VERSION above) this snapshot's rows were
+   * filtered under. `null`/absent means "written before this field existed" --
+   * an old, unversioned snapshot, which the read path must treat as an
+   * unknown/weaker contract and reject exactly like a mismatched value, never
+   * as an implicit pass.
+   */
+  eligibilityContractVersion: string | null;
 };
 
 /** Which stage a route's publication failed at, when determinable. */

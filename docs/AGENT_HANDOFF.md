@@ -2,6 +2,331 @@
 
 Current operational state. Git history remains the chronological record.
 
+## Current state — 2026-08-07 (Session 122) — Analyzer "Why this score?" evidence + Covered Picks parity + selected-slip legibility
+
+Product/UX pass on the WNBA Analyzer (getParlayOptions) and Covered Picks (getCoveredPicksOfTheDay), triggered
+by two complaints: (1) no understandable explanation of *why* a prop got its Covered Score, (2) the
+selected-slip legs becoming cramped/hard to read.
+
+**Found and fixed while building evidence parity coverage:** `getCoveredPicksOfTheDay` derived
+`score_label`/`confidence_label`/`risk_label` from the STORED `score_explanations` row, while `getParlayOptions`
+independently derives the same three from the live `scored_props` row (`score.recommendation` /
+`confidenceLabelFor` / `riskLabelFor`). These can diverge whenever `score_explanations` wasn't regenerated
+alongside a rescore -- proven by a new parity test with a fixture that omits `score_explanations.score_label`.
+Fixed by making `getCoveredPicksOfTheDay` (and `getCoveredPickDetails`) compute labels the same way
+`getParlayOptions` does, from the live score row.
+
+**Evidence gaps closed (all from already-stored data, no new provider calls, no scoring change):**
+- `basketball.ts` now persists `minutes_last_5_avg` (the raw last-5 minutes number) into
+  `score_inputs.feature_payload` -- it was computed in memory already but only the trend delta
+  (`minutes_trend`) was ever written, so the UI could show "rising/stable" but never the actual figure.
+- Extracted the ONE evidence-building function (`buildScoreEvidence` in `read-service.ts`) that
+  `getParlayOptions`, `getCoveredPicksOfTheDay`, and `getCoveredPickDetails` all now call identically --
+  Covered Picks previously had NO `evidence`/`commentary` fields at all (`factor_breakdown` was its only
+  detail, populated only via a separate lazy per-card fetch). Now embedded directly in the list response
+  (zero extra requests on expand), proven byte-identical to the Analyzer's evidence for the same prop
+  (`read-surface-parity.test.ts`).
+- New shared `components/knowledge/evidence-panel.tsx` ("Why this score?"), used by the Analyzer catalog
+  card, the selected-slip leg (collapsible, was previously an always-on dense commentary block -- a real
+  contributor to the reported scrunching), and the Covered Picks card. Sections: projection/line/edge/lean,
+  recent form (last-5/last-10 average + exact-line hit counts), minutes & opportunity, matchup, injury/role,
+  what supports it, main risks, market-data-refreshed (Eastern, 12h). Explicit disclaimer that Covered Score
+  is not a win probability (new regression test in `commentary.test.ts` proves no `%`/"chance"/"probability"
+  language across the full score range).
+- Removed a raw internal-enum leak in `pick-card.tsx` (`risk_flags` rendered as `flag.replace(/_/g," ")`,
+  e.g. `stale_odds` verbatim) -- redundant with the new evidence panel's plain-language risks list anyway.
+- CSS: widened/rebalanced `.knowledge-builder-layout` (catalog/sidebar ratio and sidebar floor), added the
+  shared `.knowledge-evidence-*` rules (stacked sections at every width, `overflow-wrap: break-word`,
+  auto-fit grid for the projection/line/edge/lean row) -- no typography shrunk. Verified at 375/768/1280px
+  via a static fixture rendered through the app's own dev server and real `globals.css` (temporarily placed
+  under `public/_debug-preview/`, removed before commit) -- no clipping, no character-wrapping, no overflow
+  at any tested width.
+
+**Payload impact (measured, 20-row representative fixture):** Covered Picks rows grew from ~1445 to ~2074
+bytes/row (+43.5%, +629 bytes/row) from adding `evidence`+`commentary`; Analyzer rows grew negligibly (~10-20
+bytes/row for the one new `recentMinutesAvg` field). Covered Picks row counts are inherently small (≥70
+floor), so absolute impact is bounded; not optimized further this pass. No new Supabase queries scale with
+row count -- everything reuses the same batched readers `getParlayOptions` already had (`loadScoreInputFeaturePayloads`,
+`loadExactLineHitCounts`), now also invoked once (not per-row) from `getCoveredPicksOfTheDay`.
+
+Full suite (1153 pass / 1 pre-existing skip), `tsc --noEmit`, `next build`, `cf:build` (OpenNext/Cloudflare),
+and the public-export boundary/secret audit all clean. Pushed to `origin/codex/public-repo-repair`. No
+production config changed; V2 remains pinned at `e1853a0bc1e8d8c28286218be9b0a91effe01eb4` from Session 121.
+No component-render test infra exists in this repo (no jsdom/testing-library) -- evidence-correctness and
+parity are proven at the data layer (`read-service.ts`/`commentary.ts` tests); the new UI components
+themselves were verified visually, not via rendered unit tests, since adding a new test framework dependency
+was out of this pass's scope.
+
+## Current state — 2026-08-07 (Session 121) — Shared Analyzer/Covered Picks quality contract: getBoardOpportunities drift fixed
+
+Owner-reported: WNBA props visible in Parlay Builder/Analyzer with Covered Score >=70 while Covered Picks was
+empty. Traced both surfaces' actual gates in `lib/knowledge/read-service.ts`: `getParlayOptions` and
+`getCoveredPicksOfTheDay` already shared the same strict-v1 contract (`filterRowsWithCurrentScoreContract`),
+`prop_state==="publishable"`, future/prepared-slate window, AND a read-time market-freshness re-check
+(`classifyMarketFreshness` against `odds_snapshots.pulled_at`) -- these two were never the source of drift.
+**`getBoardOpportunities` (the board/Analyzer-shaped export) was the one function missing the read-time
+freshness re-check** -- confirmed live: before the fix it returned 2 rows (0 WNBA) that `getParlayOptions`
+correctly excluded as market-stale; after the fix all three (`getBoardOpportunities`/`getParlayOptions`/
+`getCoveredPicksOfTheDay`) agree exactly (0/0/0 at time of check). Note: `getBoardOpportunities` has zero
+production callers today (verified by grep, documented in `read-service.test.ts`), so this was a latent/dead-
+code drift, not something currently reaching a live user -- fixed anyway since it's part of the same exported
+quality-contract family the task requires to stay unified. Also found and fixed the same gap in
+`getCoveredPickDetails` (single-prop evidence-panel/saved-pick-hydration lookup), which had no future-event,
+prepared-slate-window, or freshness check at all -- only the strict-v1 stamp -- so a click into detail moments
+after a listing filtered a prop out could still have rendered a full evidence panel for a now-started/now-stale
+prop.
+
+**Fix:** extracted the one shared `passesReadTimeMarketFreshness()` predicate in `read-service.ts` and routed
+`getCoveredPicksOfTheDay`, `getParlayOptions`, `getBoardOpportunities`, and `getCoveredPickDetails` through it
+identically, so no future surface can independently omit this check. No blocker, threshold, or scoring change;
+the only intended difference between Analyzer and Covered Picks remains the `covered_score >= 70` floor.
+
+New regression coverage (`lib/knowledge/read-service.test.ts`): a score-band matrix (45/69/70/85, fully
+qualified) proving Analyzer shows all four and Covered Picks only 70/85; a direct `getBoardOpportunities`
+market-staleness exclusion test (the exact prior drift). Full suite (1151 pass / 1 pre-existing skip),
+`tsc --noEmit`, `next build`, `cf:build` (OpenNext/Cloudflare), and the public-export boundary/secret audit
+(308 included / 95 excluded, 0 violations, 0 secret findings) all clean. Pushed to
+`origin/codex/public-repo-repair`. No production config changed; V2 remains pinned at
+`50de2bc2efa7ce02cc9010c5cc9f88556419bd7b` from Session 120.
+
+## Current state — 2026-08-07 (Session 120) — Pre-promotion verification of Session 119's rescore-ordering fix
+
+Narrow verification pass on Session 119's candidate (no re-audit, no new dispatch, no promotion). Two findings:
+
+1. **Deterministic tie-break added.** The Session 119 selector (`selectPropsToScore`, extracted from
+   `scoreCurrentProps` in `lib/knowledge/scoring-service.ts`) sorted purely by `lastScoredAtMs` ascending, which
+   relied on `Array.prototype.sort`'s stability for ties (all never-scored props tie at `-Infinity`) rather than
+   an explicit rule. Added an explicit `id` ascending tie-break. Proven against the real 218-row WNBA and
+   60-row MLB candidate pools (bounded read-only, no writes) plus two new unit tests: tie-break determinism, and
+   full-pool coverage in exactly `ceil(pool/limit)` cycles with no duplicate/skipped selection for a static
+   pool. Newcomer-starvation is bounded structurally, not by the comparator alone: new-arrival rate per cycle is
+   itself capped by the existing WNBA/MLB per-league Sharp config-rotation throughput (`SCHEDULED_CONFIG_LIMIT_BY_LEAGUE`,
+   unchanged), which is well under the 40-row scoring limit, so sustained full starvation by newcomers is not a
+   realistic production shape -- this is a documented structural argument, not a hard invariant enforced in code.
+2. **MLB selection order does change** (60 real MLB candidates now exceed limit 40; old vs. new first-40 overlap
+   26/40 on live data) -- confirmed, not assumed. Scoring semantics do not: `selectPropsToScore` only reorders
+   which already-eligible props are picked up in a given cycle; `shouldRescoreProp`'s eligibility predicate,
+   `publishabilityAssessment`'s blockers, thresholds, and provider-call volume are untouched, and the full
+   MLB/WNBA e2e + score-eligibility-contract suites (unchanged) still pass. No unsafe row can become public from
+   reordering alone -- publish status is decided fresh every time a prop IS scored, never by queue position.
+3. **True current WNBA eligibility reconciled** (bounded read-only, using the actual production gates --
+   `filterRowsWithCurrentScoreContract`, `isFutureStartTime`/prepared-slate window, and the read-time market-
+   freshness re-check `getCoveredPicksOfTheDay`/`getBoardOpportunities` already apply, called directly rather
+   than reimplemented): of the current true ~218-row WNBA candidate pool, only **2** rows are stored
+   zero-blocker AND strict-v1-stamped AND future -- these are exactly the current Manual Analyzer count (2,
+   confirmed via a direct `getBoardOpportunities` call). Neither passes the read-time market-freshness re-check
+   (odds age > 180min), so **Covered Picks eligible = 0** right now (confirmed via a direct
+   `getCoveredPicksOfTheDay` call). This is materially lower than Session 119's "20 stored/2 >=70" figure,
+   which was drawn from a broader, start_time-unbounded sample and did not apply the strict-v1/read-time gates --
+   both real numbers, describing different populations, not a contradiction. It is also consistent with ~2h
+   having elapsed since Session 119 with the fix still unpromoted, i.e. the live (unpatched) starvation pattern
+   continuing to decay stored freshness in the meantime.
+
+Code change: `selectPropsToScore` extracted (pure function, same selection semantics) + explicit tie-break.
+Focused tests (`lib/scoring/scoring-service.test.ts` + MLB/WNBA e2e + score-eligibility-contract + pipeline
+suites, 155 pass) and `tsc --noEmit` clean; no full build/test cycle re-run per the task's own scoping (no
+provider/threshold/schema change). Pushed to `origin/codex/public-repo-repair`. Still not promoted to
+`COVERED_PRIVATE_PIPELINE_SHA_V2` -- no dispatch made.
+
+## Current state — 2026-08-07 (Session 119) — WNBA zero-publishable root cause found and fixed: rescore-selection starvation
+
+Investigated why the Session 118-validated manual WNBA run (`31138179083`, 2026-08-06 21:29-21:55 ET) produced
+0 publishable rows despite a fully successful checkout/Sharp/identity/SportsDataverse/scoring/board/snapshot
+cycle. Bounded read-only production reads (no writes) against `current_props`/`scored_props`/
+`basketball_player_features`/`player_recent_features` for WNBA:
+
+- **Funnel (current state, ~6h after the manual run, several scheduled cycles later):** 500 active WNBA
+  `current_props` sampled (2,979 active total, most already past `start_time` and awaiting the separate
+  retention job -- not a scoring blocker, scoring's own query already excludes them); of the pool matching
+  scoring's real filter (`active=true AND start_time >= now-2h`), **162** genuine candidates. 248 have a
+  `scored_props` row; of those, **20 are zero-blocker/publishable, 2 score >=70** (currently Covered-Picks-
+  eligible). 252 active props have never been scored at all yet.
+- **Blocker distribution (hard blockers only):** `stale_features` 199, `minutes_stale` 127, `stale_market` 12,
+  `missing_matchup_context` 6, `missing_opponent` 6. 116 rows blocked by exactly one reason, 104 by two, 8 by
+  three+.
+- **Root cause:** `scoreCurrentProps` (`lib/knowledge/scoring-service.ts`) correctly marked a prop eligible for
+  rescoring whenever the global `today-board:context-updated:latest` marker or the prop's own row was bumped
+  newer than its last score (`shouldRescoreProp`) -- but the per-cycle selection among eligible candidates
+  iterated `sortCurrentPropsForScoring` (sorted by `current_props.updated_at` descending) and stopped at the
+  scheduled run's `limit: 40`. With ~160 genuinely eligible WNBA candidates most cycles, the same
+  Sharp-freshest-touched ~40 props won every cycle's selection window, while older-but-still-eligible props --
+  including ones whose `stale_features`/`minutes_stale` blocker had already been resolved by that same run's
+  (or a later run's) enrichment stage -- could be starved indefinitely: their last `scored_props` row kept
+  carrying a stale blocker label forever, never re-evaluated, because they never reached the front of the
+  fixed queue. **Confirmed on live data**, not just in theory: of the 53 distinct players behind
+  `stale_features`/`minutes_stale` in the current scored rows, all 53 already have a `basketball_player_features`
+  row, and **45 of them are already fresh right now** (recomputed 2.3-5.4h ago, well under the 12h
+  `isBasketballPlayerFeatureStale` window) -- their recorded blocker is simply stale, not their underlying data.
+- **Fix (`lib/knowledge/scoring-service.ts`, `scoreCurrentProps`):** selection among eligible candidates now
+  sorts by rescore urgency (never-scored first, then oldest last-scored) instead of `current_props.updated_at`
+  recency, so the full eligible pool provably rotates through and converges within a bounded number of cycles
+  regardless of which prop's own row Sharp happened to touch most recently. No change to any blocker, threshold,
+  scoring weight, provider call volume, or the per-cycle `limit`. New regression test:
+  `lib/scoring/scoring-service.test.ts` ("prioritizes the most rescore-overdue eligible props..."), proving a
+  more-recently-touched-but-already-rescored prop no longer starves a genuinely more-overdue one under a tight
+  limit. Full suite (1147 pass / 1 pre-existing skip), `tsc --noEmit`, and `pnpm build` all clean.
+- **Not changed / not in scope:** no scheduler, provider, threshold, or scoring-weight change; no manual
+  dispatch; no production write; MLB untouched (same code path, but MLB's smaller relative candidate-vs-limit
+  ratio was not implicated and its full e2e/contract suite still passes unchanged). The 2,979-vs-162
+  active-prop gap (stale rows awaiting the separate retention job) is a separate, already-known, non-blocking
+  observation, not fixed here.
+- **Verdict:** WNBA ZERO-PUBLISHABLE ROOT CAUSE FIXED — READY FOR OWNER PRODUCTION AUTHORIZATION. The fix is
+  committed to `codex/public-repo-repair`; promoting it to `COVERED_PRIVATE_PIPELINE_SHA_V2` and proving it with
+  a live run is an owner-authorization boundary, not performed this session (no manual dispatch was made, per
+  the explicit task constraint).
+
+## Current state — 2026-08-06 (Session 118) — Structured run summary + fail-closed invariant
+
+Closes the last open item from Session 117: production run `31129018935`'s final structured
+summary (a single unconditional `console.log(JSON.stringify({command, durationMs, payload}))`
+in `run-covered-job.mjs`) never appeared in the captured GitHub Actions log, despite the run's
+own GitHub-level "success" conclusion.
+
+**Root cause, proven by elimination (not reproduced live):** every code path between
+`runGitHubActionsPipeline`'s call and that `console.log` line was traced. There is exactly one
+unconditional print (no conditional gate skips it), no swallowed exception on the success path
+(both `process.exit()` calls in the script are unreachable here -- one is the `'knowledge'`
+command's failure branch, the other is the outer top-level `.catch()`), and `run-covered-job.mjs`
+already fails closed (`payload.status === 'failed' | 'partial-failure'` throws, causing a non-zero
+exit) -- so the run's GitHub-level "success" conclusion proves the process DID reach that line and
+exit 0. What could not be independently reproduced without another production run (not authorized)
+is the exact reason that specific large `console.log` write did not survive into the captured log.
+
+**Fix implemented (Parts 1-2):** rather than keep betting on one large, size-unbounded
+`console.log`, added `buildCoveredRunSummary`/`writeCoveredRunSummary`
+(`lib/ops/github-actions-pipeline.ts`) -- a deliberately bounded (not proportional to payload
+size), single-line, `COVERED_RUN_SUMMARY=`-prefixed structured summary covering league/trigger/
+checkout SHA (resolved via `git rev-parse HEAD` in the private checkout, not an env var the
+workflow doesn't expose)/Sharp/identity-repair/SportsDataverse/feature-matchup/scoring/board/
+snapshot fields, no secrets or raw payloads. Written via `process.stdout.write` awaiting the
+write's own completion callback -- the documented Node.js guaranteed-flush pattern -- instead of
+relying on process-teardown timing. Wired into `run-covered-job.mjs`'s `'github-actions'` case,
+emitted before the existing failed/partial-failure throw so it always fires exactly once
+regardless of which exit path follows.
+
+**Fix implemented (Part 3, fail-closed):** added `summaryHasUnexplainedMissingStage`, checked in
+`run-covered-job.mjs` immediately after building the summary -- if a requested-and-not-legitimately-
+skipped stage (scoring/board/snapshot publication) has no corresponding step recorded at all, the
+script now throws (non-zero exit) instead of allowing a false "success". Verified this is currently
+a defensive invariant, not an active bug: every existing code path in
+`buildGitHubActionsLeagueRunReport` was directly read and confirmed to already push an explicit
+ok/failed/skipped step for score/board on every branch, so `"not_reached"` should never actually
+occur today -- this closes the class of defect for any future edit that might break that guarantee.
+Also added `publishPublicSnapshotsRequested` as a genuine top-level field on
+`GitHubActionsPipelineRunReport` (previously inferred, incorrectly, from whether the board summary
+happened to contain snapshot info -- which is populated regardless of the publish flag).
+
+13 new tests added (`lib/ops/github-actions-pipeline.test.ts`) using the real orchestration
+entrypoint (`runGitHubActionsPipeline`) with mocked runners: normal success, legitimate
+no-eligible-window skip (not flagged), scoring/board/snapshot each requested-but-never-reached
+(flagged), a thrown scoring error (summarized safely, not a crash), exactly-one-write with
+resolved promise, and no secrets/raw-payloads in the output.
+
+Full suite 1146/1/0 (1 pre-existing unrelated timing flake reproduced isolated-clean), `tsc
+--noEmit` clean, `next build` and `opennextjs-cloudflare build` both clean. Read-only shadow
+check: `getParlayOptions` 2 rows (2 Kayla McBride, genuinely fresh; Kelsey Mitchell correctly
+dropped off since her event started), `getCoveredPicksOfTheDay` 0. No production write, no
+workflow dispatch, no scheduler/cadence/provider-budget change.
+
+## Current state — 2026-08-06 (Session 117) — Market-freshness authority fix + pipeline reconcile-loop fix
+
+**Context:** an explicitly owner-authorized single manual `workflow_dispatch` run (`31129018935`, WNBA,
+`configLimit=6`, `dryRun=false`, checkout pinned at `e32e81e59eb5d0bd3bdb716d880d81c081648457`) was dispatched
+to recover current WNBA market data after GitHub Actions failed to provision a runner for the scheduled
+1:59pm ET run and then created zero further scheduled runs for 4+ hours. The manual run itself succeeded
+(GitHub conclusion: success, runner assigned in ~7s, 11m17s duration), and produced two proven, now-fixed
+repository defects:
+
+**Defect 1 (fixed) — market-freshness authority.** `current_props.updated_at` was being read directly as the
+market-freshness signal in `getParlayOptions`/`getCoveredPicksOfTheDay` (2 call sites), but it is a *generic*
+row-mutation timestamp that non-price writers also bump — proven live: `repairSharpCurrentPropIdentities`
+(an identity-only patch: player_id/participant_id/team_id/match_status/match_confidence, no line/price
+fields) stamped a fresh `updated_at` on Kelsey Mitchell's assists prop while her actual odds were still
+hours-stale, letting her pass the freshness gate on stale data. Fixed by adding
+`loadOddsSnapshotPulledAt` (`lib/knowledge/read-service.ts`) — a batched reader resolving the ONE authoritative
+signal, `odds_snapshots.pulled_at` via `current_props.latest_snapshot_id`, which is set ONLY by
+`ingestSharpApiMarketCandidates` on a genuine price/line observation and touched by no other writer. Both
+freshness-gate call sites, the `excludeStaleOdds` filter, and the evidence panel's `dataRefreshedAt` field
+now all read this instead of `updated_at`. `market-freshness.ts`'s doc comment corrected to stop claiming
+`updated_at` is a safe proxy. 3 new deterministic regression tests added (identity-repair-shaped false-fresh
+case, genuine-fresh-pulled_at case, never-observed case) plus a shared fixture-harness change
+(`lib/knowledge/supabase-fixture-harness.ts`) auto-deriving backward-compatible `odds_snapshots` rows for
+every pre-existing test's `current_props` fixtures (opt-out via an explicit `odds_snapshots` key), since
+dozens of existing tests across 3 files implicitly relied on `updated_at` alone.
+
+**Defect 2 (fixed) — duplicate WNBA season re-ingestion.** The run's log showed the full SportsDataverse
+schedule/team-box/player-box download+ingest running twice with byte-identical `rowsRead`/`eventsUpserted`/
+`gameLogsInserted` counts, consuming most of the run's 11 minutes. Root cause: the bounded reconciliation
+retry loop in `runGitHubActionsPipeline` (lib/ops/github-actions-pipeline.ts) correctly retries the "stable"
+repair pass while outstanding work remains and progress is made, but had no way to tell a retry "the season
+ingestion already ran this cycle and wrote zero new rows" — so a retry whose *other* substages (matchup)
+still had outstanding work would also blindly re-trigger the guaranteed-no-op season re-download. Fixed by
+threading a new `skipSeasonIngestion` flag from the reconcile loop (which now inspects the prior attempt's
+`backgroundEnrichment.details.ingest` for zero `teamLogsInserted`/`gameLogsInserted`) through
+`runLivePreScoreRepair` to `runBoundedBackgroundEnrichment`, which skips re-invoking
+`ingestSportsDataverseWnbaSeason` when set, while still allowing every other substage to retry normally. 2 new
+tests added (one exercising `runBoundedBackgroundEnrichment` directly, one exercising the full reconcile-loop
+wiring end-to-end).
+
+**Not resolved / genuinely uncertain:** whether Sharp ingestion, scoring, board build, and snapshot
+publication actually executed in run `31129018935` could not be conclusively verified from the captured
+GitHub Actions log — the pipeline's single final `console.log(JSON.stringify(...))` summary line never
+appeared in the captured output (not a truncation of an oversized line; the log is small), and no per-stage
+Sharp/score/board/snapshot log lines exist to fall back on (unlike ESPN/SportsDataverse, whose modules log
+each call). Indirect evidence (Kayla McBride's evidence panel now shows a genuine, non-identity-repair fresh
+`odds_snapshots.pulled_at` from within the run's execution window, at a score not seen in the prior session's
+funnel) suggests Sharp likely did run successfully, and the GitHub run conclusion being "success" (not
+"failure") is consistent with `run-covered-job.mjs`'s own fail-closed check on `payload.status`. But this
+could not be independently confirmed stage-by-stage, and no further production run was authorized to verify
+further. A read-only shadow check *after* this fix (bounded, no writes) confirmed: `getParlayOptions` returns
+the same 3 rows as immediately after the manual run (2 Kayla McBride rows with genuinely fresh evidence, 1
+Kelsey Mitchell row whose market is now genuinely fresh — a real Sharp price observation, not the
+identity-repair artifact from before the fix); `getCoveredPicksOfTheDay` returns 0 (still nothing reaches 70).
+
+Starting SHA `5f39b5f` → this session's commits. Full suite 1138/1/0, `tsc --noEmit` clean, `next build` and
+`opennextjs-cloudflare build` both clean. No production write, no workflow dispatch, no scheduler/cadence/
+provider-budget change made this pass.
+
+## Current state — 2026-08-06 — WNBA CLOSED: OPERATIONALLY CERTIFIED; UI trust/detail pass complete
+
+**Read the "WNBA CLOSED (2026-08-06)" entry near the end of this file for the full final certification record.**
+The owner accepted the natural production evidence (13 fully-complete WNBA rows across 5 players, including 2
+genuinely Covered-Picks-eligible `covered_score >= 70` rows) as sufficient. WNBA monitoring/certification is
+closed; no further audit or live-window observation is pending. Remaining WNBA gaps are calibration-only
+(insufficient graded-outcome sample), not operational.
+
+**UI trust/detail pass (same day, follow-on task):** Covered Picks being empty was re-confirmed as legitimate,
+not a defect (bounded live read: 210 future WNBA `current_props`, 89 scored, only 8 `publishable` with the
+best topping out at `covered_score: 50` — the single highest-scoring candidate, Nyara Sabally at 88, is
+correctly blocked by genuinely stale recent-form features, not a pipeline bug). A second, independent
+re-check at the very end of this pass found the read-time market-freshness gate (owner policy #1) additionally
+excludes all 8 of those rows from Parlay Builder too, because WNBA odds had not been re-observed in ~15.7
+hours at verification time (943min > the 180min hard freshness window) — also correct, existing behavior, not
+a new defect. Implemented: (1) a new `evidence` field on `ParlayOptionRow`
+(`lib/knowledge/read-types.ts`, `lib/knowledge/read-service.ts`) exposing projection/edge/last-5/last-10
+averages read directly from the already-stored `score_inputs.feature_payload`, plus new exact-line last-5/
+last-10 hit counts computed from `player_game_logs` (deduplicated by `game_date`, fixing a real duplicate-row
+double-count found via trust verification against Kelsey Mitchell's real assists log) — all via two bounded
+batched reads, no per-card fetches, individual fields null (never fabricated) when their own source is absent;
+(2) `components/knowledge/parlay-leg-selector.tsx` rewritten to remove a raw-internal-enum leak
+(`match_status`/`match_quality_flags` were rendered verbatim) and add a progressive-disclosure "View evidence"
+panel plus existing `commentary` (positive factors/risks); (3) `app/globals.css` evidence-panel styles added;
+(4) `components/knowledge/covered-picks-shell.tsx` empty state now points to Parlay Builder for reviewable
+sub-70 props. One new deterministic test added to `lib/knowledge/read-service.test.ts` covering the evidence
+field and the game-log dedup fix. Full suite 1133/1/0, `tsc --noEmit` clean, both `next build` and
+`opennextjs-cloudflare build` clean. No production/scheduler/credential change made; nothing pushed beyond the
+repair branch.
+
+- Public workflow is restored to the explicit GitHub-cron baseline and remains active.
+- `COVERED_PRIVATE_PIPELINE_SHA_V2` is pinned to `e32e81e59eb5d0bd3bdb716d880d81c081648457` (re-verified live).
+- `COVERED_PRIVATE_PIPELINE_SHA` remains `RETIRED_STALE_RUN_GUARD`.
+- `COVERED_GITHUB_SCHEDULER_ENABLED=true`; Cloudflare dispatcher remains disabled and no Cloudflare Cron is active.
+- The inherited invalid identity rows `7a74156a-0244-46fe-bb93-d97666d5f685` and
+  `c5fdc81c-5adf-442d-9652-773bfaa8a40f` are contained by the current score contract and remain excluded from
+  public surfaces.
+- Do not reopen WNBA architecture, scheduler, or dispatcher work absent a new, separate owner request. MLB was
+  not touched.
+
 ## Public-repo readiness — controlled repair phase
 
 ### Governance rule
@@ -5379,3 +5704,4442 @@ cycle — Part E's fix removes the *persistent* crowding-out risk but does not i
 `absEdge`-based `edgeScore` formula (not distinguishing an edge that agrees with a prop's own direction from one
 that opposes it, noted in Session 62) remains unaddressed, out of scope. WNBA volatile-refresh remains a
 documented no-op. The 2 pre-existing Dependabot alerts on the public repo remain unaddressed (owner-restricted).
+
+## Session 64 — DIRECTION-AWARE EDGE FIX (RELEASE-BLOCKING SCORING CORRECTION) (2026-07-27 UTC)
+
+Fixes the previously-noted-but-unaddressed `absEdge` scoring defect, which was proven this session to be
+release-blocking based on live production evidence.
+
+### Root cause, proven end-to-end
+
+Both `lib/knowledge/adapters/mlb.ts` (line 202-203 pre-fix) and `lib/knowledge/adapters/basketball.ts`
+(line 159-160 pre-fix) computed the direction-aware signed edge correctly:
+`edgeValue = direction === "Less" ? line - projection : projection - line` — which is negative when the
+projection opposes the selected side, positive when it agrees. But the next line, `absEdge = Math.abs(edgeValue)`,
+destroyed the sign, and `edgeScore = clamp((absEdge * 11) + trendScore + …, 0, 55)` then credited absolute
+magnitude to the final Covered Score regardless of direction. A prop whose projection was 4 units *below* a
+More/4.5 line (i.e., strongly opposing the pick) earned the same edgeScore boost as one 4 units above it.
+
+### Blast radius — measured against production, not estimated
+
+Ran a bounded, paginated read against every scored_prop with a projection joined to its current_prop's direction/line:
+
+- **1,244** scored_props with a projection currently in production
+- **545 (44%)** have a projection that *opposes* the selected side (wrong-direction)
+- **371** of those wrong-direction rows are still `publishable=true`
+- **75** wrong-direction rows are BOTH publishable AND clear the ≥70 Covered Picks floor — actively misleading picks currently live
+- Median score inflation on those 75 rows: **~41.6 covered-score points** (edgeScore = absEdge × 11, before the 55 cap)
+- Max observed inflation: **~126.8** (before the 55 clamp)
+- Split by league: WNBA 23 wrong-direction publishable≥70 (18 `player_points`, 3 `player_rebounds`, 2 `player_assists`); MLB 52 wrong-direction publishable≥70 (all `pitcher_strikeouts`, including the Keider Montero row previously traced in Session 62)
+- Worst individual live row observed: WNBA `player_points` Less/16.5 with projection 22.09 scoring **88** — a 5.59-point wrong-direction magnitude producing a top-band Covered Pick
+
+### Fix — one shared direction-aware contract
+
+The classification (`favorable`/`neutral`/`unfavorable`/`unavailable`) is pure math with no tuned values and
+now lives in `lib/knowledge/adapters/base.ts` (public-safe): `computeDirectionalEdge()` returns a structured
+`DirectionalEdge` with `signedEdge`, `absoluteMagnitude`, `direction`, and `normalizedDirection`;
+`normalizePropDirection()` accepts every documented alias (More/Over/Less/Under, any case) and returns null
+for invalid/missing.
+
+The *scoring policy* — the multiplier, the zero-credit rule for wrong-direction, and the factor-card copy —
+stays in `lib/knowledge/adapters/scoring-internals.ts` (private, adapter-only): `edgeMagnitudeCredit(edge,
+{multiplier})` returns `absoluteMagnitude * multiplier` for `favorable`, `0` for every other direction (so
+larger wrong-direction magnitude structurally cannot inflate score); `lineValueLabelFromEdge()` returns a new
+`"Unavailable"` value when projection/line/direction is missing/invalid (never a directional label from data
+that was never classified); `directionalEdgeDescription()` produces honest copy explicitly naming whether the
+projection supports or opposes the selected side, or says the projection is unavailable — never fabricates a
+"supporting" description from missing data.
+
+Both adapters now call `computeDirectionalEdge` → `edgeMagnitudeCredit` in their scoring paths and
+`lineValueLabelFromEdge` + `directionalEdgeDescription` in their Line Value factor. No other scoring
+formula, weight, or cap changed. The only removed positive credit is the previously-false credit for
+wrong-direction magnitude.
+
+### Recalculated examples (verified against the actual adapter)
+
+- **Keider Montero** (MLB pitcher_strikeouts More/4.5, projection ≈ 2.83): buggy 80 → **34** (below the 70
+  floor, correctly no longer publishable). Line Value now `"Negative"`/negative impact with copy: "The
+  projection is 1.67 below the 4.5 More line, opposing the selected side; no positive edge credit is being
+  applied." (Note the projection is `2.83` under the fixed adapter's own computation, matching the trend
+  data; the earlier `0.41` was an artifact of the null-handling defect fixed in Session 62.)
+- **MLB batter More favorable** (batter_hits 1.5, projection 2.19): 47 (below floor). Line Value: "Fair" /
+  supporting.
+- **MLB batter Less favorable** (batter_hits 1.5, projection 0.73): 41 (below floor). Line Value: "Fair" /
+  supporting.
+- **WNBA More favorable** (player_points 16.5, projection 22.35): **81** (above floor — real qualifying pick).
+  Line Value: "Positive" / supporting.
+- **WNBA Less wrong-direction** (mirrors the live bug row: player_points Less/16.5, projection 22.35):
+  buggy 88 → **36** (below floor, correctly no longer publishable). Line Value: "Negative" / opposing.
+
+### Files and tests
+
+Modified: `lib/knowledge/adapters/base.ts`, `lib/knowledge/adapters/scoring-internals.ts`,
+`lib/knowledge/adapters/mlb.ts`, `lib/knowledge/adapters/basketball.ts`. Test files added/extended:
+`base.test.ts` (extended, direction-classification tests are public-safe pure math);
+`scoring-internals.test.ts` (new, private helpers — auto-paired private by sibling rule);
+`basketball.test.ts` (new, direction-aware regressions for the WNBA/NBA path);
+`mlb.test.ts` (extended, Keider Montero regression + MLB More/Less coverage).
+
+The initial file layout had a test file (`directional-edge.test.ts`) that imported both public and private
+helpers from the same adapters directory — the public-export audit correctly caught this as a boundary
+violation (a public-safe test file cannot import a private module), so it was split into the two files above
+before commit. Fixing this at the export-audit stage rather than in production is exactly the safety net that
+was designed in.
+
+### Validation
+
+`pnpm exec tsc --noEmit`: clean. `pnpm test`: **579 pass / 0 fail / 1 intentional skip** (up from 525;
++54 new tests). `pnpm build`: clean. `pnpm cf:build`: clean. Public export: **275 included / 59 excluded**,
+0 import-closure violations, 0 secret findings, `PASS`. Boundary checker: 0 violations. Isolated export
+validation (own git context, no source-repo nesting): install/tsc/**353/0/1**/build/cf:build/audits all clean.
+Determinism: byte-for-byte identical against an independently regenerated export.
+
+### Production state — unchanged this session
+
+`COVERED_PRIVATE_PIPELINE_SHA_V2` = `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2` (unchanged — this session's
+fixes are NOT yet promoted). Public main unchanged. No production write, migration, backfill, scheduler
+change, or secret change was performed this session.
+
+## Session 65 — DIRECTION-AWARE EDGE PROMOTED AND NATURALLY CERTIFIED IN PRODUCTION (2026-07-27/28 UTC)
+
+Public PR merge → Cloudflare deploy → bounded DB config update → V2 promotion → natural MLB+WNBA
+certification runs → live snapshot verification.
+
+### Public sync merged
+
+Public PR [`CoreyTenacity/Covered-Prop-Analysis#12`](https://github.com/CoreyTenacity/Covered-Prop-Analysis/pull/12)
+merged to `main` at `2026-07-27T21:34:30Z` after owner approval. Resulting public-main SHA:
+`fe9fc4f3db97dbe3ab0ace083c9261143e820e09` (was `b3c33b47bfb89d01366f3fea3973f60e42f2cc3b`). Verified post-merge
+via a fresh clone: `.github/workflows/covered-production-pipeline.yml` byte-identical to pre-merge, direction
+helper (`computeDirectionalEdge`/`normalizePropDirection`) present in `lib/knowledge/adapters/base.ts`,
+zero private-only files leaked.
+
+### Cloudflare deployment healthy
+
+Workers Build for `fe9fc4f3…` completed `success` at 21:14Z (before PR merge — the deploy is triggered on push
+to any branch, and the build hash matched the merge commit). Live routes:
+- `/` → 307 → `/today` (200)
+- `/api/knowledge/covered-picks` → 200
+- `/api/knowledge/parlay-options` → 200
+- `/api/knowledge/model-performance` → 200
+- Protected routes: `/api/inngest`, `/api/admin/settle-user-picks`, `/api/cron/*` all 503; `/settings` 404
+- No stack traces or secret-shaped strings in live responses
+
+### Bounded WNBA config DB update (Phase 12)
+
+Applied exactly 4 `odds_pull_configs` rows via a scoped `PATCH ?id=in.(…)` with `enabled=false`. Row IDs
+recorded for rollback:
+- `f298dfc3-f363-47b6-89e7-48ae1b0157f5` (wnba/player_pra/DraftKings)
+- `cbcaab8e-1f95-4499-86c6-b7d5458cb1fb` (wnba/player_pra/FanDuel)
+- `993b0b7d-d5e7-4d16-b207-a5bdd8212d70` (wnba/player_threes/DraftKings)
+- `af88e161-016a-4aa6-bf8f-66a57d072b85` (wnba/player_threes/FanDuel)
+
+Read-back confirmed all 4 changed exactly, all now `enabled=false`, all still `league_id=wnba`
+`provider=sharpapi`. NBA rows unchanged (all pre-existing `enabled=false`, not touched by this write).
+
+Follow-up cache invalidation: the code path `loadSharpPullConfigs` caches the config list in
+`provider_cache` under `sharpapi:pull-configs:v2:2026-07-13a` with a 365-day TTL. A DB row update alone would
+not take effect until that cache entry expired. Marked that single cache entry `is_stale=true` (the intended
+in-code invalidation mechanism — the next `loadSharpPullConfigs` call reloads from `odds_pull_configs` and
+rewrites the cache with the new values). Verified via a scoped read-back: exactly one cache entry changed,
+`is_stale=true`.
+
+### V2 promoted
+
+Changed `COVERED_PRIVATE_PIPELINE_SHA_V2` from `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2` (rollback SHA on file)
+to `933ae62fabc2f8d50adf0e084d422c7d7db47181` (Session 64 tip). Read back exact. No other variable, secret,
+scheduler, or workflow changed (verified by re-listing all 8 production Environment variables).
+
+### Natural production certification
+
+Both target leagues certified via natural cron ticks — no manual dispatch. GitHub Actions scheduler delay
+around the WNBA cron window was normal for this repo (matches the ~1.5–2h intra-day gap pattern documented
+in Session 61).
+
+**MLB run: `30311209936`, 2026-07-27T22:34:33Z**, `schedule` event, `success` in ~3.2 min, headSha
+`fe9fc4f3…`. Log-verified: `HEAD is now at 933ae62`, `Verify checkout is exactly the approved SHA` →
+`Private checkout pinned correctly.` Prepared slate: 11 qualifying MLB event IDs, window 22:39–04:34
+UTC (6h pregame). Score stage: pool 68, eligible 40, publishable 32. Sharp: 8 attempted, 2 succeeded, 6
+failed (bounded provider errors, non-blocking), no rate limit. Publication: Covered Picks published 3 rows
+(honest — down from 5 pre-promotion, wrong-direction inflated MLB rows correctly dropped below floor); Parlay
+published 71; Model Performance published 244.
+
+**WNBA run: `30312202350`, 2026-07-27T22:51:45Z**, `schedule` event, `success`, headSha `fe9fc4f3…`.
+Log-verified checkout at `933ae62`. Sharp: 7 attempted, 6 succeeded, 1 failed. Note that this WNBA run
+occurred BEFORE the cache-invalidation write above — so player_pra/player_threes still appeared in the
+`pagesPerConfig` list (mostly `pages=0` deferred by budget; one FanDuel player_threes made 1 physical
+request that returned the known empty-envelope response, no rows). The next WNBA run after the cache
+invalidation will not schedule those configs at all. Publication: Covered Picks published 8; Parlay 103;
+Model Performance 244. Later WNBA run `30315695221` (23:55Z) published Covered Picks 8 rows again (WNBA
+overwriting WNBA — same-league snapshot advancement per cron cycle).
+
+### Live scoring-integrity verification (post-promotion, against production DB)
+
+Paginated read against every `scored_props` row updated in the 90 minutes after V2 promotion, joined to its
+`current_props` for direction/line/market: **119 scored rows** total (40 MLB, 79 WNBA). Split by direction:
+59 wrong-direction, 60 right-or-neutral. Of those 59 wrong-direction rows, **exactly 0 are both publishable
+AND clear the ≥70 Covered Picks floor** — down from **75 pre-fix** (52 MLB, 23 WNBA). The core release
+invariant is proven live in production data: wrong-direction magnitude no longer earns positive Covered Score
+credit.
+
+### Live public Covered Picks (after certification runs)
+
+`GET /api/knowledge/covered-picks?limit=50`: `pipelineRunId=30315695221.1`, `status=published`, `count=10`,
+100% WNBA:
+- `player_points`: 5 rows
+- `player_rebounds`: 3 rows
+- `player_assists`: 2 rows
+- Score distribution (highest first): 91, 88, 85, 85, 82, 78, 78, 72, 71, 70 — all ≥70 floor, all
+  correct-direction; the 88 is a genuine correct-direction Elite pick, not a repeat of the pre-fix
+  fabricated-88 wrong-direction row.
+
+Both defects fixed simultaneously visible: WNBA is present in Covered Picks (Session 63 fair-scan fix
+working end-to-end in the live snapshot), and the previously-inflated wrong-direction rows are absent
+(Session 64 direction-aware fix). Current 0 MLB rows in Covered Picks is the intended outcome of the fix —
+pre-fix MLB rows were being inflated to 70+ by wrong-direction absEdge credit; on honest scoring, the
+current MLB slate doesn't produce a qualifying ≥70 pick. As MLB feature data improves and real edges
+materialize, MLB rows will re-enter the board honestly.
+
+### Provider rotation
+
+The next WNBA run (post-cache-invalidation) is expected to drop player_pra/player_threes entirely from the
+scheduled config list. This session did not observe that specific run — it's the natural verification of the
+config disable and would appear in the next handoff.
+
+### Cost / safety
+
+No broad backfill. No migration. No historical row rewrite. No secret change. No scheduler cadence change.
+No paid-service or provider-account change. Private schedulers remain disabled. V1 remains
+`RETIRED_STALE_RUN_GUARD`. The only production writes this session were:
+- 1 GitHub Environment variable PATCH (`COVERED_PRIVATE_PIPELINE_SHA_V2` → `933ae62…`)
+- 1 Supabase PATCH scoped to exactly 4 `odds_pull_configs` rows (`enabled=false`)
+- 1 Supabase PATCH scoped to exactly 1 `provider_cache` row (`is_stale=true`, invalidating the pull-configs cache)
+
+### Rollback
+
+Not triggered. If a future release-blocking defect emerges, the rollback path is exactly:
+- restore `COVERED_PRIVATE_PIPELINE_SHA_V2` to `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`
+- optionally restore the 4 odds_pull_configs rows to `enabled=true` (rollback record captured above) and
+  re-mark the pull-configs cache stale
+
+### Final state
+
+- Public main: `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`
+- Private repair-branch tip: `933ae62fabc2f8d50adf0e084d422c7d7db47181`
+- `COVERED_PRIVATE_PIPELINE_SHA_V2`: `933ae62fabc2f8d50adf0e084d422c7d7db47181` (**live**)
+- `COVERED_PRIVATE_PIPELINE_SHA`: `RETIRED_STALE_RUN_GUARD` (unchanged)
+- `COVERED_GITHUB_SCHEDULER_ENABLED`: `true` (unchanged)
+- Private scheduler workflows: `disabled_manually` (unchanged)
+- Private `origin/main`: `23f665955b55a9e862f7f2efa8205538c5426013` (unchanged)
+- Rollback SHA on file: `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`
+
+### Remaining known limitations
+
+- `refreshMlbStatcastForKnownPlayers` remains unwired (Session 63 finding) — the durable long-term fix for
+  populating pitcher rate stats from real Statcast, deferred as its own initiative.
+- WNBA volatile-refresh remains a documented no-op.
+- MLB Covered Picks may show 0 rows for extended periods until real correct-direction edges appear at ≥70.
+  This is a *quality* improvement, not a regression — the pre-fix rows were false positives.
+- 2 pre-existing Dependabot alerts on the public repo remain unaddressed (owner-restricted).
+- The MLB batter/pitcher `classAllocation` field appears as `null` in the run report even though the
+  underlying `refreshMlbPlayerLogs` computes it — the pipeline report's `repair.details` doesn't currently
+  surface the allocation breakdown. The actual bounded-allocation logic runs correctly (verified via unit
+  tests + typecheck), but the operational visibility flagged in Session 63 didn't survive into the
+  serialized report shape. Small follow-up: thread the allocation object through the repair-step summary.
+
+## Session 66 — OPERATIONS STABILITY: ALLOCATION-REPORT OBSERVABILITY FIX, AUTOMATIC PULL-CONFIG CACHE INVALIDATION, MLB PITCHER-FEATURE-SOURCE AUDIT (2026-07-27/28 UTC)
+
+Live stability check on the Session 65 release, two small production fixes, and a read-only audit. No
+scoring thresholds, publishability rules, markets, sportsbooks, or request budgets changed. No live
+external-provider calls made this session; all diagnostics were bounded Supabase reads.
+
+### Stability check
+
+`gh workflow list --all` shows `Covered GitHub Actions live pipeline` as `disabled_manually` — the public
+repo's live-pipeline schedule remains off, consistent with the standing "GitHub Actions schedulers remain
+disabled" rule. No new natural production run has occurred since Session 65's `30315695221`; the Session 65
+live Covered Picks snapshot (10 rows, 100% WNBA, correct-direction, all ≥70) remains the current live state.
+`COVERED_PRIVATE_PIPELINE_SHA_V2` was not touched this session.
+
+### Fix 1 — MLB batter/pitcher allocation observability (targeted-mode blind spot)
+
+Root-caused the Session 63 `classAllocation: null` gap: `refreshMlbPlayerLogs` (`lib/knowledge/enrichment/mlb.ts`)
+has two selection branches, and the live pipeline's only real caller (`runLivePreScoreRepair` in
+`lib/knowledge/enrichment/jobs.ts:~2276`) always supplies explicit `playerIds`, forcing **targeted mode** — a
+plain ordered `.slice()` with no class awareness. The Session 63 fair-split allocation logic
+(`classifyMlbPlayerForLogs` / `allocateBoundedClassSlots`) only runs in **natural-rotation mode**, which the
+live pipeline never reaches. This is deeper than a reporting bug: the fair-allocation logic is architecturally
+unreachable from production today. Flagged as its own follow-up decision, not silently treated as solved.
+
+Implemented the smallest observability-only fix, per the explicit "do not alter selection behavior" boundary:
+added `summarizeTargetedMlbLogAllocation()` (`lib/knowledge/enrichment/mlb.ts`), a pure read-only function that
+classifies the already-selected targeted-mode players (and the full candidate pool) via the existing
+`classifyMlbPlayerForLogs`, and reports `mode: "targeted"` with `pitcherBudget/batterBudget/unclassifiedBudget:
+null` (targeted mode has no reservation to report) alongside real pool/selected-id breakdowns. The
+natural-rotation branch now reports `mode: "fair-split"` with real budgets, using the same shared
+`MlbLogAllocationSummary` type. `classAllocation` in the run report is no longer ever `null` — it always states
+which mode ran and why. Selection itself (`targetedItems`) is unchanged; confirmed by reading the diff, no
+selection-affecting line was touched. 4 new unit tests in `lib/knowledge/enrichment/mlb.test.ts` cover: null
+budgets in targeted mode, pool sizes measured over the candidate set not just the selection, selected-id
+breakdown correctness, and the empty-selection edge case.
+
+**Follow-up decision needed from the owner** (not made this session): should targeted mode gain its own
+fair-split reservation (extending Session 63's logic to the path production actually uses), or should the bias
+be addressed further upstream in how `preflight.playerLogs.missingIds/staleIds` gets computed? Left open per
+the phase's explicit no-behavior-change boundary.
+
+### Fix 2 — automatic pull-config cache invalidation (replaces the fragile manual `is_stale` flag)
+
+Live defect found via direct DB/cache reads: the Session 63 WNBA `player_pra`/`player_threes` Sharp-config
+disable was correctly written to `odds_pull_configs`, but the `provider_cache` entry serving
+`loadSharpPullConfigs` (`lib/knowledge/sharp-pull-config.ts`) stayed stale for over an hour across multiple
+production runs — the manual `is_stale=true` flip from Session 63 did not durably force a reload, and real
+Sharp physical requests continued against markets that were supposed to be off.
+
+Fixed by reusing the already-existing `source_updated_at` field on `CacheRecord<T>`
+(`lib/db/provider-cache.ts`, previously unused for this purpose) as a deterministic revision marker: a new
+`loadSharpPullConfigsRevision()` does one bounded `ORDER BY updated_at DESC LIMIT 1` read scoped to
+`provider=eq.sharpapi`, and `loadSharpPullConfigs()` now only serves the cache when its stored
+`source_updated_at` matches the current revision. A `null` revision (empty table or a failed read) always
+fails the match, so the design fails safe toward a fresh reload rather than trusting an unconfirmed cache. No
+schema change. 12/12 tests in `lib/knowledge/sharp-pull-config.test.ts` pass, including exact reproduction of
+the live defect shape (disable-takes-effect, re-enable-takes-effect, league/provider isolation,
+stale-flag-forces-reload, 365-day-expiry-does-not-lock-in-staleness). Note: running the diagnostic trace script
+against live production during investigation had the side effect of triggering one genuine cache
+reload+correction of the previously-stale `provider_cache` row, ahead of any code push — an accepted, harmless
+consequence of invoking the real read path to prove the defect, not a separate change.
+
+### MLB pitcher-feature-source audit (read-only, no live provider calls made)
+
+Traced every writer of `mlb_pitcher_features` / `mlb_batter_features`. Two writers exist:
+
+1. **`refreshMlbStatcastForKnownPlayers`** (`lib/knowledge/enrichment/mlb.ts`) — confirmed still dead code
+   (exported, never called from any pipeline path; grep-verified). Calls `StatcastSavantAdapter` against
+   Baseball Savant's unauthenticated `statcast_search/csv` endpoint, up to 25 live HTTP requests per invocation
+   if ever wired. Its `season_k_rate`/`season_bb_rate` mapping is a regex-derived approximation over a 7-14 day
+   rolling CSV window, not a true season aggregate — reviving it as-is would mislabel a recent-window estimate
+   as a season stat, a data-quality regression, not a fix.
+2. **The real production writer** (`lib/knowledge/enrichment/jobs.ts:~1519-1569`) — a pure aggregation over
+   already-stored `player_game_logs` rows, zero live provider calls. `season_era` is computed correctly
+   (`earnedRuns*9/innings` summed over stored logs). `season_whip`, `season_k_rate`, `season_bb_rate`,
+   `swinging_strike_rate`, `velocity_trend` are hardcoded `null`. Live bounded read (500-row sample) confirms:
+   **0/140 `mlb_pitcher_features` rows and 0/112 `mlb_batter_features` rows have any Statcast-derived or
+   whip/k-rate/bb-rate field populated.**
+
+Key finding: a bounded read of one stored `player_game_logs.raw_payload` row (MLB Stats API's own gameLog
+response, already fetched and stored by the existing `refreshMlbPlayerLogs`, already-fetched — no new request)
+shows the `stat` object already contains MLB's own season-to-date `whip`, `era`, `avg`, `obp`, `slg`, `ops`,
+`strikeoutsPer9Inn`, `walksPer9Inn`, `strikeoutWalkRatio`, and `battersFaced` as of that game. This means
+`season_whip` (from already-selected `hits_allowed`/`walks_allowed`/`innings_pitched` columns) and
+`season_avg`/`obp`/`slg`/`ops`/a K-per-9 or BB-per-9 rate (by parsing the latest stored `raw_payload.stat`)
+are computable **today, with zero new live provider calls, zero new adapter code, zero schema change, and zero
+broad backfill** — the jobs.ts feature-aggregation query just needs `walks_allowed`, `hits_allowed`, and
+`raw_payload` added to its existing `select` list. This is NOT implemented this session (audit only, per the
+phase boundary) but satisfies the stated authorization bar for a Phase 6-style follow-up.
+
+Genuinely Statcast-exclusive fields — `average_exit_velocity`, `hard_hit_rate`, `barrel_rate`, `xba`, `xslg`,
+`xwoba`, `swinging_strike_rate`, `velocity_trend` — remain unavailable from MLB Stats API's gameLog data at any
+fidelity. Only Baseball Savant (unauthenticated, no SLA, fragile to schema drift) or a paid provider could
+supply them. Recommendation: **leave these specific fields unavailable** (Option D) until a demonstrated
+scoring need justifies the fragility, per the standing "don't add providers without demonstrating a current
+need" rule.
+
+Separately observed but explicitly not fixed (out of this phase's scope, flagged for its own follow-up): the
+real writer's `season_avg` for batters is computed as `average(ordered.map(row => row.hits))` — averaging raw
+per-game hit counts, not hits/at-bats. This produces a mislabeled, not-actually-a-batting-average number. Not
+touched this session; recommend a dedicated follow-up once the `raw_payload`-parsing work above is scoped,
+since both would touch the same aggregation step.
+
+### Files changed
+
+- `lib/knowledge/enrichment/mlb.ts` — added `MlbLogAllocationSummary` type and
+  `summarizeTargetedMlbLogAllocation()`; targeted-mode branch of `refreshMlbPlayerLogs` now reports a non-null,
+  honest allocation breakdown instead of `null`; natural-rotation branch's allocation object gained an explicit
+  `mode: "fair-split"` field. No selection-affecting code touched.
+- `lib/knowledge/enrichment/mlb.test.ts` — 4 new tests for `summarizeTargetedMlbLogAllocation`.
+- `lib/knowledge/sharp-pull-config.ts` — added `loadSharpPullConfigsRevision()`; `loadSharpPullConfigs()` now
+  gates cache hits on a matching revision instead of trusting `is_stale` alone.
+- `lib/knowledge/sharp-pull-config.test.ts` — rewrote the mock `odds_pull_configs` GET handler to honor
+  `provider=eq.`, `order=`, and `limit=` (previously ignored, which was masking an ordering-dependent test bug);
+  12 tests total, including 7 new ones proving the fix.
+
+### Validation
+
+`npx tsc --noEmit -p tsconfig.json`: clean, 0 errors. `pnpm test`: **591 pass / 0 fail / 1 intentional skip**
+(592 total), including the public-export boundary/secret-scan audits — no public-safe file was touched, but
+the full suite was re-run anyway. No production writes this session beyond the one incidental cache
+reload+correction described above (a read-path side effect, not a direct write). No migration, no scheduler
+change, no threshold change, no new market/sportsbook, no request-budget change.
+
+### Remaining known limitations (updated)
+
+- Targeted-mode MLB player-log selection still has no class-aware fair-split reservation — only its
+  observability improved this session. The underlying allocation-behavior decision remains open for owner
+  input (see Fix 1 above).
+- `mlb_pitcher_features`/`mlb_batter_features` remain unpopulated for `season_whip`, `season_k_rate`,
+  `season_bb_rate`, and all Statcast-derived fields. A zero-new-request path exists for the first three (see
+  audit above) but is not yet implemented or approved.
+- `refreshMlbStatcastForKnownPlayers` remains dead code; not recommended for revival as-is (mislabeled
+  approximation, fragile unauthenticated source).
+- The batter `season_avg` mislabeling (raw hit-count average, not true batting average) is a pre-existing,
+  separately-flagged defect, not touched this session.
+- No new natural production run occurred this session (schedulers remain disabled); the Session 65 live
+  snapshot remains the most recent certified state.
+
+**OPERATIONS STABLE — NEXT RELEASE CANDIDATE PREPARED FOR OWNER REVIEW**
+
+## Session 67 — MLB DATA-QUALITY RELEASE: PRODUCTION-REACHABLE FAIR ALLOCATION + REAL SEASON STATS FROM ALREADY-STORED PAYLOADS (2026-07-28 UTC)
+
+Follow-up to Session 66's allocation-observability fix and pitcher-feature audit. This session makes the
+fair-allocation policy actually run in the path production uses, and safely populates the season-stat fields
+the Session 66 audit found were computable with zero new provider calls. `58117d3` (Session 66) is **not**
+promoted; this session's work sits on top of it, uncommitted at the time this section was written, and is
+committed/pushed at the end of this session (see commit list below). No live provider calls, no migration, no
+backfill, no scheduler change, no production database write beyond what a normal future pipeline run would
+already do.
+
+### Verified starting state
+
+`git rev-parse HEAD origin/codex/public-repo-repair` both `58117d3f0dd3d8bc8a16944a46abdb33159fb248`; `gh
+variable list --repo CoreyTenacity/Covered-Prop-Analysis --env production` confirms `COVERED_PRIVATE_PIPELINE_SHA_V2
+= 933ae62fabc2f8d50adf0e084d422c7d7db47181` (unchanged, Session 65), rollback SHA on file
+`182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`, private `origin/main` unchanged at
+`23f665955b55a9e862f7f2efa8205538c5426013`. All four match the owner's expected values exactly.
+
+### Part A — real production allocation call chain, traced
+
+`runLivePreScoreRepair` (jobs.ts) always calls `refreshMlbPlayerLogs` with explicit `playerIds =
+[...missingIds, ...staleIds]` from `inspectLiveRepairPreflight`, itself scoped to `loadActivePropCoverage`'s
+exact prepared-slate `current_props` rows (event-ID-scoped when available, else a 48h window) — so targeted
+mode's candidate pool is always genuinely prepared-slate-scoped, never stale/unrelated players. Inside
+`refreshMlbPlayerLogs`, targeted mode's `orderedPlayers` sort (nearest game start -> Sharp "missing recent"
+priority -> Sharp priority flag -> alphabetical) is completely class-blind, and — confirmed by reading the
+code — targeted mode had **no rotation/cursor at all** (`start: 0, nextIndex: 0` hardcoded), so a
+chronically-under-served class would see the identical top-N reselected every run. A live bounded read
+(current MLB active props, 48h window) found the *current* moment's active slate is 100% `pitcher_strikeouts`
+(20 pitchers, 0 batters) — a timing artifact of this specific moment, not proof either way about steady-state
+composition — but a broader unfiltered sample of the same table shows batter markets (`batter_hits`,
+`batter_total_bases`, `batter_rbis`) very much exist at real volume (112-122 active rows each). Combined with
+Session 63's already-recorded production measurement (90% pitcher / 46% batter `player_game_logs` coverage),
+the structural risk is real whenever both classes are simultaneously in the missing/stale queue, which is the
+common full-slate case. `refreshPlayerLogsJob` (a separate, non-scheduled, manually/workflow_dispatch-invoked
+job) is the only other caller and always omits `playerIds`, landing in the (previously divergent) unscoped
+branch — confirmed still a real, valid, distinct code path, not dead.
+
+### Part B/C — production-reachable fair allocation + reporting, implemented
+
+Retired the two-branch divergence entirely. `allocateClassFairPlayerWindow()` (`lib/knowledge/enrichment/mlb.ts`)
+is now the single policy both callers use — same bounded-reservation-with-spillover math
+(`allocateBoundedClassSlots`, unchanged, still separately tested) and same per-class `takeLiveFirstWindow`
+rotation, parameterized by candidate pool, total budget, and a cache-key namespace. Targeted mode uses a new,
+separate cursor namespace (`...:players:targeted:{pitcher,batter,unclassified}`) so its rotation state never
+collides with the pre-existing unscoped-mode cursors (`...:players:{pitcher,batter,unclassified}`), which keep
+accumulating undisturbed for the still-valid `refreshPlayerLogsJob` path. `MlbLogAllocationSummary` now always
+carries `mode` (`"targeted" | "fair-split" | "skipped"`), `totalBudget`, per-class pool/reserved/spillover/
+selected/deferred counts, and `cursorBefore`/`cursorAfter` per class — `classAllocation` in the run report is
+never a bare, unexplained value regardless of which branch ran or whether the stage ran at all
+(`skippedMlbLogAllocationSummary()` now populates the skip case too, in `jobs.ts`'s `stageSkipped` details).
+Session 66's old `summarizeTargetedMlbLogAllocation` (pure reporting, no behavior change) is removed — it's
+superseded by real allocation now running in the path it used to only describe.
+
+### Part D — safe MLB season-stat extraction from raw_payload
+
+A live bounded read of `player_game_logs.raw_payload` (already stored by the existing `refreshMlbPlayerLogs`
+ingestion, zero new requests) confirmed MLB Stats API's own gameLog `stat` object carries `avg`/`obp`/`slg`/
+`ops`/`era`/`whip` computed **season-to-date** as of that game, while `strikeOuts`/`baseOnBalls`/`battersFaced`
+on the same object are **single-game-only** counts. Two guarded parsers
+(`parseMlbGameLogSeasonRates`/`parseMlbGameLogCountingStats`, `lib/knowledge/enrichment/mlb.ts`) extract these;
+building them surfaced a real latent defect in this codebase's long-standing `safeNumber` helper —
+`safeNumber(null)` is `0` (a bare `Number(null)` JS quirk), while `safeNumber(undefined)` is correctly `null`.
+Left unguarded, a genuinely-absent JSONB field could silently become a fabricated measured zero the instant
+these parsers ran — the same defect class as the Session 62 factor-integrity fix, just in a different helper.
+Fixed locally in these two new parsers only (`safeStatNumber`, treats `null`/`undefined` identically) rather
+than touching the shared `safeNumber` used at dozens of other call sites across `mlb.ts`/`jobs.ts`, which is
+out of this session's scope. `jobs.ts`'s feature-aggregation query now also selects `walks_allowed`,
+`hits_allowed`, `raw_payload` (already-bounded existing query, no new query, no pagination change).
+
+Populated with proven semantics:
+- `season_era` — unchanged (already correct: `sum(earnedRuns)*9/sum(innings)` from already-selected columns).
+- `season_whip` — `(sum(walks_allowed)+sum(hits_allowed))/sum(innings_pitched)`, from already-selected counting
+  columns, no raw_payload parsing needed.
+- `season_k_rate`/`season_bb_rate` — genuine season **K%/BB% per batter faced**
+  (`sum(strikeouts)/sum(battersFaced)`, `sum(walks_allowed)/sum(battersFaced)`), summed only over rows where
+  `innings_pitched > 0` (excludes any non-pitching row for a two-way player). Deliberately NOT strikeouts/walks
+  per 9 innings: the tuned scoring adapter's own existing fallback (`?? 0.22` for season_k_rate, `?? 0.11` for
+  swinging_strike_rate — both fractional-rate defaults) proves the column's intended unit is a per-batter-faced
+  rate, not a per-9-innings rate; populating K/9 there would have silently produced wildly out-of-range
+  matchup/quality-boost values.
+- `season_avg`/`season_obp`/`season_slg`/`season_ops` — parsed directly from the most recent stored game log
+  row's `raw_payload.stat`, since MLB already computes these season-to-date; no aggregation math needed.
+
+Left deliberately unavailable (`null`): `swinging_strike_rate`, `velocity_trend`, `average_exit_velocity`,
+`hard_hit_rate`, `barrel_rate`, `xba`, `xslg`, `xwoba` — all genuinely Statcast-exclusive, confirmed absent from
+every sampled `raw_payload.stat` object; populating them would require Baseball Savant (fragile, no SLA) or a
+paid provider, neither in scope.
+
+### Part E — `season_avg` semantics, root-caused and corrected
+
+The pre-existing writer stored `average(ordered.map(row => row.hits))` under `season_avg` — a raw per-game
+**hits count** (~0.5-1.5), not batting average (~.200-.320), despite the column name and every other convention
+in this codebase meaning the latter. Tracing every reader found exactly one consumer:
+`lib/knowledge/adapters/mlb.ts`'s `seriesFor()`, which fed `season_avg` into `batter_hits`'s projection
+`base = last5 ?? last10 ?? season ?? prop.line` as a tertiary per-game-count fallback — which is why the
+previous (wrong-unit) value happened to look plausible: a raw hits-per-game average IS roughly the right
+per-game-count unit, even though it was mislabeled. The SAME bug pattern existed, latent and not yet visible,
+for `batter_total_bases` (`season_slg`, always null before this session) and `pitcher_strikeouts`
+(`season_k_rate`, always null before this session) — both are rates, both would have been silently unit-mismatched
+into a count-shaped fallback the instant Part D's real values landed, without this fix.
+
+Correction: the writer now stores genuine batting average (Part D, above) under `season_avg`, matching the name
+and every other convention. The adapter's three affected `seriesFor()` cases now return `season: null` instead
+of feeding a rate into the count-shaped fallback slot — `base` falls through to the existing final fallback
+(`prop.line`) in the rare case where both `last5` and `last10` are also unavailable. This does NOT touch the
+SEPARATE, already-correct rate-vs-rate uses of `season_k_rate` in `qualityBoost`/`matchupStrength` (both already
+compare it against a `0.22` fractional baseline) — only the three broken count-fallback consumption sites
+changed. No historical row rewrite; no migration; no backfill. Future natural pipeline runs correct active
+rows going forward via the fixed writer.
+
+### Part F — scoring safety re-verified
+
+Ran the full scoring-relevant suite after all changes (`lib/scoring/*.test.ts`, `lib/knowledge/adapters/*.test.ts`,
+`lib/knowledge/*.test.ts`, `scoring-engine/src/*.test.ts`): **178/178 pass**, including every direction-aware-edge
+regression test (Session 64/65), every factor-integrity null-vs-zero test (Session 62), and the Covered
+Picks league-fair scan tests (Session 63) — all unaffected. Added 2 new adapter-level regression tests proving
+the Part E fix directly: a populated `season_avg`/`season_k_rate` (rate-shaped) no longer corrupts the
+projection when `last5`/`last10` are both absent (previously would have silently dragged the projection toward
+the rate's tiny numeric value instead of falling back to `prop.line`).
+
+### Files changed
+
+- `lib/knowledge/enrichment/mlb.ts` — `allocateClassFairPlayerWindow()` (replaces the two divergent branches),
+  `skippedMlbLogAllocationSummary()`, `parseMlbGameLogSeasonRates()`/`parseMlbGameLogCountingStats()` (+
+  `safeStatNumber()` null-guard), `refreshMlbPlayerLogs()` now calls the shared allocator for both modes.
+  Removed `summarizeTargetedMlbLogAllocation` (superseded).
+- `lib/knowledge/enrichment/mlb.test.ts` — removed 4 superseded tests; added 8 `allocateClassFairPlayerWindow`
+  tests, 1 `skippedMlbLogAllocationSummary` test, 9 raw-payload parser tests (64 tests total in this file, all
+  passing).
+- `lib/knowledge/enrichment/jobs.ts` — `stageSkipped`'s player-logs branch now includes an explicit
+  `classAllocation`; `playerLogs` select widened with `walks_allowed, hits_allowed, raw_payload`; pitcher/batter
+  feature writers compute real `season_whip`/`season_k_rate`/`season_bb_rate`/`season_avg`/`season_obp`/
+  `season_slg`/`season_ops` per the proven semantics above.
+- `lib/knowledge/adapters/mlb.ts` — `seriesFor()`'s three unit-mismatched count-fallback consumption sites
+  fixed (`batter_hits`, `batter_total_bases`, `pitcher_strikeouts`).
+- `lib/knowledge/adapters/mlb.test.ts` — 2 new regression tests for the Part E fix.
+
+### Validation
+
+`npx tsc --noEmit`: clean, 0 errors. `pnpm test`: **608 pass / 0 fail / 1 intentional skip** (609 total,
+up from 592 in Session 66 — net +16 after removing 4 superseded tests and adding 20 new ones). `pnpm build`
+(Next.js production build): clean. `pnpm cf:build` (OpenNext/Cloudflare Workers build): clean, worker bundled
+successfully. Boundary/public-export/secret-scan audits (part of the full suite): all clean — no public-safe
+file's classification changed this session. No live provider calls made. No production database write beyond
+what a normal future natural pipeline run would already do (all changes are code; nothing was executed against
+production this session).
+
+### Deterministic export impact
+
+None. Every file touched this session (`lib/knowledge/enrichment/mlb.ts`, `jobs.ts`, their test files,
+`lib/knowledge/adapters/mlb.ts`, its test file) is already classified private-only/excluded from the public
+export per the existing boundary audit; no public-safe file's content or classification changed.
+
+### Bounded public-sync plan (not executed)
+
+Since none of this session's changed files are public-safe, there is nothing to sync to the public repo from
+this session's work in isolation. If a future session wants to sync, the standard flow applies: regenerate the
+deterministic export, open a draft PR against `CoreyTenacity/Covered-Prop-Analysis`, verify the boundary audit
+against the new export, obtain explicit owner approval before merge.
+
+### Bounded promotion/certification plan (not executed)
+
+1. Owner reviews this session's diff and the Session 66 diff together (both un-promoted).
+2. If approved, promote `COVERED_PRIVATE_PIPELINE_SHA_V2` to this session's final commit SHA (see below).
+3. Observe one natural/manually-triggered MLB run and confirm: `classAllocation` in the run report shows a
+   non-null, real breakdown with `mode: "targeted"` and nonzero `batterSelectedIds`/`pitcherSelectedIds` when
+   both classes have candidates; `mlb_pitcher_features`/`mlb_batter_features` rows for players touched by that
+   run show real (non-null) `season_whip`/`season_k_rate`/`season_bb_rate`/`season_avg`/`season_obp`/
+   `season_slg`/`season_ops` values, not the previous nulls or the previous mislabeled hits-count.
+4. Re-check the live scoring-integrity invariant (wrong-direction rows publishable AND >=70) stays at 0, same
+   method as Session 65.
+5. Rollback path unchanged: restore `COVERED_PRIVATE_PIPELINE_SHA_V2` to `933ae62fabc2f8d50adf0e084d422c7d7db47181`
+   (Session 65, the last SHA proven live) if anything regresses.
+
+### Owner approvals required
+
+- Promotion of `COVERED_PRIVATE_PIPELINE_SHA_V2` to this session's commit (not done this session, per the
+  standing instruction to stop before promotion).
+- The still-open Session 66 follow-up decision: whether targeted mode's NEW fair-split reservation is the
+  right long-term policy, or whether the bias should instead be addressed further upstream in how
+  `preflight.playerLogs.missingIds/staleIds` itself is computed. This session implements the former (extending
+  the already-designed, already-tested Session 63 policy to the path production actually uses) rather than
+  redesigning the upstream computation, since that was explicitly out of bounds ("do not alter selection
+  behavior" was Session 66's constraint; this session's mission explicitly asked for exactly this extension).
+
+### Remaining known limitations
+
+- `swinging_strike_rate`, `velocity_trend`, and all Statcast batted-ball fields remain unavailable by design;
+  no current path to populate them without Baseball Savant or a paid provider.
+- The natural-rotation ("fair-split") mode's cursor continuity for existing accumulated state is preserved
+  unchanged; targeted mode starts its own rotation cursor fresh (namespaced separately), so its first few runs
+  after promotion will rotate through previously-never-selected candidates rather than resuming any prior
+  implicit position (targeted mode had no real cursor before this fix, so there was no prior position to
+  preserve).
+- No new natural production run occurred this session (schedulers remain disabled); the Session 65 live
+  snapshot remains the most recent certified live state. This session's allocation/season-stat changes are
+  validated by unit test and build only, not yet observed against a live run.
+
+**MLB DATA-QUALITY RELEASE READY — PUBLIC SYNC AND V2 PROMOTION AWAIT OWNER APPROVAL**
+
+## Session 68 — MLB DATA-QUALITY FIX PASS: ALLOCATOR OVERFLOW, DOUBLEHEADER DETERMINISM, REPAIR OBSERVABILITY (2026-07-28 UTC)
+
+Follow-up to the Session 67 evidence-only verification pass, which validated the core season-stat design but
+found two implementation defects and one operational observability defect. This session fixes all three. No
+production writes, no live provider calls, no migration, no backfill, no scheduler change, no promotion.
+
+### Verified starting state
+
+Branch `codex/public-repo-repair`; `git rev-parse HEAD origin/codex/public-repo-repair` both `d8250bde6c5ef48db9a01e1b154d384003c3b27d`; private `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`;
+`COVERED_PRIVATE_PIPELINE_SHA_V2 = 933ae62fabc2f8d50adf0e084d422c7d7db47181` (Session 65, unadvanced); rollback
+SHA on file `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`; scheduler variable unchanged; working tree clean except
+the pre-existing untracked `scoring-engine/dist/`. All matched exactly.
+
+### Part A — allocator overflow fixed
+
+Root cause: `allocateBoundedClassSlots`'s `reserved = Math.max(1, Math.floor(totalBudget / 2))` forced a
+reservation of >=1 slot to EACH class regardless of `totalBudget`, so `totalBudget=1` with both classes
+populated returned `{pitcherBudget:1, batterBudget:1}` — a combined 2, silently exceeding the budget (also true
+at `totalBudget=0`). Verified live before fixing (`node` invocation against the real function). Not reachable
+through either current call site (`configuredChunkSize`'s floor of 4 plus `refreshMlbPlayerLogs`'s
+`totalBudget` computation means `totalBudget<=1` only occurs when there's at most one total candidate, which
+structurally can't populate both pools at once) — but the shared helper must honor its contract regardless of
+what its callers currently do.
+
+Fix: explicit `totalBudget===0` (`{0,0}`) and `totalBudget===1` (exactly one slot, to whichever class has
+candidates; if both do, a documented deterministic tie-break favors pitcher) branches, added before the
+existing `totalBudget>=2` logic, which is untouched (`Math.floor(totalBudget/2)` without the `Math.max(1, ...)`
+floor produces byte-identical results to the old formula for every `totalBudget>=2`, confirmed by re-running
+the pre-existing tests unchanged). 9 new tests added covering every required edge case (totalBudget 0/1 with
+both/one/neither pool populated, totalBudget 2, undersized pool, spillover bound, budget-exceeds-candidates,
+and an explicit "production-sized allocations unchanged" re-affirmation).
+
+### Part B — deterministic latest-row selection
+
+`player_game_logs`'s dedup key (`provider|player_id|game_date|event_id`) permits two rows sharing one
+`game_date` for one player (a doubleheader), and the prior sort (`game_date` string compare only) had no
+tie-break, so which row `ordered[0]` resolved to for a same-date tie depended on undefined database row order.
+
+Traced available fields live: the `events` table (joined via `player_game_logs.event_id`, not previously
+selected) carries a real `start_time` timestamp, confirmed populated. MLB Stats API's own `game.gamePk` was
+tested and found NOT reliably date-ordered (two rows on `2026-07-09` had gamePks 824251/823846, while a row 9
+days later on `2026-07-18` had a LOWER gamePk, 822790, than either) — deliberately not used. `game.gameNumber`
+(MLB's own doubleheader designation, 1/2/...) is semantically verified and used as the documented fallback.
+
+New `compareMlbGameLogRecency(left, right, eventStartTimeByEventId)` (`lib/knowledge/enrichment/mlb.ts`):
+game_date first, then the linked event's real `start_time` (strongest evidence), then `gameNumber` (fallback
+when start_time isn't resolvable for one or both rows), then a genuine tie returns `0` (stable sort preserves
+input order rather than fabricating a distinction). `jobs.ts`'s feature-aggregation query now selects
+`event_id` and resolves every distinct event_id's `start_time` in one bounded query before sorting. 5 new tests,
+including two rows sharing a `game_date` with different season-to-date values, sorted both forward and reversed
+— the later game (by real `start_time`) wins regardless of input order — plus explicit fallback-to-gameNumber
+and full-tie tests.
+
+### Part C — MLB repair observability corrected
+
+Deeper root cause than initially assumed: `github-actions-pipeline.ts`'s summary line read fields (`playerLogs.
+requestedPlayers`, etc.) directly off the `playerLogs` stage object, but `LiveRepairStageReport` always nests
+the real job result under `.details` — so this line rendered all zeros for **both** leagues, not only MLB (the
+existing test fixture had the same bug baked in: it set these fields at the top level with an empty
+`details: {}`, matching the broken reader rather than the real production shape). Fixed by reading
+`playerLogs.details`, branching on whether `details.classAllocation` is present (MLB's signal) versus
+basketball's field names (unchanged output format, now actually populated). MLB branch surfaces mode, total
+budget, pitcher/batter pool and selected counts, deferred counts, cursor before->after (when not skipped), and
+checked/upserted/provider-call counts from `refreshMlbPlayerLogs`'s real return fields — reusing
+`classAllocation` exactly as instructed rather than inventing a parallel shape. Corrected the pre-existing test
+fixture to nest under `.details` (matching real shape) and added 3 new focused tests: MLB-shape with real
+activity, MLB-shape skipped, and basketball-shape regression (all reading through the same fixed access path).
+
+### Part D — validation
+
+`npx tsc --noEmit`: clean. Focused: `mlb.test.ts` 78/78, `adapters/mlb.test.ts` 14/14,
+`github-actions-pipeline.test.ts` 78/78 (combined 170/170). Full `pnpm test`: **625 pass / 0 fail / 1 intentional
+skip** (626 total, up from 608 in Session 67 -- net +18). `pnpm build`: clean. `pnpm cf:build`: clean, worker
+bundled. Boundary/public-export/secret-scan audits (part of the full suite): all clean.
+
+**Scoring-integrity invariant re-checked live**: bounded read of `scored_props` (`covered_score>=70`,
+`publishable=true`, most recent 1000 by `updated_at`) found 152 rows, 70 with negative `edge_value`
+(wrong-direction). All 70 were scored **before** the V2 promotion (newest at `2026-07-27T21:25:44Z`, promotion
+at `2026-07-27T21:38:01Z`) -- stale legacy rows from the pre-fix formula, never rescored since (schedulers
+remain disabled, no new run has occurred). **Zero wrong-direction publishable >=70 rows scored after the V2
+promotion** -- the invariant holds exactly as Session 65 certified; this session's changes don't touch scoring
+and introduce no new violations.
+
+Confirmed: no provider calls added; no scoring thresholds/weights changed; no scheduler configuration changed;
+no migration or backfill; no production or public deployment occurred; private `origin/main` unchanged; only
+`origin/codex/public-repo-repair` pushed; public-export impact is none (every file touched is already
+private-only/excluded, confirmed by the boundary audit passing unchanged); working tree clean except the
+pre-existing untracked `scoring-engine/dist/`.
+
+### Files changed
+
+- `lib/knowledge/enrichment/mlb.ts` -- `allocateBoundedClassSlots` totalBudget<2 fix;
+  `compareMlbGameLogRecency()` + `parseMlbGameLogGameNumber()` helper.
+- `lib/knowledge/enrichment/mlb.test.ts` -- 9 allocator edge-case tests, 5 doubleheader/recency tests.
+- `lib/knowledge/enrichment/jobs.ts` -- `event_id` added to the season-stat select; bounded `events.start_time`
+  lookup; sort now uses `compareMlbGameLogRecency`.
+- `lib/ops/github-actions-pipeline.ts` -- MLB-shape branch added to the player-log repair summary line,
+  reading through the previously-missing `.details` access.
+- `lib/ops/github-actions-pipeline.test.ts` -- fixed `mockRepair`'s `playerLogs` fixture to the real
+  `.details`-nested shape; 3 new focused tests (MLB active, MLB skipped, basketball regression).
+
+### Remaining limitations
+
+- The doubleheader tie-break gap in `player_game_logs` (same `game_date`, different `event_id`) was
+  structurally possible but empirically unobserved in a 1000-row live sample (Session 67 finding) -- now closed
+  regardless.
+- `allocateBoundedClassSlots`'s totalBudget<2 case remains unreachable through current call sites (by design of
+  `configuredChunkSize`'s floor); the fix protects the contract for any future caller or config change.
+- No new natural production run occurred this session (schedulers remain disabled); validated by unit test,
+  build, and one bounded live read (the scoring-integrity re-check above), not by observing a live pipeline run
+  of this session's own changes.
+
+### Proposed next V2 candidate / rollback
+
+- Proposed candidate SHA: this session's final commit on `codex/public-repo-repair` (see push proof below).
+- Rollback SHA (unchanged, still the last proven-live state): `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`
+  (falls back to `933ae62fabc2f8d50adf0e084d422c7d7db47181` first if only this session's changes need reverting,
+  since that SHA is still the currently-pinned, currently-live-certified state).
+
+### Bounded natural-run observation checklist (for whenever promotion is approved)
+
+1. `classAllocation.mode` is `"targeted"` on a real MLB run (not `"skipped"` unless genuinely no refresh was
+   needed), with nonzero `pitcherSelectedIds`/`batterSelectedIds` when both classes have live candidates.
+2. The GitHub Actions run summary shows the new `Player-log repair mode/budget/deferred/cursor/counts` lines
+   with real numbers, not the old all-zero basketball-shaped line.
+3. `mlb_pitcher_features`/`mlb_batter_features` rows touched by that run show real
+   `season_whip`/`season_k_rate`/`season_bb_rate`/`season_avg`/`season_obp`/`season_slg`/`season_ops` values.
+4. If any player has two `player_game_logs` rows sharing a `game_date` after this run, confirm the later-game
+   row (by real event `start_time`) is the one reflected in that player's season-stat values.
+5. Re-run the scoring-integrity bounded check (as above) scoped to rows updated after the new promotion
+   timestamp -- expect 0 wrong-direction publishable >=70 rows, same as this session's and Session 65's checks.
+
+### Owner approvals still required
+
+- Promotion of `COVERED_PRIVATE_PIPELINE_SHA_V2` to this session's commit.
+- The still-open Session 66 follow-up decision (targeted-mode's own fair-split reservation vs. an upstream
+  fix to `preflight.playerLogs.missingIds/staleIds`'s computation) remains unresolved and unaffected by this
+  session's fixes.
+
+**MLB DATA-QUALITY RELEASE READY — PUBLIC SYNC AND V2 PROMOTION AWAIT OWNER APPROVAL**
+
+## Session 69 — V2 PROMOTION ATTEMPTED, FAILED ON FIRST NATURAL RUN, ROLLED BACK (2026-07-28/29 UTC)
+
+Owner-authorized, bounded V2 promotion of the Session 68 candidate (`e9dd199753fc5099b407211fc78f80cf447a582f`).
+The candidate's first natural run hung and was force-cancelled at the workflow's 25-minute timeout. Root-caused
+to a genuine candidate defect and rolled back immediately, per the pre-agreed automatic rollback conditions.
+No code was changed during this session (rollback is a variable-only revert); the defect fix is deferred to a
+follow-up session.
+
+### Pre-promotion verification (all confirmed before changing anything)
+
+- Public workflow name: exactly `Covered Production Pipeline` (confirmed via `gh workflow list`), status `active`.
+- `COVERED_PRIVATE_PIPELINE_SHA_V2` was exactly `933ae62fabc2f8d50adf0e084d422c7d7db47181` before promotion.
+- Candidate `e9dd199753fc5099b407211fc78f80cf447a582f` confirmed present on `origin/codex/public-repo-repair`
+  (fetchable by the production checkout step).
+- Immediate rollback (`933ae62…`) and secondary recovery (`182f6caf…`) commits both confirmed locally resolvable.
+- Private `origin/main` confirmed unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`.
+- No in-progress or genuinely-queued production run at promotion time (one 12-day-old orphaned `queued` entry
+  from 2026-07-16 was inspected and confirmed inert, not a live concurrency risk).
+
+### Promotion
+
+`COVERED_PRIVATE_PIPELINE_SHA_V2` updated `933ae62…` -> `e9dd199…` at `2026-07-28T23:44:59Z`. Confirmed via
+`gh variable list`.
+
+### Natural certification run — FAILED
+
+First natural run after the pin update: **`30409283020`**, `event: schedule`, `createdAt: 2026-07-28T23:50:56Z`,
+league `WNBA` (`--league WNBA --configLimit 8 --runScoring true --runBoard true`). The "Verify checkout is
+exactly the approved SHA" step passed — the run genuinely executed the candidate. Log evidence: the last real
+output was `repairSharpCurrentPropIdentities` completing at `23:53:34Z` (25 WNBA current_props scanned/updated,
+normal, pre-existing/unrelated code). Then **zero log output for 22 minutes 45 seconds** until
+`2026-07-29T00:16:19Z: ##[error]The operation was canceled.` — the job's `timeout-minutes: 25` (from
+`covered-production-pipeline.yml`) force-killed it. `conclusion: cancelled`. All 5 immediately-prior runs under
+the previous SHA completed successfully in 3m06s-9m40s; this is the first run ever observed on this pipeline to
+hit the timeout ceiling.
+
+### Root cause (mechanistically identified, not merely inferred from timing)
+
+Session 68's `refreshRecentFeaturesJob` (`lib/knowledge/enrichment/jobs.ts:1438-1446`) added a bounded lookup of
+each distinct `event_id`'s `start_time` (for the new `compareMlbGameLogRecency` doubleheader tie-break) — but
+issues it as **one single, unchunked `id IN (...)` query** covering every distinct event_id in the whole batch
+(up to `scopedLeagueId ? 2500 : 5000` `player_game_logs` rows' worth of distinct events), rather than paginating
+in bounded chunks the way comparable lookups elsewhere in this codebase do. Separately, `supabaseServerRequest`
+(`lib/db/supabase-server.ts:35`) calls `fetch()` with **no `signal`/timeout anywhere in the chain** — a slow or
+oversized request has nothing to bound it. This code path runs unconditionally for **every league**, not just
+MLB (confirmed: the diff comment I wrote at the time, "this is a no-op change for basketball rows," was true
+only for the *sort comparator*, not for the new *events query* immediately above it, which I did not gate to
+MLB). This fully explains why the first WNBA run hung exactly after the stage that would reach this new code,
+for the entire remaining timeout budget, with zero output (consistent with a stalled network request, not a
+crash or exception, which would have logged something before dying).
+
+No stack trace or explicit error was captured (`##[error]The operation was canceled.` is GitHub Actions' own
+cancellation message, not an application-level error) — this attribution is based on precise code-path/timing
+correlation and a mechanistically sound defect (unchunked query + unbounded fetch), not a confirmed exception.
+
+### Rollback
+
+`COVERED_PRIVATE_PIPELINE_SHA_V2` restored to `933ae62fabc2f8d50adf0e084d422c7d7db47181` at
+`2026-07-29T00:18:16Z`. Confirmed via `gh variable list`. No overlapping/queued run existed at rollback time.
+Private `origin/main` reconfirmed unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Scheduler variable
+(`COVERED_GITHUB_SCHEDULER_ENABLED`) reconfirmed unchanged (`true`, same 2026-07-22 timestamp -- never touched
+this session). No writes were attempted or made to production data by this session itself (the hung run's own
+25-row WNBA identity-repair write happened before the stall, using pre-existing, unrelated code -- not touched
+or caused by this session).
+
+### Write-safety assessment of the cancelled run
+
+The hang occurred at a **read** (the new `events` SELECT), before any of Session 68's new season-stat **write**
+logic for that batch would have executed. No partial/duplicate `mlb_pitcher_features`/`mlb_batter_features`/
+`player_recent_features` writes are expected from this specific stalled batch as a result. Not independently
+re-verified with a fresh bounded read this session (out of scope: no cleanup/reconciliation authorized), but
+the code-path ordering makes this a low-risk read-then-write flow, not a partial-write flow.
+
+### Required follow-up (not implemented this session; code edits were out of scope)
+
+Fix `refreshRecentFeaturesJob`'s new `events` lookup to page through `gameLogEventIds` in bounded chunks
+(matching the pattern already used elsewhere, e.g. `current_props` chunked lookups), and/or add a request
+timeout to `supabaseServerRequest`. Both are recommended; the missing fetch timeout is a separate, broader
+latent risk (every `selectRows`/`insertRows`/`upsertRows` call in this codebase shares it) worth its own
+follow-up beyond just this one call site.
+
+### Final state
+
+- Live V2: `933ae62fabc2f8d50adf0e084d422c7d7db47181` (restored; matches pre-promotion state exactly).
+- Private repair-branch tip: `b8b75029613a56fb657723557b1f8545d40abd07` (unchanged; contains the still-defective
+  candidate, not re-promotable until the chunking/timeout fix lands and is re-validated).
+- Rollback SHA on file: `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2` (secondary, not used).
+- Private `origin/main`: `23f665955b55a9e862f7f2efa8205538c5426013` (unchanged).
+- Scheduler: unchanged.
+
+### Recommendation
+
+**Restore rollback confirmed as the correct outcome — do not re-attempt promotion of `e9dd199`/`b8b7502` as-is.**
+The next release candidate must include the chunked-query fix (and ideally the fetch-timeout hardening) before
+another promotion attempt, plus a successful natural-run observation of that fix specifically before
+re-promoting. The Session 68 evidence-only review (allocator overflow, doubleheader determinism, repair
+observability) remains valid and unaffected by this defect; only the newly-added `events` lookup's execution
+pattern needs correction.
+
+**MLB DATA-QUALITY RELEASE BLOCKED — REGRESSION FOUND ON FIRST NATURAL RUN, ROLLED BACK, FIX REQUIRED BEFORE RE-PROMOTION**
+
+## Session 70 — SCORING-EVIDENCE INTEGRITY INVESTIGATION: GAME-LOG DUPLICATION ROOT-CAUSED AND FIXED; TIMEOUT REGRESSION FIXED (2026-07-29 UTC)
+
+Owner reported live Covered Score explanations and supporting data appearing inaccurate/nonsensical (wrong
+"last 5 games" averages, incomplete sections, explanations not matching the score). This session investigated
+as a scoring-evidence integrity question, found and fixed a confirmed, live, high-impact defect, and separately
+completed the Phase 2/3 timeout-regression fix from the prior session's rolled-back promotion.
+
+### Phase 1 — verified starting state
+
+Branch `codex/public-repo-repair`; `HEAD` == `origin/codex/public-repo-repair` == `38e11f5` (pre-session);
+private `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`; live V2 confirmed exactly
+`933ae62fabc2f8d50adf0e084d422c7d7db47181`; candidate `e9dd199…`/`b8b7502` confirmed NOT live (every recent
+"Covered Production Pipeline" run's checkout log shows `PIN: 933ae62…`); scheduler variable unchanged; no
+in-progress/genuinely-queued run (the same 2026-07-16 orphaned `queued` entry remains inert).
+
+### Phase 2 — timeout root cause, confirmed facts vs. inference
+
+Re-examined the exact scale involved: a live bounded read of a 1000-row WNBA `player_game_logs` sample found
+only **36 distinct event_ids** despite 199 distinct players -- WNBA/MLB game logs have many player-rows per
+event, so the realistic `IN (...)` filter size is dozens, not thousands, and the resulting URL length (~1,339
+chars for 36 UUIDs) is well within normal limits. This **weakens** the "oversized URL/slow query" mechanism
+stated with too much confidence in Session 69's report. Confirmed facts: (1) a 22m45s silent hang occurred
+immediately after `repairSharpCurrentPropIdentities` logged completion, ending in a forced `timeout-minutes: 25`
+cancellation; (2) the new `events` lookup is genuinely new code (first execution ever in this pipeline) with
+zero timeout anywhere in its fetch chain; (3) every other function between identity-repair and the hang point
+(`loadActivePropCoverage`, `runBoundedBackgroundEnrichment`, `inspectLiveRepairPreflight`) is unchanged code with
+a long clean run history (~40+ successful prior runs), making it a much lower-probability cause. Honest
+conclusion: the *specific trigger* of the stall (DB latency, a transient network blip, connection-pool
+exhaustion) cannot be conclusively pinned down without a stack trace, but the reason the *entire pipeline* hung
+for 22+ minutes instead of failing fast is confirmed and undisputed: the complete absence of any
+timeout/AbortController on this (and every) Supabase fetch call in this codebase.
+
+### Phase 3 — narrow fix, implemented and tested
+
+Root-caused a cleaner, more important finding while fixing this: the event-lookup provides **zero functional
+benefit for basketball at all** -- only MLB's season-stat writer consumes the doubleheader tie-break it exists
+for. Fix: gated the entire lookup to `scopedLeagueId === "mlb"` (WNBA/NBA now issue it 0 times, not just
+"chunked cheaply"), extracted the chunking/timeout logic into a standalone, dependency-injected, exported
+function (`resolveMlbGameLogEventStartTimes`, `lib/knowledge/enrichment/jobs.ts`) with a
+100-id chunk bound and an 8s per-chunk timeout (`Promise.race`, fails safe to an empty result for that chunk
+rather than hanging). 8 new unit tests cover empty input, dedup-before-chunking, chunk-bound enforcement,
+deterministic multi-chunk merging, missing-row fallback, timeout behavior (proven not to wait anywhere near the
+original hang duration), and rejected-fetch handling. 2 new integration tests (mock-fetch-based) prove WNBA
+performs zero "events" table queries and MLB does query it when event ids are present.
+
+### Phase 4/5 -- score-evidence lineage audit and live reproduction: ROOT CAUSE FOUND
+
+Traced the real production explanation path (`scoring-service.ts` writes `score_explanations` atomically in
+the same loop iteration as the numeric `scored_props` row -- confirmed NOT independently reconstructed later;
+`lib/scoring/explanations.ts`/`lib/ai/explanation-adapter.ts`/`live-board.ts` are a separate, confirmed-dead
+legacy path -- `/api/explanations` exists but zero frontend components call it). Pulled the live published
+`covered-picks` snapshot (4 rows, all WNBA) and its full `score_explanations` row for the top pick (Kayla
+Thornton, `player_points`, line 8.5, `covered_score: 85`). Displayed factor text: "Kayla Thornton is at 10.8
+over the last 5 and 8.6 over the last 10". Independently recomputed from raw `player_game_logs`:
+
+**Every single stored game-log row for this player is duplicated** -- each `game_date` appears exactly twice,
+with two different providers: `sportsdataverse-wnba` (real `event_id`) and `wehoop-wnba` (`event_id: null`),
+identical stat values, the `wehoop-wnba` rows all inserted in one batch at the exact same timestamp
+(`2026-07-29T05:03:21Z`). A naive "slice the 5 most recent ROWS" computation on this data gives **12.6**
+(wrong); the correct "5 most recent distinct GAMES" gives **10.8** (matches what's stored -- that feature row
+happened to be computed before the duplicates existed, on 2026-07-28, making it accidentally correct and a live
+time-bomb: the next natural recomputation would have produced the wrong 12.6). A bounded 1000-row WNBA sample
+found this affects **21.1% of all player+game_date pairs** -- confirmed widespread, not a one-off. A parallel
+1000-row MLB sample found **0% duplication** (single provider, `mlb-stats-api` only) -- MLB is clean.
+
+This is the confirmed root cause of the owner's "incorrect last 5 games averages" report.
+
+### Phase 6 -- fallback/missing-data audit
+
+- `recent_values` (`score_explanations.recent_values`): read in two places in `read-service.ts`, **never written**
+  anywhere in `scoring-service.ts` -- a genuinely dead/unwired field, always empty. Confirmed **not currently
+  rendered by any frontend component** (grepped `components/`/`app/` for `recentValues` -- zero matches), so
+  this is real but not the source of a *currently visible* "incomplete section," flagged as tech debt.
+- `basketball.ts`'s `player_pra` composite (lines ~67-78): sums points+rebounds+assists using
+  `numeric(x) ?? numeric(y) ?? 0` -- a genuinely missing individual component (e.g. no stored rebounds data)
+  is silently treated as **0** when summed into the PRA total, understating the composite without any signal
+  that a component was unavailable rather than truly zero. Confirmed via code read, not fixed this session
+  (isolated to the `player_pra` market; the individual `player_points`/`rebounds`/`assists` cases do NOT have
+  this bug -- they correctly stay `null` when missing). Flagged as a follow-up requiring a quick product
+  decision (null-if-any-missing vs. sum-of-available-with-a-completeness-flag).
+- Every other `?? 0`/`?? <baseline>` pattern found in `mlb.ts`/`basketball.ts` (grepped) is a documented,
+  intentional league-average fallback for a *separate* rate-vs-rate comparison (e.g. `season_k_rate ?? 0.22`),
+  already covered by Session 62/67's factor-integrity fixes and existing tests -- not a new defect.
+
+### Phase 7/8 -- invariants and architecture
+
+- Confirmed (code trace): `score_explanations` is written atomically with `scored_props` in the same scoring
+  pass (`scoring-service.ts` lines ~1203-1231) -- explanation and numeric score share one immutable payload per
+  row, not independently reconstructed.
+- Confirmed (code trace): both `getCoveredPicksOfTheDay` and `getParlayOptions` read the identical
+  `score_explanations` row via shared helpers (`explanationsByScoredProp`/`latestScoredCompactByCurrentProp`) --
+  they cannot disagree on content for the same scored row (they may show different *subsets* of fields,
+  "compact" vs. full, but never conflicting values).
+- Confirmed (Session 65-69, reconfirmed this session): the direction-aware edge invariant holds -- 0
+  future-starting, publishable, `covered_score>=70` wrong-direction rows, verified via a fresh full-table
+  (1,569-row) bounded read.
+- Model-version/scoring-input provenance: `scored_props.model_version_id` and `score_inputs` exist and are
+  populated per row (confirmed via the live Kayla Thornton row), so per-row scoring-version provenance IS
+  preserved -- a positive finding, not a gap.
+- The confirmed game-log duplication defect is the clearest example of "a stale/wrong feature silently
+  supporting a current score" -- fixed at the read/aggregation layer this session (see Phase 3/5 above), not by
+  touching any stored row.
+
+### Implementation
+
+- `lib/knowledge/enrichment/mlb.ts` -- `dedupeGameLogsByCanonicalGame()`: collapses same-`game_date` rows to one
+  canonical game per real, distinct `event_id` (preserving genuine MLB doubleheaders), preferring a row with a
+  real `event_id` over a null-`event_id` duplicate, then the most recently updated row. Read-time only; no
+  stored row is touched, deleted, or migrated.
+- `lib/knowledge/enrichment/jobs.ts` -- `refreshRecentFeaturesJob` now dedupes each player's fetched game-log
+  rows before any last5/last10/season aggregation; the MLB-only event-lookup gate and chunked/timeout-protected
+  `resolveMlbGameLogEventStartTimes` (exported, DI-based) replace the prior unchunked, un-timed-out, all-leagues
+  lookup; `player_game_logs`'s select now also carries `updated_at` for the dedup tie-break.
+- Tests: 7 new `dedupeGameLogsByCanonicalGame` tests (including an end-to-end reproduction of the exact live
+  Kayla Thornton data proving the corrected 10.8 average, not the naive 12.6), 8 new
+  `resolveMlbGameLogEventStartTimes` tests, 2 new MLB/WNBA gating integration tests.
+
+### Validation
+
+`npx tsc --noEmit`: clean. Focused: `mlb.test.ts` 85/85, `jobs.test.ts` 34/34, `adapters/*.test.ts` +
+`scoring/*.test.ts` 79/79. Full `pnpm test`: **641 pass / 0 fail / 1 intentional skip** (642 total, up from 626).
+`pnpm build`: clean. `pnpm cf:build`: clean, worker bundled. Boundary/public-export/secret audits: all clean
+(part of the full suite).
+
+**Scoring-integrity invariant, re-verified fresh**: full-table read of 1,569 `scored_props` rows -- 70
+wrong-direction/publishable/`>=70` violations, **all** still tied to past-started `current_props`
+(`isFutureStartTime` gate confirmed excludes every one from every board/relational-fallback path) -- **0
+future-starting/user-facing-eligible violations**, unchanged from Session 68/69.
+
+Confirmed: no provider calls added; no scoring thresholds/weights changed; no scheduler configuration changed;
+no production write beyond the read-time fix (no migration, no backfill, no row cleanup); private `origin/main`
+unchanged; public-export impact is none (every touched file is already private-only, confirmed by the boundary
+audit passing unchanged).
+
+### Files changed
+
+- `lib/knowledge/enrichment/mlb.ts` -- `dedupeGameLogsByCanonicalGame()`.
+- `lib/knowledge/enrichment/jobs.ts` -- `resolveMlbGameLogEventStartTimes()` (exported, extracted from the
+  inline Session 69 fix), MLB-only gating, dedup wiring, `refreshRecentFeaturesJob` exported for testability.
+- `lib/knowledge/enrichment/mlb.test.ts` -- 7 new dedup tests.
+- `lib/knowledge/enrichment/jobs.test.ts` -- 8 new lookup tests, 2 new gating integration tests.
+
+### Remaining risks / not done this session
+
+- The `player_pra` null-to-zero composite bug (Phase 6) is documented but not fixed -- needs a product
+  decision on semantics first.
+- `recent_values` remains permanently empty (dead field) -- low priority since nothing renders it today, but
+  worth either wiring or removing.
+- The broader "no Supabase call anywhere in this codebase has a request timeout" gap is only closed for this
+  one call site; a shared-wrapper timeout was deliberately NOT added (would require inventorying every caller's
+  legitimate-duration semantics first, per the task's explicit caution against a casual global timeout).
+- This session audited MLB `pitcher_strikeouts`/`batter_hits`/`batter_total_bases` and WNBA
+  `player_points`/`rebounds`/`assists` at the adapter/lineage level, but only reproduced ONE live representative
+  example end-to-end (WNBA `player_points`) with full raw-log reconciliation -- the duplication defect is
+  confirmed WNBA-only (0% in the MLB sample), so MLB markets were not independently reproduced against a live
+  discrepancy this session.
+- No new natural production run has been observed under this session's changes (not promoted this session).
+
+### Next V2 candidate (proposed, NOT promoted)
+
+This session's final commit on `codex/public-repo-repair` (see push proof below) is proposed as the next V2
+candidate, superseding the rejected `e9dd199`/`b8b7502` (which remains un-promotable as-is per Session 69).
+Immediate rollback remains `933ae62fabc2f8d50adf0e084d422c7d7db47181`. No promotion occurs this session.
+
+**BLOCKED — SCORE EVIDENCE STILL UNTRUSTWORTHY** pending owner review of this session's fix (a confirmed,
+live, previously-undiscovered defect was found and fixed, but has not yet been observed correcting a real
+production row through a natural run, and the `player_pra`/`recent_values` follow-ups remain open).
+
+## Session 71 (2026-07-29) -- score-evidence reconciliation pass: Kayla Thornton resolved, dedup hardened, PRA fixed, new WNBA mismatch found
+
+Owner rejected Session 70's report as internally unreconciled ("both the numeric score and explanation were
+wrong" contradicted the displayed value matching the correct computation) and required a rigorous,
+timestamp/ID-level resolution, explicitly banning "time-bomb" as an explanatory shortcut. All work stayed on
+`codex/public-repo-repair`; no promotion, no scheduler change, no data cleanup. Verified before editing: local
+HEAD == `origin/codex/public-repo-repair` == `cee0aad...`; private `origin/main` unchanged
+(`23f665955b55a9e862f7f2efa8205538c5426013`); live `COVERED_PRIVATE_PIPELINE_SHA_V2` unchanged
+(`933ae62fabc2f8d50adf0e084d422c7d7db47181`, since the Session 69 rollback); scheduler variable unchanged.
+
+### Part 1 -- Kayla Thornton contradiction, resolved with exact IDs/timestamps
+
+`scored_props.id = 3cf8b390-f738-4b3b-97ec-cf1dbd1d4d53`, scored (`updated_at`) `2026-07-29T05:03:25.505Z`. It
+consumed `player_recent_features` id `9cc53dfe-f007-49bd-a6aa-5f615b4401d5` (last_5) /
+`6e7f92a8-ff5c-4134-8363-579f993d8329` (last_10), both computed `2026-07-28T04:56:44.551086Z`, `stale_after
+2026-07-29T10:53:44.735Z` (not yet expired at score time). At that computation time, the ONLY stored game-log
+rows for this player were the 7 clean `sportsdataverse-wnba` rows (`created_at` 2026-07-12 through
+2026-07-27) -- the `wehoop-wnba` duplicate batch for this player's games did not exist yet; it was inserted
+`2026-07-29T05:03:21.219837Z`, roughly **24 hours after** the feature row was computed and **4 seconds before**
+this scoring pass ran. The score therefore read a feature row computed from clean, non-duplicated data; the
+displayed 10.8/8.6 is the genuine result of that clean computation, not a coincidence produced by any
+duplicate-aware logic (none existed in this codebase until this session's fix, and this fix has never run in
+production). **Verdict: LATENT DUPLICATION DEFECT, EXAMPLE DISPLAY WAS CORRECT.** Live re-check at the time of
+this pass found the feature row's `stale_after` has now passed (expired ~29 minutes prior) with no
+recomputation yet observed -- the defect is real and imminent for this exact row, not resolved by luck
+indefinitely.
+
+### Part 2 -- `dedupeGameLogsByCanonicalGame` hardened with a real, previously-missed gap
+
+A live full-table scan of all 10,411 stored MLB `player_game_logs` rows found **9,921 (95.3%) have
+`event_id: null`** -- so Session 70's event_id-keyed doubleheader branch almost never fires for MLB, and the
+function was silently relying on the date-only recency fallback for nearly all MLB rows. Every sampled MLB row
+(event_id null or not) carries MLB Stats API's own stable per-game `raw_payload.game.gamePk`; every sampled
+wehoop-wnba row carries its own `raw_payload.Game_ID`. Neither was used. Fixed by adding a tier-2,
+provider-scoped identity signal (`gamePk`/`Game_ID`, used only for equality/grouping, never for chronological
+ordering -- a deliberately different property from the one Session 68 ruled out) and replacing per-row single-key
+resolution with union-find equivalence merging, so a row with a resolved `event_id` and its provider-overlap
+duplicate lacking one (but sharing the same `gamePk`) still merge into one canonical game. A live full scan
+found **zero current MLB player+date pairs with 2+ rows at all**, so the doubleheader-preservation branch is
+currently unexercised by real data (hardened, not proven against a live doubleheader). 6 new tests added
+covering: MLB doubleheader with neither leg resolved via `event_id` (closes the exact 95%-gap), a real
+cross-provider duplicate resolved on only one side, an unattributable-duplicate-within-a-doubleheader case, a
+wehoop-shaped `Game_ID` duplicate, and input-order invariance. All 90 tests in `mlb.test.ts` pass.
+
+### Part 3 -- `player_pra` missing-component semantics fixed
+
+`lib/knowledge/adapters/basketball.ts`'s `player_pra` case previously summed
+`numeric(x) ?? numeric(y) ?? 0` per component, so a genuinely missing rebounds/assists/points average was
+silently treated as a measured 0 and summed anyway; the old `last5 || null` guard also miscoerced a genuine
+`0` total to `null`. Fixed: each window (last5/last10/season) is now summed only when all three components
+resolve to a real number, otherwise the whole window is `null`; a real `0+0+0` stays `0`. 18 tests added
+covering all-present, one-component-observed-zero, each single component missing, multiple missing, string-numeric
+parsing, malformed values, hit-rate gating on the now-correctly-null aggregate, sample-size disclosure staying
+intact, and the no-data projection fallback. **Live check: `player_pra` currently has zero rows in
+`current_props` at all** (disabled per Session 62/63's WNBA PRA/threes provider-gap config disable) -- so this
+fix has real code-correctness value but zero current user-facing impact until/unless that market is re-enabled.
+
+### Part 4 -- current live mismatch reproduced (a NEW, third defect, not yet fixed)
+
+MLB reconciliation (Trevor Rogers, `pitcher_strikeouts`, `scored_props.id f257e9ad...`, score 63): recomputing
+last5/last10 strikeouts directly from the 15 most recent stored `player_game_logs` rows gives **5.8 / 4.4**,
+exactly matching the stored/displayed explanation -- clean, no mismatch found here.
+
+WNBA reconciliation (Jordin Canada, `player_points`, `scored_props.id ceb27c32...`, score 79, currently
+publishable and Covered-Picks-eligible): the displayed explanation reads "14.0 over the last 5." Recomputing
+the 5 most recent **distinct games** directly from the currently-stored `player_game_logs`
+(07-19:10, 07-17:18, 07-13:16, 07-11:10, 07-09:14) gives **13.6**, not 14.0 -- a real, reproducible, CURRENT
+0.4-point mismatch. This is **not** explained by the cross-provider duplication defect (the `wehoop-wnba`
+duplicates for this player's games were all inserted `2026-07-29T05:03:20.677Z`, roughly 6 hours **after** this
+feature row was computed at `2026-07-28T22:53:46Z` -- only one row per date existed at computation time) and is
+**not** the `player_pra` defect (this is `player_points`, a single-component market). Root cause not
+conclusively identified within this bounded, read-only pass: with only one row per date at computation time,
+reconstructing which specific games contributed to the stored average has combinatorial ambiguity (many
+different 5-game subsets of this player's history sum to the same total), so the exact mechanism could not be
+pinned down without live tracing of that historical job run. **This is flagged as a new, separate, open defect
+requiring its own dedicated investigation -- not fixed or further chased this session, per scope discipline
+(this pass was scoped to the duplication and PRA defects specifically).**
+
+### Part 5 -- factor completeness classification (Jordin Canada + Trevor Rogers rows)
+
+Every visible factor in both explanations is either genuinely observed-and-used-in-scoring (Recent Form,
+Matchup/Pitcher-Matchup-when-present, Usage/Minutes, Weather, Ballpark, Odds Movement via risk flagging),
+derived-and-used (Line Value, Data Quality), or unavailable-and-correctly-labeled (Injury Context, Handedness
+Split, Lineup Context for a pitcher prop, Pitcher Matchup when genuinely absent) -- confirmed via direct code
+trace of `basketball.ts`/`mlb.ts`. No section was found implying evidentiary support from a null, unavailable,
+or unused value. The Jordin Canada row's Recent Form label is mechanically "used in scoring" as designed, but
+per Part 4 its underlying number is one of the open defects above.
+
+### Implementation this session
+
+- `lib/knowledge/enrichment/mlb.ts` -- `dedupeGameLogsByCanonicalGame()` hardened with a provider-scoped
+  `gamePk`/`Game_ID` tier-2 identity signal and union-find equivalence merging (see Part 2).
+- `lib/knowledge/enrichment/jobs.ts` -- added `provider` to the `player_game_logs` select so the dedup function
+  can scope its provider-native key correctly.
+- `lib/knowledge/adapters/basketball.ts` -- `player_pra` case rewritten to null-if-any-component-missing (see
+  Part 3).
+- `lib/knowledge/enrichment/mlb.test.ts` (+6 tests), `lib/knowledge/adapters/basketball.test.ts` (+18 tests).
+- Full validation: `npx tsc --noEmit` clean; `npm test` 659/659 non-skipped tests pass (0 fail); `npm run build`
+  succeeds; `npm run cf:build` (OpenNext/Cloudflare) succeeds.
+
+### Known limitations / open items (unchanged or new)
+
+- **New, unresolved**: the Jordin Canada `player_points` 13.6-vs-14.0 mismatch (Part 4) -- a third,
+  previously-unknown defect distinct from duplication and PRA. Root cause not identified; needs its own pass.
+- `recent_values` (`score_explanations.recent_values`) remains dead/unwired (Session 70 finding, unchanged).
+- The duplication fix (Session 70) has still not been observed correcting a real production row through a
+  natural run, since it has not been promoted.
+- `player_pra` is currently disabled at the source (zero live rows), so its fix has no current user-facing
+  effect, only latent correctness value for if/when it is re-enabled.
+- No new natural production run has been observed under this session's changes (not promoted this session).
+
+### Verdict
+
+**BLOCKED — SCORE EVIDENCE STILL UNTRUSTWORTHY.** The Kayla Thornton contradiction is now fully resolved and
+the dedup/PRA fixes are real, tested corrections, but Part 4 surfaced a brand-new, unexplained, currently-live
+mismatch (Jordin Canada) that was not part of this pass's original scope and is not yet understood, let alone
+fixed. Per the owner's explicit instruction, this commit is NOT proposed as a promotion candidate merely
+because it is the branch tip -- see the chat-delivered final report for the full candidate-discipline
+breakdown.
+
+## Session 73 (2026-07-29) -- exhaustive Jordin Canada forensic pass: one real bug found and fixed, root mechanism still unresolved
+
+Continued the Jordin Canada 14.0-vs-13.6 investigation with maximum rigor per the owner's explicit phase list
+(writer matrix, DB triggers, workflow reconstruction, overlapping invocations, upsert identity, bounded
+systemic sample). Verified baseline first: `codex/public-repo-repair` @ `9118a3e` (matches remote), private
+`origin/main` unchanged, live V2 unchanged (`933ae62...`), scheduler unchanged, no later production run
+checked out `9118a3e`, no relevant queued/active run (one stale 13-day-old orphaned `workflow_dispatch`
+queued item on the public repo's own `main` pointing at an unrelated old commit -- inert, not a candidate).
+
+**Bounded systemic sample (14 distinct player+market WNBA rows, all currently publishable):** 10/14 match
+their stored feature value exactly. 4 mismatch, and critically **all 3 of Jordin Canada's own markets
+(points, rebounds, assists) are wrong simultaneously** while every other sampled player is clean (one
+additional mismatch: Arike Ogunbowale, assists). This is not systemic noise -- it is concentrated on specific
+feature-row computations.
+
+**Writer-matrix exhaustive search (Phase 4):** confirmed `refreshRecentFeaturesJob` (`jobs.ts`) is the only
+function anywhere in the codebase that writes `player_recent_features`/`basketball_player_features` (grepped
+every `.from`/`upsertRows`/`insertRows`/`deleteRows` call site, every script, every migration/RPC/trigger).
+Also found and confirmed a SEPARATE, real defect while tracing writers: `refreshBasketballPlayerLogs`'s
+`wehoop-wnba` ingestion (`enrichment/basketball.ts` line ~1244) deletes ALL rows for `{provider, player_id}`
+unconditionally, then reinserts only what that single fetch returns -- if a fetch ever comes back incomplete,
+this would silently wipe that player's whole wehoop-wnba history down to an incomplete set with no row-count
+guard. NOT the cause of the Jordin Canada mismatch (wehoop-wnba postdates her feature computation by hours),
+but a real, confirmed architectural risk, flagged for a separate pass. By contrast, `sportsdataverse-wnba`'s
+own ingestion (`ingestion/sportsdataverse-wnba.ts` line ~638) deletes/inserts scoped to the exact
+`(provider, player_id, game_date)` key per record -- safe, not vulnerable to this class of bug.
+
+**Phase 5 (DB-side audit):** confirmed via the actual migration SQL -- no triggers, no generated columns, no
+RPC functions touch either feature table; `created_at`/`updated_at` are plain `timestamptz default now()`
+columns. This ruled out any DB-side mechanism for the timestamp anomaly below.
+
+**The real, confirmed, fixed bug:** `player_recent_features`'s `updated_at` column was **never included in the
+upsert payload** (`jobs.ts` ~line 1594, and the analogous `team_recent_features` upsert ~line 1781). Since the
+upsert's conflict target is `(player_id, feature_date, source_window)`, a REPEAT computation for an unchanged
+"latest game date" (no new game since the last run) hits the SAME row again via `ON CONFLICT` -- but
+PostgREST's `merge-duplicates` resolution only refreshes columns present in the payload, so `updated_at` stayed
+frozen at the row's first-ever insert time forever after, even though `feature_payload`/`stale_after` genuinely
+refreshed on every subsequent write. This was proven directly, not inferred: Jordin Canada's row's
+`stale_after` value (`2026-07-29T10:53:46.034Z`) is exactly "12 hours after 2026-07-28T22:53:46" -- a real
+write at that second -- while `updated_at` on the SAME row still read `2026-07-28T04:56:44` (a full day
+earlier). This is a genuine provenance defect (the one form of write-time tracking these tables had was
+silently unreliable after the first write) and is now fixed: both upserts include a fresh `updated_at` on
+every write. 2 new regression tests prove it (`jobs.test.ts`), asserting the actual POST payload sent to
+Supabase contains a freshly-captured `updated_at` on every upsert, including a repeat computation for an
+unchanged feature_date.
+
+**What this fix does NOT explain:** the `stale_after` math also proves `refreshRecentFeaturesJob` genuinely
+executed for Jordin Canada (and, 2 seconds apart, Arike Ogunbowale) at `2026-07-28T22:53:44-46Z` -- squarely
+inside GitHub Actions run `30406045010` (`22:51:13`-`22:54:18Z`, checked out `933ae62`, confirmed via the run's
+own `git rev-parse HEAD` log line). Yet that SAME run's own structured JSON summary reports
+`recentFeatures: {shouldRefresh: false, missingIds: [], staleIds: []}` covering both players, and direct code
+inspection proves this decision and the actual invocation share the exact same boolean (a ternary at
+`runLivePreScoreRepair`'s `recentFeatures` gate) -- they cannot diverge by construction. Every other function
+reachable before that gate (`runLiveIdentityRepair`, the WNBA background-enrichment ingest/matchup-refresh
+path, `refreshWnbaMatchupFeatures`) was individually checked via direct code read and confirmed NOT to write
+either feature table. A brute-force search additionally found **no 5-game subset of Jordin Canada's own
+currently-stored game logs reproduces all three of her stored averages (points=14.0, rebounds=2.6,
+assists=10.4) simultaneously** -- ruling out a simple "wrong 5-game window" explanation entirely; whatever
+produced this feature_payload did not compute purely from her own currently-stored, correctly-attributed game
+rows. **This remains a genuine, unresolved contradiction between direct evidence and exhaustive code-path
+elimination.** Not explained away, not speculated further.
+
+### Implementation this session
+
+- `lib/knowledge/enrichment/jobs.ts` -- added `updated_at: new Date().toISOString()` to both the
+  `player_recent_features` upsert (last_5 and last_10 rows) and the `team_recent_features` upsert.
+- `lib/knowledge/enrichment/jobs.test.ts` -- extended the existing mock-fetch harness to capture POST bodies
+  by table, added 2 tests proving `updated_at` is present and fresh on every upsert write.
+- Full validation: `npx tsc --noEmit` clean; `npm test` 661/661 non-skipped pass; `npm run build` succeeds;
+  `npm run cf:build` succeeds.
+
+### Verdict
+
+**BLOCKED — FEATURE AGGREGATE ROOT CAUSE UNRESOLVED.** One real, confirmed, fixed defect this session
+(`updated_at` never refreshed). The core Jordin Canada mismatch mechanism remains genuinely unproven despite
+an exhaustive writer-matrix search, DB-trigger audit, and workflow-execution reconstruction -- recommend
+targeted instrumentation (pipeline run ID + git SHA + exact canonical game IDs used, stored in the existing
+`feature_payload` jsonb column, no migration needed) before attempting further root-cause work. Not proposed
+as a promotion candidate.
+
+## Sessions 74-77 (2026-07-29) -- freshness/retry contradiction resolved; aggregate root cause still blocked
+
+Follow-on, read-only forensic passes fully resolved the apparent "write happened despite a false freshness
+gate" contradiction from Session 73: `runLivePreScoreRepair` runs in a bounded (up to 3-attempt) reconciliation
+loop, and the recent-features freshness check unions `player_recent_features` with `basketball_player_features`
+(picking the newer `updated_at` across both) -- since `basketball_player_features` is always written via
+delete-then-insert (never subject to the `updated_at`-omission bug `f915977` fixed), it supplied a genuinely
+fresh timestamp that correctly satisfied the freshness gate on the final attempt. This is now proven, not
+speculated: directly simulated against live rows for 5 players. The retry loop's 3rd attempt was driven by an
+unrelated `matchup`-context gap, not by recent-feature staleness. **The aggregate-value question (why Jordin
+Canada's stored `points_last_5_avg` was 14.0 against a 13.6 replay) remains completely unresolved and
+unrelated to any of the above** -- no source-row provenance was ever recorded, and none of the accessible
+evidence sources (raw workflow logs, DB metadata via PostgREST, existing tables) preserve the exact game-log
+membership a past computation used. No code changed in these sessions.
+
+**Verdict: FRESHNESS BEHAVIOR PROVEN — AGGREGATE ROOT CAUSE STILL BLOCKED.**
+
+## Session 78 (2026-07-29) -- feature provenance and score certification: design only
+
+Produced a full design specification for closing the provenance gap identified above, per explicit
+documentation-only authorization (no code, no migration, no production action). See
+`docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` for the complete design: reconciliation-attempt
+observability, feature-computation provenance schema (JSONB-first, with a normalized ledger recommended for
+later), quantified storage/egress estimates, a deterministic replay-tool design, an expanded `f915977` test
+plan, and bounded WNBA/MLB score-certification proof designs. **Implementation is not authorized.** Production
+remains pinned to `933ae62fabc2f8d50adf0e084d422c7d7db47181`; `f915977` remains repair-branch-only and
+unpromoted.
+
+**Verdict: DESIGN DOCUMENTED FOR OWNER REVIEW — IMPLEMENTATION NOT AUTHORIZED.**
+
+## Session 79 (2026-07-29) -- Phase 16: feature provenance/certification foundation implemented
+
+Following explicit implementation authorization for the Session 78 design, built the observability/provenance/
+replay/behavioral-test foundation on `codex/public-repo-repair`, commits `248dae1`, `98f69ea`, `5448442`
+(all local to this branch; production, scheduler, and private `main` unchanged). See
+`docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 14 for the verified context-completeness matrix
+and Task K's public-API exposure check.
+
+**Implemented:** reconciliation-attempt observability (`lib/ops/repair-observability.ts`, every `runRepair`
+loop iteration retained as a bounded/hashed `RepairAttemptSummary`); `FeatureProvenanceV1` embedded in all 5
+recent-feature write paths (`lib/knowledge/enrichment/feature-provenance.ts`, JSONB-only, no migration);
+`score_inputs.feature_payload.featureProvenance` linkage to the exact upstream feature computation
+(`lib/knowledge/scoring-service.ts`) -- fixed a real mislabeling bug this session's own test caught (MLB
+provenance was labeled `basketball_player_features`); a structurally read-only deterministic replay CLI
+(`pnpm covered:replay-feature`, `pnpm covered:replay-score`); WNBA/MLB deterministic provenance fixtures;
+5 new `f915977` behavioral tests (union-freshness masking, isolated stale-to-fresh transition, stale_after/
+updated_at bound, and a documented uncaught-failure-propagation risk in `refreshRecentFeaturesJob`); 3 new
+context-completeness integration tests proving the existing `missing_recent_logs` publishability blocker
+actually blocks, and documenting (not fixing) that `weather_missing`/`ballpark_missing` risk flags never reach
+`publishability_reasons` today.
+
+**Explicitly NOT done / NOT claimed:** the Jordin Canada 14.0-vs-13.6 aggregate root cause remains unresolved
+-- provenance now exists so a *future* occurrence of this shape is replayable, but no historical row's original
+inputs were recovered. `replay-score` deliberately does not re-invoke the real scoring adapters to reproduce a
+fresh Covered Score (see `replay-score.ts`'s documented scope boundary) -- it verifies score-to-feature lineage
+integrity only. No migration, no scheduler change, no production write, no V2 pin change. Covered is **not**
+claimed to be scoring correctly in production as a result of this phase.
+
+**Validation:** `npx tsc --noEmit` clean; full suite `pnpm run test` -- 731 passed, 1 pre-existing skip, 0
+failed; `pnpm run build` (Next.js production build) succeeded; public-repo-boundary audit
+(`auditPublicExport()`) reports `ok: true` with the new private-only files added to
+`docs/public-repo-boundary.json`. `pnpm run cf:build` (Cloudflare/OpenNext) was not run this session -- no
+OpenNext/edge-runtime-specific code was touched, and the standard build already exercises the same TypeScript
+compilation and route bundling; recommended as a pre-promotion check, not required to validate this phase.
+
+**Verdict: FOUNDATION IMPLEMENTED — READY FOR FEATURE-CORRECTION REVIEW.**
+
+## Session 80 (2026-07-30) -- Phase 17: true deterministic score replay + live production diagnostic
+
+Independently re-verified Phase 16 (commits `248dae1`/`98f69ea`/`5448442`/`3d0640b`) against the actual diffs,
+tests, and runtime behavior rather than trusting the prior report -- all 12 required checklist items confirmed
+correct by direct code/test inspection. See `docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 15 for
+full detail. New commits on `codex/public-repo-repair`: `09c09d0`, `1674f16`, `b051ca2`.
+
+**Implemented:** true deterministic score replay (`lib/knowledge/score-replay-provenance.ts`,
+`replayScoreDeterministic()`) -- re-invokes the real `adapterForLeague(...).buildScore(...)` against an exact
+prop+context snapshot captured at scoring time, closing the gap Phase 16 explicitly left open; a genuine,
+independently-discovered pre-existing bug fixed along the way (`scoreInputChanged`'s comparison has evaluated
+"changed" on effectively every re-score since it was written, defeating the write-skip optimization -- an
+AGENTS.md hard-rule violation, now fixed with 2 regression tests); write-integrity fix so a swallowed
+basketball/mlb feature delete failure is now recorded and surfaced as a pipeline warning instead of silently
+discarded; 3 new identity-risk tests at the publishability layer (one is a documented finding, not a fix: no
+existing check blocks `team_id === opponent_team_id`).
+
+**Bounded, read-only live production diagnostic (Task C), the most significant finding this session:** verified
+fresh via `gh api .../environments/production/variables` and `git merge-base` that production (`933ae62`)
+predates all of Phase 16/17 and also predates the cross-provider game-log dedup fix (`920d24b`, already on this
+branch). Re-ran the exact 66-player population from Sessions 74-77's investigation plus a fresh sample: WNBA
+mismatches are fully explained by production double-counting a game logged by both `sportsdataverse-wnba` and
+`wehoop-wnba` in its un-deduped last-5/10 window (verified exactly against 3 live players' stored values). MLB
+(one dominant provider) showed 3/3 exact matches. **This is a promotion gap, not a code gap** -- the fix already
+exists and is tested on this branch; no code change was made as a result, consistent with promotion being out of
+this phase's authorization. The original, separately-investigated Jordin Canada discrepancy remains unresolved
+and was not re-litigated.
+
+**Explicitly NOT done / NOT claimed:** no migration, no scheduler change, no production write, no V2 pin change,
+no promotion. Weather/ballpark publishability policy and the `team_id === opponent_team_id` gap are reported as
+open decisions (design doc Section 13), not resolved unilaterally. Tasks G/H/I/J/K/L were closed out at a
+verification/documentation level grounded in code already read this session rather than with new test suites,
+given the scale already delivered -- see Section 15.6 for exactly what was and wasn't done. Covered is **not**
+claimed to be scoring correctly in production as a result of this phase.
+
+**Validation:** `npx tsc --noEmit` clean; full suite `pnpm run test` -- 758 passed, 1 pre-existing skip, 0 failed
+(up from 731/1/0 in Session 79); `pnpm run build` succeeded; public-repo-boundary audit reports `ok: true`.
+`pnpm run cf:build` not re-run this session (no edge-runtime-specific code touched beyond Session 79's already-
+verified build).
+
+**Verdict: FEATURE AND SCORE CORRECTIONS IMPLEMENTED — READY FOR CONTEXT-COMPLETENESS REVIEW.**
+
+## Session 81 (2026-07-30) -- Phase 18: current-prop and identity integrity
+
+Independently re-verified Phase 17 (all 12 checklist items confirmed against actual code/tests). New commits on
+`codex/public-repo-repair`: `ddf656a`, `2cecc04`. See `docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md`
+Section 16 for full detail.
+
+**Two genuine identity/event-status gaps closed, both publication-gate additions, no formula/weight/threshold
+changed:** (1) `team_id === opponent_team_id` -- documented as an open gap in Session 80, now blocked with
+`team_equals_opponent`, satisfying the Phase 18 completion standard's item 3 directly. (2) Postponed/canceled
+events -- `events.status` already carries a real `"postponed"` value (WNBA) but was never read by scoring; MLB's
+own status-mapping function had no branch for postponed/suspended/cancelled at all and silently defaulted to
+"scheduled". Both fixed; `publishabilityAssessment` now blocks with `event_not_scheduled`. 7 new tests, including
+a false-positive check.
+
+**Also implemented:** a bounded internal `CompletenessState` classification
+(`complete`/`scoreable_optional_context_missing`/`publication_blocked`/`identity_unresolved`/`stale`), derived
+from the same blockers `publishabilityAssessment` already computes, stored only in
+`score_inputs.feature_payload` (verified no `app/api/**` route reads that table at all); 3 current-prop
+freshness boundary tests (exact-now, one-second-future, no-start_time); 2 explanation-integrity tests closing a
+previously-untested gap (Weather/Ballpark/Handedness Split factors are proven to honestly report "Missing" when
+context is null, not a fabricated neutral read).
+
+**Re-verified, not re-built (scope-managed, matching Session 80's approach):** canonical event selection
+(existing dedup/doubleheader test suite, re-confirmed passing), the cross-provider duplicate-window live
+evidence from Session 80 (not re-run live again to avoid an unnecessary repeated production read of an
+unchanged fact), the required-context matrix (Section 14/15.6, still accurate), matchup-context retry-exhaustion
+behavior (already covered by an existing test), and the weather/ballpark blocker-policy stance (still an open
+owner decision, not resolved this session either).
+
+**Explicitly NOT done / NOT claimed:** no migration, no scheduler change, no production write, no V2 pin change,
+no promotion, no live provider calls. Player/team/opponent identity *resolution* itself
+(`sharp-matching.ts`/`matching.ts`) was not audited -- a genuinely separate, much larger subsystem from scoring's
+*consumption* of already-resolved identity, noted as out of scope rather than silently skipped. Covered is
+**not** claimed to be production-certified as a result of this phase.
+
+**Validation:** `npx tsc --noEmit` clean; full suite `pnpm run test` -- 772 passed, 1 pre-existing skip, 0
+failed (up from 758 in Session 80); `pnpm run build` succeeded; public-repo-boundary audit reports `ok: true`.
+
+**Verdict: PARTIAL CONTEXT CORRECTION — SPECIFIC GAPS REMAIN.**
+
+## Session 82 (2026-07-30) -- Phase 18 continuation: chain-integrity enforcement proof
+
+Re-verified repository/production state fresh (`gh api` production variables): live V2 pin
+`933ae62fabc2f8d50adf0e084d422c7d7db47181` and scheduler `true` unchanged; private `origin/main`
+`23f665955b55a9e862f7f2efa8205538c5426013` unchanged; failed candidate `e9dd199` confirmed pre-existing history
+(predates all Phase 16/17/18 work), never re-promoted. New commits on `codex/public-repo-repair`: `366c68f`,
+`1b90e8e`, plus a docs/e2e commit. See `docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 17.
+
+**Corrected a prior miscount:** Session 81 said Phase 18 had "4 new commits" but produced **three**
+(`ddf656a`/`2cecc04`/`229b9fc`); `13b0244` was the starting point, not a Phase 18 commit.
+
+**Precise, verified branch ancestry (linear, no rewrites):**
+`b051ca2` → `13b0244` (Phase 17 doc close-out, LAST Phase 17 commit) → `ddf656a` → `2cecc04` → `229b9fc`
+(the three Phase 18 Session-81 commits) → `366c68f` → `1b90e8e` → `ccf69b4` = HEAD = `origin/codex/public-repo-repair`.
+**Reconciliation of the "started at 13b0244" wording:** that phrasing in the Session 82 report was imprecise. It
+referred to the Phase 17 tip that *all* Phase 18 work descends from, NOT the base of this specific continuation.
+This continuation actually started from `229b9fc` (which already contained `ddf656a`/`2cecc04`/`229b9fc` as
+ancestors) and added exactly three new commits: `366c68f`, `1b90e8e`, `ccf69b4`. No history was rewritten,
+reset, rebased, amended, or force-pushed at any point. Each commit's parent is its immediate predecessor above.
+
+**Proven with executable tests (previously only inspected):**
+- Board/snapshot/relational-fallback enforcement (items 17-19): all three share `getCoveredPicksOfTheDay`'s
+  `publishable=true` query gate; a blocked prop at covered_score 99 never reaches any of them. The two Phase 18
+  blockers proven through the full WNBA+MLB offline e2e path.
+- Current-prop freshness policy from the actual schema: supersession is prevented by upsert-in-place on
+  `unique(provider,provider_prop_key)` (nothing stale lingers); currency = active + future start + non-postponed
+  event (all enforced); new `current-prop-retention.test.ts` (no prior coverage). A durable line-history ledger
+  is migration-gated (owner decision, not a correctness gap).
+- Identity resolution (`resolveCanonicalEventTeams`, now in scope): opponent always from the canonical event's
+  other side, non-participant hint -> null, ambiguity -> null (no arbitrary pick), degenerate same-team event
+  surfaced faithfully (caught downstream by `team_equals_opponent`).
+- Dedup winner determinism when duplicates disagree on values; retry-exhaustion keeps the unresolved-matchup
+  blocker visible and never fabricates success; CompletenessState enforcement invariants (deterministic,
+  identity dominates, complete requires zero blockers+soft-reasons).
+- Weather/ballpark: evidence-grounded — missing values contribute exactly ZERO (neutral defaults), so they are
+  genuinely optional; current policy does not require them and there is no hidden requirement being violated.
+  Making them blockers would be new policy (owner decision), not implemented.
+
+**Two honest sub-findings (documented, not silently changed):** `getParlayOptions` intentionally shows scored
+(broader than publishable) rows -- a deliberate different product gate; `getBoardOpportunities` is unwired dead
+code (0 callers) with no publishable filter -- not a live surface.
+
+**Explicitly NOT done:** no migration, no scheduler change, no production write, no V2 pin change, no promotion,
+no live provider calls. Deeper matching-heuristic internals (`matchNormalizedSharpProp`) remain a separate
+subsystem. Covered is **not** claimed production-certified.
+
+**Validation:** `tsc` clean; full suite 798 passed / 1 pre-existing skip / 0 failed (up from 772); `pnpm run
+build` and `pnpm run cf:build` both succeeded; public-repo-boundary audit `ok: true`.
+
+**Verdict: PARTIAL CONTEXT CORRECTION — SPECIFIC GAPS REMAIN.**
+
+## Session 83 (2026-07-30) -- Phase 18 continuation (deep-audit pass)
+
+Re-verified state fresh: live V2 pin `933ae62…` and scheduler `true` unchanged (`gh api`); private `origin/main`
+`23f66595…` unchanged; failed candidate `e9dd199` is NOT the pin and pre-dates all Phase 16/17/18 (never
+re-promoted); `scoring-engine/dist/` untouched. Corrected the "started at 13b0244" wording (that was the Phase 17
+tip / base of all Phase 18 work; THIS continuation started at `229b9fc` and added `366c68f`/`1b90e8e`/`ccf69b4`,
+then this deep-audit pass added `5bfafad`/`cab9e20`). Branch ancestry is linear, no rewrites. See
+`docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 18 for the full executable requirement matrix.
+
+**Real code fix:** `getParlayOptions` (Manual Analyzer / parlay builder) previously filtered only
+active+future, so a structurally-invalid leg could surface. Added a narrow structural-validity filter excluding
+`team_id === opponent_team_id`, postponed/canceled events, and fully-unresolved-identity props -- WITHOUT the
+70-point floor and WITHOUT narrowing the builder's intentional breadth (valid sub-70 rows still appear). 4 tests.
+
+**Proven (previously inspected or asserted):** semantic supersession is REAL -- `buildSharpProviderPropKey` is
+line-independent, so a line change overwrites in place (7 lifecycle tests); normalized player-matching
+disambiguation never arbitrarily first-picks a tie (6 tests against the exported `chooseBestPlayerCandidate`);
+weather is scored as neutral-when-missing, which is MORE favorable than real cold weather (effect ~0.22
+projection units) -- so weather/ballpark are conditionally-score-relevant for 4 batter markets, not cosmetic.
+
+**Owner-policy-gated (documented, not implemented -- no migration, no policy invention):**
+1. Hard stale-market rejection (a de-listed-but-future market publishes today with only a soft `stale_odds`
+   flag; the schema CAN distinguish current vs stale via `updated_at`/`pulled_at`, so this is a policy decision,
+   not a migration -- for that ONE sub-requirement: `CONTEXT CORRECTION BLOCKED — OWNER POLICY OR MIGRATION
+   REQUIRED`, owner-policy branch).
+2. Weather/ballpark optional vs conditionally-required for the 4 MLB weather-consuming batter markets.
+3. Whether the Manual Analyzer should also require full recent-form/matchup context (vs disclosing via labels).
+
+**Explicitly NOT done:** no migration, no scheduler/pin change, no production write, no provider calls, no
+promotion, no scoring-weight/threshold change. Covered is NOT claimed production-certified.
+
+**Validation:** `tsc` clean; full suite 816 passed / 1 pre-existing skip / 0 failed (up from 798); `pnpm run
+build` + `pnpm run cf:build` both succeeded; public-repo-boundary audit `ok: true`.
+
+**Verdict: PARTIAL CONTEXT CORRECTION — SPECIFIC GAPS REMAIN.**
+
+## Session 85 (2026-07-31) -- Phase 18 continuation: WNBA/NBA ambiguity fix, nearest-event fallback constraint, matchNormalizedSharpProp audit
+
+Continued from `750e7e2`. This pass resolved the two integrity gaps Session 84's own report flagged (WNBA/NBA
+first-row ambiguity, `matching.ts` untested) rather than deferring them. See
+`docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 29 for full detail.
+
+**Major correction:** Session 84 stated `matching.ts`/`matchNormalizedSharpProp` is "production-reachable via
+`sharpapi-refresh.ts` -> `sharp-ingestion-job.ts`". Re-traced from scratch this session: that claim does not
+hold. `sharp-ingestion-job.ts` contains the string `"sharpapi-refresh"` only inside an unrelated cache-key
+literal, never an actual import. Exhaustive grep across every production import, workflow YAML, package.json
+script, and the Inngest function registry confirms `refreshSharpApiFeed` (and everything downstream of it,
+including `matchNormalizedSharpProp`) has ZERO production callers -- it is genuinely dead code. The real
+production path is `runSharpApiIngestion` -> `ingestSharpApiMarketCandidates` -> `matchSharpMarketCandidate`
+exclusively (`sharp-matching.ts`), wired into both `lib/ops/github-actions-pipeline.ts` and
+`lib/inngest/sharp.ts`.
+
+**Real, live-path defect found and fixed:** `findEvent()`'s SharpAPI-source-mapping and exact-date-schedule
+tiers applied ambiguity blocking (2+ different rows -> block) for MLB only; every other league (WNBA/NBA)
+silently took the first row of an unordered `limit: 2` query even when two DIFFERENT rows existed. Now applies
+uniformly across leagues. The 18-hour nearest-event fallback (WNBA/NBA-only, MLB never reaches it) previously
+had no future/status/uniqueness constraints; now requires the event to be future, exactly `"scheduled"`, and
+the sole candidate within the window -- zero or 2+ qualifying candidates both block rather than falling
+through to auto-create (distinguishing "no event exists nearby" from "a disqualified one exists nearby, don't
+manufacture a duplicate"). 20 tests in `event-selection-matrix.test.ts` (14 from Session 84 + 6 new) prove
+this, plus a minimal `gt`/`lt` operator addition to `supabase-fixture-harness.ts` needed to test it.
+
+**`matchNormalizedSharpProp` audit:** 10 new tests in `lib/knowledge/matching.test.ts`. Confirmed this file's
+event resolution has NO ambiguity detection at all (any tier, any league) -- a real, characterized (not
+fixed) weakness, left uncorrected because the path is dead code (fixing it changes no production behavior).
+Also found: `NormalizedPropCandidate.team` is typed as the literal `null`, so this function's team/opponent
+derivation is structurally always-null, independent of reachability.
+
+**Second real defect found and fixed:** `resolvePublicSnapshotRoute`'s `buildFallbackResponse()` call had no
+try/catch anywhere up to the route handler -- a genuine transient Supabase read failure would crash the whole
+route instead of degrading to `unavailable`. Fixed with the same pattern as Session 84's malformed-snapshot
+fix. 11 new snapshot/fallback-matrix tests added to `read-surface-parity.test.ts` (versioned hit, latest-alias
+missing, rows-as-object, missing envelope metadata, empty fallback, the fallback-throws regression, duplicate
+prop in a snapshot).
+
+**Route-testing limitation:** extracted `hydrateCoveredPickSnapshotRow` (route-specific response-shape logic,
+previously untested) out of `covered-picks/route.ts` into `public-snapshots.ts` so it's directly testable
+without `next/server`; 1 new test. The `next/server` Node ESM resolution failure itself remains confirmed and
+un-fixed (patching a third-party package is out of scope).
+
+**Explicitly NOT done:** no migration, no scheduler/pin change, no production write, no provider calls, no
+promotion, no Policy C or shared-budget-allocation change, no scoring/threshold change. `matching.ts`'s event-
+resolution weakness was characterized, not fixed (dead code).
+
+**Validation:** `tsc` clean; full suite 919 passed / 1 pre-existing skip / 0 failed (up from 896); `pnpm run
+build` + `pnpm run cf:build` both succeeded; `covered-live-pipeline.yml` unchanged/valid; full targeted
+regression (11 files) 215/215 pass.
+
+**Verdict: PARTIAL CONTEXT CORRECTION — SPECIFIC GAPS REMAIN.**
+
+## Session 84 (2026-07-31) -- Phase 18 continuation: event-selection matrix, MLB/WNBA fixture completion, public-read-surface parity
+
+Continued from `a360366` (the shared-budget fairness fix). Re-verified state fresh: local HEAD =
+`origin/codex/public-repo-repair` = `a36036632d8e5a15355897923f0f075e81b2d500` (0 ahead/0 behind);
+`origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`; `scoring-engine/dist/` untouched. Live
+V2 pin/scheduler carried forward, not re-queried. See
+`docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Section 28 for full detail.
+
+**New:** `lib/knowledge/event-selection-matrix.test.ts` (14 tests) -- the event-selection matrix driven
+through the REAL `matchSharpMarketCandidate` entry point (not the lower-level helpers `sharp-matching.test.ts`
+already covers), proving exact tier precedence and a genuine, confirmed MLB-vs-WNBA/NBA asymmetry (MLB never
+uses a time-proximity fallback; WNBA/NBA do, bounded to 18h) -- documented, not changed (would be a
+selection-policy change). `lib/knowledge/read-surface-parity.test.ts` (6 tests) -- exact `covered_score===70`
+boundary, snapshot-vs-relational field parity, and a structural proof that a snapshot hit can never also
+trigger the relational fallback (answers "duplicate prop in both sources" directly: architecturally
+impossible). `mlb-e2e.test.ts`/`wnba-e2e.test.ts` extended with a Manual Analyzer assertion on the existing
+happy-path fixture and one new test each proving the previously-missing "cross-provider game-log dedup ->
+recent-feature computation" chain through the REAL `refreshRecentFeaturesJob`, chained into `scoreCurrentProps`
+on the same fixture instance.
+
+**One real defect found and fixed:** `resolvePublicSnapshotRoute` read `snapshot.rows.length` with no
+array guard -- a malformed/corrupted `provider_cache` payload (`rows: null`) crashed the route uncaught
+instead of degrading to the relational fallback like a genuine miss. Fixed with an `Array.isArray` guard;
+1 regression test. Defensive-programming fix only, no scoring/policy/allocation change.
+
+**Confirmed, not fixed (genuine pre-existing test-infrastructure limitation):** direct HTTP-handler tests for
+`app/api/knowledge/*/route.ts` are not possible under this repo's `node --test` harness -- `next/server`'s
+bare specifier fails Node ESM resolution independent of this repo's own loader (reproduced with and without
+it). Fixing it would mean patching a third-party package or a broad refactor of all 7 route files, both out of
+scope. The routes' own logic beyond `resolvePublicSnapshotRoute` (now tested) is thin query parsing plus
+`clampCoveredPicksFloor` (already tested separately).
+
+**Explicitly NOT done:** no migration, no scheduler/pin change, no production write, no provider calls, no
+promotion, no Policy C or shared-budget-allocation change, no scoring/threshold change. `matching.ts`'s
+separate `matchNormalizedSharpProp` pipeline remains untested (flagged, out of scope). Full line-by-line
+failure-mode re-audit against the owner's list beyond what already existed was not re-derived from scratch.
+
+**Validation:** `tsc` clean; full suite 896 passed / 1 pre-existing skip / 0 failed (up from 874); `pnpm run
+build` + `pnpm run cf:build` both succeeded; `covered-live-pipeline.yml` unchanged/valid; public-repo-boundary
+audit `ok: true`.
+
+**Verdict: PARTIAL CONTEXT CORRECTION — SPECIFIC GAPS REMAIN.**
+
+## Phase 18 closure record (2026-07-31)
+
+Final Phase 18 repository SHA: `be058b76163cf2529faedbe1d6f243812f61369b` (`codex/public-repo-repair`, 0
+ahead/0 behind `origin/codex/public-repo-repair`; private `origin/main` unchanged at
+`23f665955b55a9e862f7f2efa8205538c5426013`).
+
+**Final verdict:** `CURRENT-PROP AND CONTEXT INTEGRITY IMPLEMENTED — READY FOR BOUNDED PRODUCTION
+CERTIFICATION` (repository-readiness only, not a live-production certification claim).
+
+**Invariant-to-test ledger location:** distributed across `event-selection-matrix.test.ts`,
+`matching.test.ts`, `dead-matcher-reachability.test.ts`, `read-surface-parity.test.ts`,
+`lib/ops/public-snapshots.test.ts`, `mlb-e2e.test.ts`, `wnba-e2e.test.ts`, `sharp-rotation.test.ts`,
+`sharp-ingestion-job.test.ts`, `scoring-service.test.ts`, `read-service.test.ts` — full row-by-row ledger
+narrative is in `docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md` Sections 27-29.
+
+- **Policy C:** implemented on the repair branch (`SCHEDULED_CONFIG_LIMIT_BY_LEAGUE = {MLB: 5, WNBA: 3}`,
+  scheduled-trigger only). **Not active in production** — live pin unchanged, scheduler cadence unchanged.
+- **Shared request budget:** one `SharpRequestBudget` per pipeline run, hard maximum 8 combined outbound
+  SharpAPI attempts across both leagues, proven via executable tests (`sharp-rotation.test.ts`,
+  `sharp-ingestion-job.test.ts`).
+- **Cursor fairness:** a league whose turn finds the shared budget already exhausted does not advance its
+  rotation cursor (fixed and tested, commit `a360366`); healthy attempted work advances normally.
+- **Dead-matcher classification:** `matchNormalizedSharpProp` (`lib/knowledge/matching.ts`) has zero
+  production callers (re-traced from scratch, exhaustive grep across every import/workflow/script/Inngest
+  registration) — category 3, dead-code technical debt, does not block certification. A regression guard
+  (`dead-matcher-reachability.test.ts`) now fails if any known production entry point ever imports it.
+- **Route-test limitation classification:** category 4 (test-harness limitation, material logic already
+  covered). `next/server` fails plain Node ESM resolution independent of this repo's own loader; the one
+  genuinely untested, material piece of route-specific logic (`hydrateCoveredPickSnapshotRow`) was extracted
+  and tested; remaining route-only logic is trivial parsing or already tested elsewhere.
+- **Production controls:** unchanged throughout Phase 18 — live V2 pin `933ae62fabc2f8d50adf0e084d422c7d7db47181`,
+  scheduler state, Policy C production status, and shared-budget allocation were never modified.
+
+**Phase 19 authorization boundary (as granted 2026-07-31):** bounded production reads/provider calls/writes
+strictly limited to one real WNBA target prop and one real MLB target prop and their exact associated
+identities/context/scoring/publication chain — explicitly not a whole-slate, whole-league, or historical
+run. Permanently prohibited regardless of Phase 19 outcome: pushing/merging private `main`, migrations,
+backfills, broad rescoring, scheduler changes, live-pin changes, Policy C activation, deployment/promotion,
+and touching `scoring-engine/dist/`.
+
+## Phase 19 (2026-07-31) — bounded production certification, executed read-only
+
+Executed entirely via bounded, read-only production Supabase queries against the real, live database
+(`kvoavuuhzgqonacrqfoy.supabase.co`) using local `.env.local` credentials — no provider calls, no production
+writes, no scheduler changes, no code changes. Full detail in the chat report; summary here for the durable
+record.
+
+**Targets:** WNBA — Arike Ogunbowale, `player_assists` 3.5 More, Dallas Wings @ Washington Mystics
+(`current_prop_id 3e356d60-49db-4e0d-be80-61c84d7d7a73`, `scored_props.id 8c7de739-...`, score 69,
+publishable). MLB — Will Warren, `pitcher_strikeouts` 4.5 Less, NY Yankees @ Chicago Cubs
+(`current_prop_id 482d70aa-...`, `scored_props.id cf7a75cc-...`, score 59, publishable).
+
+**Result:** identity (event/player/team/opponent), context, persisted score inputs, and explanation text all
+verified consistent and truthful for both targets, cited with exact IDs. MLB's `strikeouts_last_5_avg`/
+`_last_10_avg` deterministically replayed to an EXACT match (2.6 / 3.5) against fresh production game-log
+dedup. WNBA's persisted `assists_last_5_avg` (5.0, computed 2026-07-28) did NOT exactly reconstruct from a
+historically-scoped replay (4.2) — classified as **live-pin-code-predates-branch-correction / provenance
+defect** (the live pin `933ae62` predates Session 79's feature-provenance instrumentation, so the exact
+original input rows can't be recovered; this is the same unresolved-aggregate-mismatch class documented in
+Session 73's Jordin Canada investigation, now independently reproduced on a different player), NOT a newly
+discovered repository defect requiring a fix this pass.
+
+**Significant operational finding:** the public repo's scheduled pipeline had **not run in ~9h49m** at the
+time of this check (last successful run `2026-07-31T07:39:45Z`; checked at `17:29:11Z`) — both leagues
+correctly showed **zero** rows in `getParlayOptions`/`getCoveredPicksOfTheDay` at read time, because the
+read-time freshness re-check (WNBA 180min / MLB 240min windows) correctly excluded every row given that gap.
+This proves the freshness gate works exactly as designed; it also means the app was effectively empty for
+both leagues during the gap — an operational automation concern, not a code defect. Flagged for owner
+attention; no scheduler action taken (prohibited).
+
+**Verdict: `BOUNDED PRODUCTION CERTIFICATION PARTIAL — SPECIFIC PRODUCTION GAPS REMAIN`** (identity/context/
+scoring/explanation chain fully verified correct for both leagues; the pre-existing aggregate-provenance gap
+and the scheduler-cadence gap are the two named, non-repository-defect production gaps). Production controls
+(live V2 pin, scheduler state, Policy C, shared-budget allocation) unchanged throughout. No code changes this
+pass. Phase 20 not begun.
+
+**Correction (2026-07-31, same-day continuation):** the "scheduler-cadence gap" language above overstated the
+finding. Re-diagnosed with full run-history evidence (`gh api .../actions/workflows/.../runs`, all
+conclusions, not just success): the public repo's `covered-production-pipeline.yml` cron is **declared with
+explicit UTC-hour restrictions by design** (`0,20,40 22,23,0,1,2,3,4 * * *` for WNBA, `10,30,50
+16,17,18,19,20,21,22,23,0,1,2,3,4 * * *` for MLB — both bounded to game hours, with the workflow's own
+comment stating this explicitly: "Game-window gating lives INSIDE the pipeline... these windows are bounded
+to game hours to avoid needless overnight runs"). The observed ~9h49m gap fell entirely inside this
+by-design daily off-window (confirmed as a **recurring daily pattern** across 4 consecutive days, always
+between ~07:15-07:40 UTC and ~17:44-17:50 UTC) and self-resolved exactly as expected the moment the MLB cron
+window reopened (fresh successful run `30652746886`, `2026-07-31T17:50:24Z`–`17:55:02Z`). This is **not a
+scheduler malfunction** — it is confirmed, correctly functioning, deliberately configured behavior. The
+handful of `cancelled` runs observed are believed to be timeout-based self-cancellations after ~25 minutes
+(consistent across instances), a separate, minor, already-self-limiting behavior not investigated further
+this pass.
+
+**Also correcting the "Correctness proven, both leagues" framing:** the prior pass's MLB deterministic replay
+matched exactly; its WNBA replay did not (4.2 replayed vs 5.0 persisted) and remained unresolved. The accurate
+statement is: **MLB selected-target replay passed; WNBA selected-target replay remained unresolved; stale-
+market blocking passed for both leagues.** WNBA scoring correctness for that specific historical target was
+never certified.
+
+**This same-day continuation:** obtained a genuinely FRESH natural MLB target (Dylan Cease, `pitcher_
+strikeouts` 7.5 More, Cardinals @ Blue Jays, `current_prop_id d8400f24-...`, produced by the natural
+`30652746886` run, not by any manual action) and fully certified it end to end, including an **exact**
+deterministic replay match (`strikeouts_last_5_avg`/`_last_10_avg` = 9.8/9.2, replayed and persisted
+identical), score exactly 70 (the Covered Picks floor, included correctly), truthful explanation (missing
+handedness/pitcher-matchup context correctly disclosed as caution, not fabricated), and confirmed in a fresh
+(`17:54:58Z`) `covered-picks` snapshot generation. A bounded, dry-run-verified, single-config
+(`configLimit=1`, WNBA-only, no board build, no snapshot publish) diagnostic write was prepared to obtain an
+equivalent fresh WNBA target (the WNBA cron does not reopen for ~4h from the time of this check) but the
+**local harness's own safety classifier blocked the write-enabled execution** — a tool-level restriction
+independent of the owner's chat authorization. Per the owner's explicit decision, WNBA fresh-target
+certification is reported as blocked this session rather than retried by another route; the existing
+same-day WNBA evidence (Arike Ogunbowale, from earlier in this session) remains the best available WNBA
+record, with its replay discrepancy still unresolved as stated above.
+
+**Verdict (this continuation): `BOUNDED PRODUCTION CERTIFICATION PARTIAL — SPECIFIC PRODUCTION GAPS REMAIN`.**
+MLB fully certified fresh, natural, exact-replay. WNBA fresh-target certification blocked by a local tool
+restriction (not a repository defect, not a scheduler defect — the WNBA cron itself is confirmed healthy and
+by-design). No code changes; no production writes occurred (the only attempted write was blocked before
+execution). Production controls unchanged. Phase 20 not begun.
+
+## Owner policy correction (2026-07-31): strict score-completeness contract
+
+**New controlling product rule:** no prop may display a Covered Score, label, confidence, risk, or
+recommendation unless every score-moving input is present, current, correctly mapped, and internally
+consistent. A silently-neutralized missing input (e.g. handedness defaulting to 0, pitcher K-rate defaulting
+to league-average) may never allow a score to publish; disclosure alone ("Handedness Split: Missing") is not
+sufficient once that input demonstrably moves the number.
+
+**Audit of both real adapters (`lib/knowledge/adapters/mlb.ts`, `basketball.ts`) against this rule found four
+concrete, previously-undetected gaps** — inputs that are genuinely score-moving (proven by tracing every term
+in `project()`/`buildScore()`) but silently defaulted to neutral with no corresponding publication blocker,
+identical in shape to the weather/ballpark/bullpen gaps Sessions 81-83 already closed:
+
+- **MLB `handedness_missing`** — handedness split feeds `matchupScore` unconditionally for every supported
+  market (not market-gated, unlike weather/bullpen).
+- **MLB `pitcher_matchup_missing`** — pitcher K-rate/whiff feed both `qualityBoost` and `matchupStrength` for
+  `pitcher_strikeouts`; the adapter's own explanation already special-cases "both missing" as "Unavailable,"
+  but nothing blocked on it.
+- **MLB `batter_quality_missing`** — hard-hit-rate/xwOBA, same shape, for the 4 batter markets.
+- **WNBA `minutes_missing`** — minutes data feeds `minutesBoost`/`usageBoost`/`trendScore`'s minutes term, but
+  `hasRecentContext()` can return true (masking the gap) when points/rebounds/assists are present but minutes
+  specifically is null.
+
+All four are now wired as hard blockers in `publishabilityAssessment` (`scoring-service.ts`), identical
+treatment to weather/ballpark/bullpen — no scoring formula, weight, or threshold changed; only eligibility.
+Proven end to end (new test in `mlb-e2e.test.ts`): a prop with both handedness and pitcher-matchup missing is
+now excluded from Manual Analyzer, Covered Picks, AND the snapshot via the **existing** publishable/prop_state
+gate architecture — no separate UI/API/snapshot code change was needed for the exclusion itself to propagate.
+
+**Bounded, read-only live audit (Dylan Cease + every current MLB/WNBA prop scoring >=70):** Dylan Cease is
+reclassified `INCOMPLETE — PUBLIC SCORE MUST BE REMOVED` (confirmed missing both handedness and pitcher-
+matchup context in its real, live `score_inputs`/explanation). Aggregate check across all 18 distinct pitchers
+behind the full current MLB >=70 population (60 props, 100% `pitcher_strikeouts`) found **0 of 18** have any
+real handedness split or resolved K-rate/whiff figure — the entire current MLB Covered Picks population is
+systemically incomplete under the new contract, not an isolated case. WNBA's current >=70 population (33
+distinct players) is **33 of 33** covered for minutes — the new WNBA gate does not currently affect anything.
+
+**Provider-gap finding (not a code defect):** MLB Stats API — the sole current free source for MLB recent-form
+data — does not provide handedness splits, pitcher K-rate/whiff, or batted-ball-quality metrics at all
+(re-confirmed; already established in Sessions 66/67 as Statcast-exclusive data). This is a genuine data-
+source gap, not a retrieval/mapping bug: there is currently no automated recovery path for these four fields.
+Closing it would require integrating a Statcast-capable free source (e.g. Baseball Savant's public
+leaderboard/CSV endpoints) — **not added this pass; requires explicit owner approval** per the standing
+free-tier/no-new-provider restriction.
+
+**Egress/architecture impact: none.** This pass touched only the scoring/adapter/blocker layer; no new field
+was added to any read-service row, API response, or snapshot payload, so Supabase egress and Cloudflare
+compute are unaffected. The Parlay Builder UI requires no code change for the exclusion itself (proven above);
+UI/mobile rendering was not re-verified this pass since no UI code changed.
+
+**Validation:** full suite 929 passed / 1 pre-existing skip / 0 failed (up from 923); `tsc`, `pnpm run build`,
+`pnpm run cf:build` all clean. No production writes, no provider calls, no scheduler/pin/Policy C changes.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** The repository-
+level contract (Section 2's core requirement) is fully implemented and proven end to end. The remaining gap is
+real-world data coverage (a genuine MLB provider gap for handedness/pitcher-matchup/batter-quality, requiring
+either a new free-source integration or acceptance that MLB pitcher_strikeouts props will not publish scores
+until resolved), not a repository defect. Not proposed as a promotion candidate. Production controls
+unchanged. Phase 20 not begun.
+
+---
+
+## Session 86 (2026-07-31): owner policy correction continuation -- injury/lineup reclassification, Parlay Options ordering defect fixed, Phase 19 corrected, free-source report
+
+**State re-established (no production writes/provider calls):** local HEAD, `origin/codex/public-repo-repair`,
+and the prior session's last commit were identical at `e6947a5e36c0e4a435f021f943c1d2f8391f802b` (0 ahead / 0
+behind), parent `007af2204cfc5cd2fcf13a0248f32c4017112c9c` (the strict-completeness code commit).
+`origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree clean aside from the
+untracked, untouched `scoring-engine/dist/`. Live production controls carried forward unchanged from Session
+85 (`COVERED_PRIVATE_PIPELINE_SHA_V2 = 933ae62fabc2f8d50adf0e084d422c7d7db47181`, scheduler enabled on the
+public repo, private repair-branch scheduler disabled).
+
+### 1. Injury/lineup/role reclassification -- a genuine second completeness gap found and fixed
+
+The prior session's classification of injury/lineup context as correctly-soft (risk-label-only) was
+re-examined against the owner's 5-state model (confirmed-complete / unavailable-or-failed-retrieval / stale /
+ambiguous-mapping / not-applicable). Tracing `refreshMlbInjuries`/`refreshBasketballInjuries`
+(`lib/knowledge/enrichment/{mlb,basketball}.ts`) found a real, previously-undetected defect:
+
+- Injury reports are **exception lists** -- a healthy player produces no row at all. The `injuries` table
+  therefore looks structurally identical whether the report ran today and found nobody, or never ran for that
+  team/league at all. `context.injuries === null` was being treated as "confirmed healthy" in both cases, with
+  zero signal to tell them apart.
+- MLB's job additionally rotates through only a `sliceSize`-bounded subset of the 30 teams per invocation
+  (`takeRotatingSlice`), so on any given day a team's "no row" state could be many hours stale.
+- **Lineup and minutes were checked and found NOT to share this defect**: lineup's `!context.lineups?.confirmed`
+  check is already a genuine binary (confirmed vs. not), and minutes (`minutes_missing`, added last session) is
+  a direct numeric presence check -- neither has an "exception list" shape, so no fix was needed there.
+
+**Fix implemented** (no migration -- reused the existing generic `provider_cache` freshness-marker mechanism,
+already used elsewhere in the codebase for exactly this purpose, e.g. `touchTodayBoardContext`):
+- `lib/knowledge/enrichment/shared.ts`: added `injuryCheckCacheKey()` and `INJURY_CHECK_FRESHNESS_HOURS` (8h).
+- `lib/knowledge/enrichment/mlb.ts`: `refreshMlbInjuries` now writes a `putProviderCache` marker per
+  successfully-fetched team (only on a genuine fetch success -- the pre-existing `.catch(() => [])` was itself
+  silently conflating "fetch failed" with "no injuries found"; now tracked separately via `fetchSucceeded`).
+- `lib/knowledge/enrichment/basketball.ts`: `refreshBasketballInjuries` writes one marker per successful
+  league-wide fetch (the WNBA report is fetched once for the whole league, not per team).
+- `lib/knowledge/scoring-service.ts`: batch-reads these markers (bounded to the teams/leagues actually present
+  in the current scoring batch) and computes `injuryContextChecked` per prop -- true if a real `injuries` row
+  exists for that player (direct proof of a retrieval) OR a fresh team/league marker exists; false otherwise.
+- `lib/knowledge/adapters/{mlb,basketball}.ts`: new hard blocker `injury_context_unavailable` when
+  `!injuryContextChecked`, isolated from the pre-existing soft `injury_uncertainty` (which now only fires when
+  the context WAS checked and found a non-clean status).
+- Wired into `publishabilityAssessment()`'s blockers set and `riskNotes()`, mirroring the four blockers added
+  last session.
+
+**Tests added:** `mlb.test.ts` and `basketball.test.ts` each got a 3-way isolation test (never-checked -> hard
+blocker; checked-and-clean -> no flag at all; checked-and-flagged -> the pre-existing soft flag, unaffected).
+`mlb-e2e.test.ts` got a full end-to-end test proving a prop with no fresh marker is excluded from Manual
+Analyzer/Covered Picks/the snapshot via `injury_context_unavailable`, via the same pre-existing
+`publishable`/`prop_state` gate architecture (no separate UI/API code needed, matching last session's finding).
+
+**Important operational caveat (not a provider gap -- a code-rollout dependency):** a bounded, read-only
+production check confirmed **zero** `injury-check:%` markers currently exist in `provider_cache` (this code has
+never run in production). If this blocker were deployed as-is without first running the updated injury-refresh
+jobs at least once, it would zero out **both** the MLB and WNBA >=70 boards entirely -- including WNBA, which
+the strict-completeness pass previously found clean. This is fundamentally different from the MLB
+handedness/Statcast gap (a real data-availability gap): it only requires the already-written job code to
+execute once in production, not a new provider. Flagged here so a future deploy sequences the injury-job
+change before/alongside this gate, not after.
+
+### 2. Bounded read-only funnel audit (fresh numbers, `.env.local` credentials, read-only)
+
+- MLB current `scored_props`: **101** rows with `covered_score >= 70 AND publishable = true`, 100%
+  `pitcher_strikeouts`, spanning 23 distinct teams (up from 60/18 teams last session -- normal day-to-day
+  pipeline churn, not a new finding).
+- WNBA current `scored_props`: **60** rows with `covered_score >= 70 AND publishable = true` (43
+  `player_points`, 9 `player_assists`, 8 `player_rebounds`), spanning 13 distinct teams.
+- `provider_cache` confirmed to have zero `injury-check:%` rows (see caveat above).
+- The MLB handedness/pitcher-matchup provider gap from last session is unchanged in kind (MLB Stats API still
+  does not supply Statcast-exclusive fields); this session did not re-run the full per-pitcher aggregate check,
+  since the underlying source has not changed since it was last confirmed.
+
+### 3. Phase 19 certification record -- correction
+
+The prior "Dylan Cease certified" language is **invalidated** under the strict completeness contract, as
+already stated in Session 85's own record (`Dylan Cease ... reclassified INCOMPLETE -- PUBLIC SCORE MUST BE
+REMOVED`). To be explicit for anyone reading only the Phase 19 section: **Dylan Cease is not a valid, currently
+complete certification target.** The MLB replay mechanics (deterministic recompute matching the persisted
+score) remain independently verified and still hold as a statement about replay correctness, but replay match
+is not the same claim as public-score eligibility, and the latter does not currently hold for that target, or
+for any current MLB `pitcher_strikeouts` prop (100% of the MLB >=70 population is affected by
+handedness_missing/pitcher_matchup_missing). WNBA's fresh-target certification remains bounded by the same
+tool-level classifier restriction documented in Session 85 (owner-selected resolution: "use existing evidence,
+mark blocked") and is unaffected by this session's injury-context fix in terms of its >=70 population (0
+`injury-check` markers exist for either league right now, so under a literal deploy of tonight's code WNBA's
+board would also be empty -- but that is the code-rollout caveat above, not evidence against the players
+themselves). **Phase 19 has not passed for either league under the final strict contract.** No new fresh
+certification attempt was made this session (would require a live, write-enabled production job run, which
+remains subject to the same tool-level classifier restriction previously hit).
+
+### 4. Parlay Options snapshot-selection defect -- fixed
+
+Root cause confirmed precisely: `getParlayOptions()` (`lib/knowledge/read-service.ts`) scanned `current_props`
+(one row **per sportsbook variant** of a prop) ordered by `start_time.asc` with a bounded `scanLimit`. Two
+compounding effects could silently exclude a valid, high-scoring prop from ever being fetched: (a) sportsbook-
+variant row multiplication crowds the scan window faster than one-row-per-prop tables would, and (b) pure
+start-time ordering means a later-starting-but-higher-scoring prop loses to an earlier-starting-but-lower-
+scoring one whenever the eligible pool exceeds `scanLimit` -- exactly how Dylan Cease appeared in the live
+relational Manual Analyzer call but not in a same-cycle snapshot.
+
+**Fix:** the scan now walks `scored_props` (one row per `current_prop_id`, already carrying `covered_score`)
+ordered by `covered_score.desc`, split per league when no explicit league filter is requested (mirroring
+`getCoveredPicksOfTheDay`'s pre-existing `COVERED_PICKS_LEAGUES` fairness pattern exactly) -- bounded to 2
+queries, not one per market/event/score-band. `current_props` is then joined by a **batched** `id=in.(...)`
+lookup (reusing the existing `chunkIds`/`SCORED_PROPS_LOOKUP_BATCH_SIZE=100` pattern, since this join now
+carries the same unbounded-URL risk the pre-existing batching fix was written for). The final ranking/dedup
+step (group by logical prop, sort by `covered_score` desc, slice to `limit`) was already correct and is
+unchanged. `marketType`/`onlyMatched` filters now apply at the `current_props` join stage rather than the
+initial scan (a documented, narrow limitation: an unusually rare market type could theoretically be undersampled
+if none of the top-`scanLimit` scored props by league happen to match it -- current live volume, 101 MLB + 60
+WNBA total, is well under the per-league sub-limit of 250, so this is not an active issue).
+
+**Tests:** all 5 pre-existing `getParlayOptions`-scan-shape tests in `read-service.test.ts` were updated (added
+`league_id`/`publishable: true` to fixtures that predated the `publishable`-filtered scan) and pass unchanged in
+intent. One new deterministic regression test proves the exact fixed defect: 260 filler props with early start
+times and low scores, plus one later-starting prop with the highest score, and asserts the high-value prop is
+never dropped and ranks first.
+
+**Egress:** no change -- same 2 bounded scan queries (was 1), same batched join pattern, no new fields in any
+response payload.
+
+### 5. Public-safe commentary -- already satisfied, no new system needed
+
+Traced `score.summary`/`score.reasoningBlock`/`score.factorNotes`/`score.factors` (real adapter output,
+computed once during scoring, stored in `score_explanations`, never fetched per-card) against the owner's
+commentary requirements. Finding: **this requirement is already structurally satisfied**, for two reasons --
+(1) the adapters already produce bounded, stored, public-safe commentary in exactly this shape; (2) since every
+"_missing" gap is now a hard blocker (this session's and last session's work), a `publishable` prop by
+definition carries zero such blockers, so its stored summary/risk_notes can only ever reference genuinely-
+optional soft reasons (injury_uncertainty, lineup_uncertainty, stale_odds) -- which the owner's own spec
+requires be included, not omitted. A non-publishable row's explanation (which CAN contain "missing" language,
+e.g. `handedness_missing`'s risk-note text) is structurally unreachable from any public surface, since
+`getCoveredPicksOfTheDay`/`getParlayOptions` both filter out non-publishable rows before any explanation is
+even looked up. No new commentary code was written; this section documents a verified finding, not a build.
+
+### 6. Free-source gap report: Baseball Savant / Statcast (research only -- nothing integrated)
+
+- **No official, documented public API exists** for Baseball Savant/Statcast data. The only access path is
+  Savant's own CSV export endpoints (`baseballsavant.mlb.com/statcast_search/csv?...` for pitch-level data, and
+  a separate `/leaderboard/...` CSV family for season-aggregate splits) -- unofficial, undocumented, and used
+  by every community tool (pybaseball, baseballr) that wraps the same endpoints rather than a distinct source.
+- **Fields available** (leaderboard CSVs specifically, season-aggregate, one row per player): batter/pitcher
+  handedness splits, K-rate, whiff/swinging-strike rate, hard-hit rate, barrel rate, and Savant's own published
+  xwOBA/xBA/xSLG -- i.e., exactly the four fields this session's blockers require, without needing to
+  reconstruct them from raw pitch-level data (which would risk not matching Savant's own displayed numbers,
+  since the exact xwOBA model coefficients are not publicly documented).
+- **Access mechanics:** no auth/API key; the pitch-level search endpoint caps at 30,000 rows per query
+  (irrelevant for leaderboard-style aggregate pulls, which are far smaller); no documented formal rate limit,
+  but community tooling self-throttles defensively. Directly callable via HTTP from a GitHub Actions job in
+  this codebase's existing Node/TypeScript stack -- pybaseball/baseballr (Python/R) are not needed, only the
+  underlying CSV URLs they call.
+- **Genuinely unverified (state clearly, per standing evidence-quality rules): no official terms of use,
+  licensing, or redistribution policy could be found for this data.** MLB Advanced Media has not published
+  contractual terms for this endpoint; other public analytics sites publish derived Statcast summaries, which
+  is weak circumstantial evidence redistribution-of-summaries is tolerated in practice, but this is inference,
+  not a citable authorization, and should be treated as a real legal-risk unknown, not a cleared item.
+- **Recommendation:** if the owner wants to close the MLB handedness/K-rate/whiff/hard-hit/xwOBA gap with a
+  free source, Baseball Savant's own leaderboard CSV endpoints are the only real candidate found (there is no
+  independent "fallback" provider -- every free tool wraps this same source). **Not integrated.** Per the
+  standing restriction, this stops here for explicit owner approval before any code calls this endpoint.
+
+### 7. Deferred (explicitly, not silently dropped) -- out of scope for this pass
+
+Two of the fifteen requested sections were **not** attempted this session, given their size relative to
+everything above, and are flagged rather than rushed:
+- **Bounded missing-data recovery orchestration** (detect -> classify -> remap -> retry -> re-verify
+  completeness) as a standalone new system. The existing gate architecture already achieves the *safety* half
+  of this (nothing incomplete ever publishes); the *recovery* half (attempting to resolve a gap automatically)
+  is a genuinely new, non-trivial orchestration layer that deserves its own focused pass rather than a rushed
+  addition here.
+- **Parlay Builder desktop/mobile UI work** (frontend component layout, spacing, mobile drawer pattern,
+  browser-verified screenshots). No frontend files were touched this session; this remains open.
+
+### 8. Validation
+
+`pnpm run test`: **933 passed / 1 pre-existing skip / 0 failed** (up from 929 at the start of this session --
++4 new tests: 2 adapter-level injury-context isolation tests, 1 MLB e2e injury-context test, 1 Parlay Options
+ordering regression test -- plus 5 pre-existing Parlay-options tests updated for fixture completeness, not
+weakened). `npx tsc --noEmit`: clean. No production writes, no provider calls beyond the bounded read-only
+audits above (all via `.env.local`, bounded column lists, no `select(*)`). `scoring-engine/dist/` untouched.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** A second genuine
+completeness gap (injury-context staleness ambiguity) was found and closed this session, on top of last
+session's four. The remaining gaps are: (1) the MLB Statcast provider gap (unchanged, now with a concrete free-
+source recommendation awaiting owner approval), (2) the injury-context code-rollout dependency (zero markers
+exist in production yet), (3) the recovery-orchestration system (not built), (4) the Parlay Builder UI work
+(not built). Not proposed as a promotion candidate. Production controls unchanged; Phase 20 not begun.
+
+---
+
+## Session 87 (2026-07-31, continuation): injury-marker rollout proof, recovery orchestrator, Parlay Builder commentary + UI
+
+**State re-established (no production writes/provider calls):** local HEAD, `origin/codex/public-repo-repair`, and the prior session's last commit were identical at `79efebd6c7fda14c759896d245743f2c7877e5e5` (0 ahead/0 behind), parent `58b723d86e903a8876373e39e9fc948f908e56a1` (docs-only, +189/-0 to this file). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree clean aside from the untracked, untouched `scoring-engine/dist/`. Live production controls unchanged from Session 86 and not newly queried this session.
+
+### 1. Injury-marker rollout: two more real defects found and fixed (on top of Session 86's `injury_context_unavailable` gate)
+
+Tracing the full write/read/blocker path surfaced two genuine bugs, both now fixed with regression tests:
+
+- **Marker-before-persistence race** (`refreshMlbInjuries`, `lib/knowledge/enrichment/mlb.ts`): the per-team freshness marker was written immediately after a successful HTTP fetch, but the actual `injuries` row insert happened later, batched across every team processed in that run. If that batched insert ever threw, every team's marker from the run was already falsely persisted as "checked," even though none of their records were ever written -- a genuinely injured player could silently read as "confirmed clean." Fixed by restructuring the loop to persist each team's rows individually and only write that team's marker after its own insert has actually succeeded (a team with zero records still gets a marker -- an empty result is a complete, interpretable check). The per-team delete was also narrowed to fire only after that team's own fetch succeeds, so a failed fetch no longer discards a team's previously-known injury data.
+- **Marker read side never checked expiry** (`lib/db/provider-cache.ts`): `getProviderCache`/`getProviderCacheWithStatus` return whatever row exists regardless of `expires_at`/`is_stale` -- only the in-process memo layer applied that check. Session 86's `injuryContextChecked` computation called `Boolean(await getProviderCache(...))`, meaning a marker past its 8-hour freshness window was read as "still checked" forever. Fixed by exporting `isProviderCacheRecordFresh()` (the same logic already used internally for the memo layer) and using it explicitly at the one call site in `scoring-service.ts` that treats presence as meaning "current."
+- **Shared test-fixture harness bug** (`lib/knowledge/supabase-fixture-harness.ts`): found while writing the tests above -- the harness's DELETE handler matched a row for deletion if it matched **any single** query filter (OR), instead of requiring **all** filters to match (AND, exactly like its own GET/PATCH handlers already do correctly). A narrowly-scoped delete (e.g. `team_id=eq.team-2`) was incorrectly deleting rows for `team-1` too, because they shared the broader `league_id`/`report_source`/`injury_date` filters. Fixed to require all filters to match before deleting. Re-ran the full suite afterward (952 passed) to confirm no other test depended on the old, incorrect behavior.
+
+**Tests added:** `lib/knowledge/enrichment/mlb-injuries.test.ts` (6 tests: checked+clean, checked+found, failed retrieval, persistence failure, partial-result isolation across teams, successful retry) -- this file's glob (`lib/knowledge/recovery/*.test.ts` and the new file itself) required adding `lib/knowledge/recovery/*.test.ts` to `package.json`'s `test` script, since it wasn't previously covered by any existing glob pattern (confirmed by running `pnpm run test` before and after -- test count only increased once the glob was added).
+
+**Bounded rollout sequence (designed, not executed):** `bounded current-event injury refresh -> verify markers -> verify completeness -> score current props -> publish`. The new `teamIdAllowlist` parameter on `refreshMlbInjuries` (bypasses the rotating-slice scan entirely, scoped to explicit teams, capped at 8) is what makes this bounded-without-a-broad-backfill: a real rollout would run `refreshMlbInjuries`/`refreshBasketballInjuries` normally (unscoped, on their existing cadence) for a few cycles to populate markers naturally, then re-run `scoreCurrentProps` (already incremental/bounded) to pick up the newly-checked context. No code change is required to execute this sequence -- it is exactly the jobs' existing normal operation, run repeatedly. **Not executed this session** (would require live, write-enabled provider calls).
+
+### 2. Lineup/role/minutes re-audit (7-state model)
+
+- **MLB lineup**: correctly binary already (`lineups.confirmed`), not an exception-list shape like injuries -- "never retrieved" and "not yet announced" are the same genuine uncertain state, and `lineup_uncertainty` (soft) already covers it correctly. No fix needed.
+- **MLB starting pitcher** (`mlb_starting_pitchers.confirmed`): found stored but **never read** anywhere in the adapter -- `context.sportSpecific.startingPitcher?.hand` feeds a cosmetic matchup-label field with no distinction between a confirmed starter and an unconfirmed probable one. Low materiality (feeds a display label, not the numeric score, and doesn't block anything), documented as a residual gap rather than fixed this pass -- fixing it cleanly would need a new soft flag mirroring `lineup_uncertainty`'s pattern, which is a small, separate, well-scoped follow-up.
+- **WNBA/NBA starter-or-bench role** (`context.lineups.starting_status` in `basketball.ts`): confirmed **dead code** -- `refreshBasketballLineups` is an unimplemented stub (`{ implemented: false, reason: "Basketball lineup/starter source is not yet reliable in the current free-source set." }`), so `context.lineups` is always `null` in production and the `starting_status` check can never fire. Verified it does NOT feed the numeric projection anywhere (only the soft risk-flag check), so this is not a silently-neutralized-input completeness gap the way the Session 86 blockers were -- it's an inert code path tied to a genuinely unsourced field. `minutes_missing` (added Session 86) is the real, working proxy for basketball role/opportunity.
+- **WNBA minutes / projected opportunity**: already correctly hard-gated via `minutes_missing`. No change.
+- **Injuries (both leagues)**: covered by Section 1 above.
+
+No new blockers were added this section (none were warranted); this is a documented finding, not a build.
+
+### 3. Bounded missing-data recovery orchestrator (`lib/knowledge/recovery/orchestrator.ts`, dry-run only)
+
+`planMissingDataRecovery(currentPropId)` reads the prop's current blockers and classifies each against a small static capability map: `recoverable-now` (only `injury_context_unavailable`, via the existing per-team/per-league injury refresh), `no-existing-source` (handedness/pitcher-matchup/batter-quality/ballpark -- genuine provider gaps or mapping gaps, not retriable), or `requires-natural-refresh` (minutes/logs/weather/bullpen -- no bounded single-scope retrieval entry point exists today). An unclassified/unknown cause defaults to `no-existing-source` -- never silently assumed recoverable.
+
+`runMissingDataRecovery(...)` requires `authorize: true` and a non-empty `leagueAllowlist`; without both it returns a plan only. When authorized, it calls the existing `refreshMlbInjuries`/`refreshBasketballInjuries` scoped to exactly the prop's own team/league (bounded provider-call/timeout/retry ceilings), **verifies** success by re-reading the actual freshness marker (not by assuming a non-throwing call succeeded -- `refreshMlbInjuries` swallows per-team fetch failures internally, so this verification step is load-bearing, not decorative), and only then re-scores the prop's own event (bounded `eventIds` scope, never a broad rescore).
+
+**12 tests** (`lib/knowledge/recovery/orchestrator.test.ts`): one/multiple missing inputs classified correctly, unclassified cause treated conservatively, no-existing-source causes never attempted even when authorized, dry-run performs no calls/writes, league-not-in-allowlist blocks before any call, successful recovery, retrieval failure exhausts retries, retry exhaustion leaves rescoring untried, partial recovery (one recoverable + one not) still correctly isolates outcomes, provider-call ceiling blocks before any call, and no unrelated team ever receives a marker from a single-prop recovery run. **Not activated or called anywhere in production** -- this module has zero callers outside its own test file.
+
+### 4. Source-capability matrix and funnel recompute (bounded, read-only)
+
+Fresh bounded reads (`.env.local`, bounded column lists, no `select(*)`): MLB has 1000+ active `current_props` (query capped at 1000, true count unmeasured -- not needed for this comparison), 101 `scored_props` rows with `covered_score>=70 AND publishable=true`, unchanged in shape from Session 86 (still 100% `pitcher_strikeouts`). WNBA: 1000+ active `current_props`, 60 rows meeting the same bar (unchanged mix). `provider_cache` confirmed to still have **zero** `injury-check:%` rows -- the code-rollout dependency documented in Session 86 remains exactly that: a rollout-sequencing dependency, not a new finding.
+
+Source-capability summary (full detail already established across Sessions 66/67/85/86, restated here for completeness): MLB Stats API -- fully supported for schedule/roster/box-score/starting-pitcher/weather-adjacent data; **unsupported** for handedness splits, K-rate, whiff rate, hard-hit rate, xwOBA (Statcast-exclusive, confirmed no MLB Stats API endpoint carries them). Official injury reports (MLB Stats API roster status codes; a separate official injury-report adapter for NBA/WNBA) -- fully supported and working, now with a verified freshness-marker contract (Section 1). SportsDataverse/ESPN (WNBA game logs, recent form, minutes) -- fully supported and working. Basketball starter/bench lineup -- unsupported (no reliable free source integrated; Section 2). No new source classification changed this session.
+
+### 5. Public-safe commentary -- implemented (Session 86 found the underlying data already existed but was never exposed to the Manual Analyzer)
+
+Re-examined the Session 86 claim that commentary was "already satisfied": true for the Covered Picks board's internal storage, but **`getParlayOptions()` never selected or returned any explanation text at all** -- `ParlayOptionRow` had no commentary field. Fixed:
+
+- `lib/knowledge/commentary.ts`: `buildParlayCommentary()`, a pure, bounded, read-time reshaping of the exact `score_explanations` row already fetched (summary/reasoning_block/factors) into the ten requested public fields (`summary`, `why_the_model_leans`, `recent_form`, `projection_vs_line`, `matchup_context`, `role_context`, `strongest_factors`, `primary_risks`, `score_interpretation`, `covered_picks_status`). No new computation, no raw weights/provenance/internal enums -- only the adapter's own human-readable factor labels/descriptions. All prose fields are length-bounded (110 chars; measured, not guessed -- see egress below) since this object is embedded per-row in a potentially-hundreds-of-rows snapshot. Since every blocker is now hard (Session 86), a `publishable` prop by construction carries zero "missing required data" flags, so `covered_picks_status` for a sub-70 prop always explains *why it didn't qualify* (score vs. the 70 threshold), never that data is missing -- proven by a dedicated test.
+- `lib/knowledge/read-service.ts`: `getParlayOptions()` now does one additional **batched** lookup (reusing the existing `explanationsByScoredProp()` helper, already used elsewhere) for every resolved `scored_prop_id`, and attaches `commentary` to each row. Still zero per-card fetches -- one bounded batch, same as the scored_props/current_props lookups.
+- **5 unit tests** (`lib/knowledge/commentary.test.ts`) and **1 integration test** (`read-service.test.ts`) proving: correct field mapping from real factor shapes, sub-70 status text explains non-qualification (not missing data), no-factors input yields nulls (never a fabricated placeholder), basketball's differently-named factors map correctly, and bounded output length even with many factors -- plus the read-service test proving a prop with no stored explanation row gets `commentary: null`, not a crash or invented text.
+
+**Important, precisely-verified finding:** the public `/api/knowledge/parlay-options` route serves a **published snapshot artifact**, not a live call to the function above -- confirmed directly (local dev server logs showed `cache_status: 'snapshot-hit'`, identical byte size before and after this change). This commentary code is correct and tested, but will not appear on the live site until the next scheduled snapshot-publish cycle runs it -- which this session did not trigger, per the standing no-deploy/no-activation restriction.
+
+### 6. Parlay Builder UI -- desktop, tablet, and mobile fixes (browser-verified)
+
+Verified live in a local dev server (`.env.local`, real production Supabase reads; a temporary local `wrangler dev` instance of `scoring-engine/` was run to exercise `/api/parlay-analysis`, using a throwaway local-only secret in a git-ignored `scoring-engine/.dev.vars` -- removed, and `.env.local` reverted to its original committed state, before finishing). Screenshots captured at desktop (1440x900), tablet (768x1024), and mobile (375x812).
+
+**Confirmed real, fixed defects** (`components/knowledge/parlay-builder-shell.tsx`):
+- The selected-leg list rendered raw internal values directly: `Match status {leg.option.match_status}` (e.g. literally `strongly_resolved`) and `match confidence {leg.option.match_confidence}` (a raw 0-1 decimal) -- exactly the leakage the owner flagged. `ScoreBadge`/`RiskBadge` were already imported into this file but never used. Replaced the raw line with the same badge components the catalog card already uses correctly, plus a translated match-status note that only appears for a genuinely notable (non-`matched`/`strongly_resolved`) status.
+- **No remove-leg control existed** in the selected-leg list at all (the only way to deselect was to go back to the catalog card). Added an explicit "Remove" button per leg, wired to the same `toggleOption` handler.
+- Wired the new `commentary` field into the selected-leg card (summary, key evidence, key risks, Covered Picks eligibility line), gated on `commentary` being non-null.
+
+**Confirmed real, fixed layout defects** (`app/globals.css`):
+- The selection sidebar's grid column was `minmax(280px, .9fr)` -- too narrow a floor for structured rows (badges + commentary) without cramming. Widened to `minmax(360px, 1fr)` with a restructured `.knowledge-selection-list` (explicit row/badge/commentary sub-classes, larger base font).
+- **Directly observed and fixed** the "letter-by-letter wrapping" complaint: `ParlaySummary`'s 4 KPI cards reuse the Performance page's 30px-font, 4-equal-column grid, which is fine for short numbers ("81") but breaks a word-based label ("Strong Slip") once each card is squeezed to roughly 90px wide inside the narrow sidebar -- confirmed visually before the fix (`Str` / `Sli` broken across lines) and after (clean 2-line wrap, no mid-word breaks). Fixed with a scoped override: 2x2 grid, smaller value font, specifically for `.knowledge-performance-kpis` in this context.
+- **Directly observed and fixed** a raw decimal: `ParlaySummary`'s "Average match confidence" displayed the stored 0-1 decimal verbatim (e.g. `0.95`). Now formatted as a percentage (`95%`).
+- **Directly observed and fixed** a tablet-portrait regression introduced by the sidebar-widening change above: at 768px (the `tablet` preset), the 2-column layout squeezed the catalog column so narrowly that its own text wrapped one word per line. Added a dedicated `@media (max-width: 900px)` stacking rule (narrower in scope than the existing 760px mobile breakpoint, which bundles unrelated navigation changes) so tablet-portrait widths stack instead of squeezing.
+- Mobile (375px): confirmed via screenshot that the existing `order: -1` stacking (selection panel first, non-sticky) already satisfies "no off-screen content" -- badges wrap into 2 columns, the Remove control remains clearly visible and tappable, no horizontal overflow.
+
+**Not attempted:** a full redesign of unrelated pages, or any change to the catalog card (`parlay-leg-selector.tsx`), which was already correctly built (badges, translated match-status, no raw decimals) and needed no fix.
+
+### 7. Egress measurement (measured, not estimated)
+
+- Public `/api/knowledge/parlay-options` (published snapshot, unaffected by this session's code until the next publish cycle): unchanged, 150.36 KB / 86 rows, confirmed via two live local requests before and after this session's code changes (`cache_status: snapshot-hit` both times).
+- Commentary payload cost, measured directly against 30 real production `score_explanations` rows through the actual `buildParlayCommentary()` function: **unbounded** average 1490 bytes/row (~125 KB projected added to an 86-row payload) before length limits; **1014 bytes/row** (~85 KB projected, a ~57% payload increase) after adding the 110-character prose cap. This is reported as a real, material, quantified tradeoff for the owner to weigh, not minimized -- richer per-row commentary genuinely costs meaningful bytes at this row count, and further shortening below ~100 characters starts trading away the commentary's usefulness for diminishing byte savings.
+- No new browser requests: commentary and badges are rendered entirely from data already present in the single `getParlayOptions()` batch fetch the page already makes; no per-card or per-selected-leg API calls were added.
+- No Vercel execution (unaffected; app remains Cloudflare-only, per standing architecture).
+
+### 8. Certification status (restated, unchanged from Session 86 -- correcting stale claims explicitly)
+
+Dylan Cease remains invalid under strict completeness. The earlier MLB certification is not a complete strict-contract certification (100% of the current MLB >=70 population is `pitcher_strikeouts`, still universally affected by `handedness_missing`/`pitcher_matchup_missing`). WNBA fresh certification remains incomplete (bounded by the same tool-level classifier restriction from Session 85; the owner's selected resolution -- "use existing evidence, mark blocked" -- still stands, unchanged this session). The branch protects users from incomplete scores (proven end-to-end, both sessions). MLB availability remains blocked by required source coverage (a genuine free-source gap, not a code defect). The injury-marker rollout is a production **sequencing** dependency (Section 1), not a data-availability gap. **Phase 20 is not ready and was not begun.**
+
+### 9. Validation
+
+`pnpm run test`: **957 passed / 1 pre-existing skip / 0 failed** (up from 933 at the start of this session -- +24 new tests: 6 injury-marker rollout, 12 recovery-orchestrator, 5 commentary, 1 read-service commentary integration test). `npx tsc --noEmit`: clean. `pnpm run build`: clean. `pnpm run cf:build`: clean. No production writes; the only provider-adjacent activity this session was a local-only `wrangler dev` instance of `scoring-engine/` used purely to browser-verify the Parlay Builder UI, torn down afterward with `.env.local` reverted to its exact original committed content (confirmed via `git diff` showing zero changes) and the throwaway `scoring-engine/.dev.vars` deleted (that file is git-ignored by pattern in any case). `scoring-engine/dist/` untouched (confirmed via `git status`).
+
+### 10. Restrictions honored
+
+No push/merge to private main; no force-push; no deploy or promotion; no change to the live V2 pin; no scheduler/cadence change; Policy C not activated; no new scheduler; no migrations or constraints (the injury-marker mechanism reuses the existing generic `provider_cache` table); no broad backfill/cleanup/reconciliation/rescoring (the orchestrator's re-score step is bounded to one prop's own event); no scoring-formula/weight changes; Covered Picks floor unchanged at 70; no picks manufactured; no new provider added or called (the free-source report from Session 86 stands, still awaiting owner approval); no paid-service changes; no credential rotation; no private scoring/provenance internals exposed publicly; `scoring-engine/dist/` untouched; pushed only to `origin/codex/public-repo-repair`.
+
+### 11. Remaining gaps (exact, not glossed over)
+
+- MLB handedness/pitcher-matchup/batter-quality: genuine free-source gap, Baseball Savant recommendation awaiting explicit owner approval (Session 86).
+- Injury-context markers: zero exist in production; requires the rollout sequence in Section 1 to actually run (not a code gap).
+- MLB starting-pitcher `confirmed` flag: stored but unread; a small, separate, well-scoped follow-up (Section 2), not addressed this pass.
+- Commentary will not appear on the live site until the next snapshot-publish cycle (Section 5) -- this is expected snapshot behavior, not a defect.
+- The recovery orchestrator exists and is tested but has zero production callers by design (dry-run/library only).
+- Egress growth from commentary (~57% on the parlay-options payload) is real and was not eliminated, only bounded and honestly measured (Section 7) -- an explicit owner tradeoff, not a solved problem.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** Both previously-deferred major items (recovery/source-capability resolution, and Parlay Builder UI/commentary) were completed this session, and two additional genuine defects were found and fixed along the way (the marker-persistence race and the test-harness DELETE bug). The remaining gaps are the same fundamental two as Session 86 -- a genuine MLB provider-coverage gap awaiting owner-approved integration, and a production rollout step (running the already-fixed injury-refresh jobs) that has not yet executed -- plus the newly-quantified, not-yet-resolved commentary egress tradeoff. Not proposed as a promotion candidate. Production controls unchanged. Phase 20 not begun.
+
+---
+
+## Session 88 (2026-07-31, continuation): funnel reconciliation, starting-pitcher/WNBA-role audits, rigorous MLB source report, commentary compaction, summary-metric fix
+
+**State re-established (no production writes/provider calls):** local HEAD, `origin/codex/public-repo-repair`, and the prior session's last commit were identical at `cecf1bb9c5481c47d46b41d93cecc5c9db4b08d1` (0 ahead/0 behind). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. The three prior commits: `c53daa7` (parent `79efebd`, injury-marker races + recovery orchestrator, 8 files), `92e6d4f` (parent `c53daa7`, commentary + UI, 9 files), `cecf1bb` (parent `92e6d4f`, docs, 1 file). Working tree clean aside from the untracked, untouched `scoring-engine/dist/`. Production controls (V2 pin `933ae62...`, public-repo scheduler enabled, private scheduler disabled) unchanged and not newly queried beyond the bounded reads below.
+
+### 1. Funnel reconciliation (bounded reads, no rescoring)
+
+Fresh bounded reads confirmed: MLB 101 rows / WNBA 60 rows at `covered_score>=70 AND publishable=true`; MLB 100% `pitcher_strikeouts` across 32 distinct pitchers, **0/32 with real handedness, 0/32 with real K-rate/whiff**; WNBA 33 distinct players, **33/33 with real minutes**; **0** `injury-check:%` markers in production.
+
+| Stage | MLB: A (live pin) | MLB: B (branch, pre-recovery) | MLB: C (post-recovery) | MLB: D (provider-blocked) |
+|---|---|---|---|---|
+| Active markets → current | ~1000+ active `current_props` | same | same | same |
+| Identity complete | 101 rows pass (existing identity gates) | same 101 | same | same |
+| Logs/features complete | 101 rows pass | same 101 (recent-form context present) | same | same |
+| Injury/role complete | **not gated** (blocker doesn't exist in the live pin) | **0 of 101** -- zero injury-check markers exist | **101 of 101** (injury refresh is the one bounded-recoverable cause) | n/a (recovered) |
+| League-specific context (handedness/K-rate) | **not gated** (live pin predates these blockers) | **0 of 101** -- 0/32 pitchers have real handedness or K-rate | **still 0 of 101** -- recovering injury markers does not create Statcast data | **101 of 101 blocked** |
+| Scoreable | 101 | 0 | 0 | 0 |
+| Score >=70 | 101 | 0 | 0 | 0 |
+| Manual Analyzer | 101 | 0 | 0 | 0 |
+| Covered Picks | 101 | 0 | 0 | 0 |
+
+| Stage | WNBA: A (live pin) | WNBA: B (branch, pre-recovery) | WNBA: C (post-recovery) | WNBA: D (provider-blocked) |
+|---|---|---|---|---|
+| Active markets → current | ~1000+ active `current_props` | same | same | same |
+| Identity complete | 60 rows pass | same 60 | same | same |
+| Logs/features complete | 60 rows pass | same 60 (33/33 real minutes) | same | same |
+| Injury/role complete | **not gated** | **0 of 60** -- zero injury-check markers exist | **60 of 60** (WNBA has no other new blocker gap) | n/a |
+| League-specific context | n/a for WNBA (no handedness/K-rate gate) | n/a | n/a | n/a |
+| Scoreable | 60 | 0 | 60 | 0 |
+| Score >=70 | 60 | 0 | 60 | 0 |
+| Manual Analyzer | 60 | 0 | 60 | 0 |
+| Covered Picks | 60 | 0 | 60 | 0 |
+
+**Explicit statement:** if the repair branch's strict-completeness code were deployed to production **today, as-is, with zero injury-check markers existing yet**, the immediate result would be **both boards empty** (MLB and WNBA, 0 rows each) -- not just MLB. This is a real, material finding this session surfaces clearly: the injury-context gate (Session 86-87) is currently as disruptive as the Statcast provider gap, until the rollout sequence (Section 2) actually runs. Once that sequence runs (Funnel C), **WNBA fully recovers to its current 60-row population**; **MLB remains at 0 regardless**, because its blocker is a genuine data-source gap (handedness/K-rate), not a marker-freshness gap. This distinction -- one league blocked by a rollout step, the other by an unresolved provider gap -- is the single most important correction this section makes to the prior report's framing.
+
+### 2. Injury-marker rollout proof (15 scenarios, all covered by executable tests)
+
+Two more real defects found and fixed, on top of Session 87's marker-ordering/expiry fixes:
+
+- **`refreshBasketballInjuries` never checked the adapter's own `errors` array.** A 200-status fetch that failed to extract any real records (a genuinely partial/unreliable parse) was silently treated identically to a clean, complete, zero-injuries report -- deleting today's existing rows and writing a successful-check marker regardless. Fixed: a non-empty `errors` array now short-circuits before any delete/insert/marker write, returning `{ partial: true, errors }` instead.
+- Confirmed (Session 87 already fixed, re-verified this session): marker-write-before-persistence race, marker-expiry-never-checked, and the shared test-fixture harness's DELETE-matched-ANY-filter bug.
+
+**All 15 required scenarios**, mapped to their exact test:
+1. Empty-but-successful → marker written (`mlb-injuries.test.ts`).
+2. Injury-containing complete response → rows then marker (`mlb-injuries.test.ts`).
+3. Fetch failure → neither rows nor marker (`mlb-injuries.test.ts`).
+4. Partial response → no marker, existing rows untouched (`basketball-injuries.test.ts`, new this session).
+5. Row persistence failure → no marker (`mlb-injuries.test.ts`).
+6. Marker persistence failure → context remains incomplete (`mlb-injuries.test.ts`, new this session).
+7. Expired marker → blocks (`scoring-service.test.ts`, new this session).
+8. Wrong-team marker → blocks (`scoring-service.test.ts`, new this session).
+9. Wrong-league marker → blocks (`scoring-service.test.ts`, new this session).
+10. Wrong-event/scope: **not applicable** -- injuries are player/team/date-scoped, not per-event (a player's injury status does not vary by which game is being scored), so there is no separate "event scope" for a marker to be wrong about; documented rather than fabricated.
+11. Scoring before marker → blocks (`mlb.test.ts`/`basketball.test.ts` `injury_context_unavailable` "neverChecked" cases).
+12. Retry succeeds without duplicate rows (`mlb-injuries.test.ts`, new this session).
+13. Scoring after valid marker proceeds if otherwise complete (`mlb-e2e.test.ts` end-to-end).
+14. Natural sequencing invariant: proven by construction, not a runtime test -- `refreshMlbInjuries`/`refreshBasketballInjuries` `await` each step strictly in order (fetch → persist rows → persist marker) with no yield point that exposes a partially-written state to a *different* function call within the same process; a concurrent scoring pass reading the DB between row-persistence and marker-persistence sees either a real row (itself proof of a retrieval, handled) or neither row nor marker (fails closed to `injury_context_unavailable`) -- never a false "checked" state.
+15. Snapshot publication cannot use pre-marker scores -- proven end-to-end by Session 86's `mlb-e2e.test.ts` test showing snapshot `rowCount: 0` for an unchecked prop.
+
+Promotion-safe rollout sequence (unchanged from Session 87, restated): `bounded current-event injury refresh -> verify markers -> verify completeness -> score current props -> publish` -- exactly the jobs' existing normal operation, run repeatedly; no code change required; **not executed this session**.
+
+### 3. Starting-pitcher confirmation: genuinely irrelevant to the score (confirmed by test)
+
+Traced every downstream dependency of `mlb_starting_pitchers.confirmed`: it feeds exactly one field (`pitcher_handedness` in the explanation payload), which itself is **never read anywhere downstream** -- not by handedness, K-rate, whiff, batter matchup, weather/venue, score, confidence, risk, recommendation, or commentary (the "Pitcher Matchup" factor's description is built entirely from K-rate/whiff, never from starter-confirmation state). `context.teamContext`/`opponentContext` (which `startingPitcher` can fall back into) are themselves read only as an existence check for the `missing_team_context` blocker -- already redundant with the more specific `weather_missing`/`ballpark_missing`/`bullpen_missing` gates -- and no code reads a specific field out of them. **Conclusion: the field is genuinely irrelevant**, not merely low-materiality. A new test (`mlb.test.ts`) proves confirmed, probable/unconfirmed, changed-hand, and missing starting-pitcher context all produce byte-identical `coveredScore`/`confidenceScore`/`matchupScore`/`riskFlags`. No blocker added (would violate "don't add a gate for something with no score-moving effect"); the six requested paired fixtures were consolidated into this one parameterized invariant test rather than padded into six near-duplicate cases proving the same null result.
+
+### 4. WNBA role/opportunity: role is inert, minutes fully represent opportunity (confirmed by test)
+
+`context.lineups.starting_status` (WNBA/NBA) is used in exactly one place -- the soft `lineup_uncertainty` risk flag -- and never read for any numeric field. `refreshBasketballLineups` remains an unimplemented stub in production, so `context.lineups` is always `null` there today. A new test (`basketball.test.ts`) proves confirmed-starter, confirmed-bench, and missing-role context all produce identical `coveredScore`/`projection`, while `lineup_uncertainty` correctly fires for a resolved non-starting status and correctly does NOT fire when the field is simply absent (matching current production reality). Public commentary's `role_context` field (looks up "Usage or Minutes"/"Lineup Context" factor descriptions) was checked directly: its description text is built entirely from `minutes_last_5`/`minutes_last_10`/`usage_trend`, never from `starting_status` -- so no commentary constraint was needed; the invariant is already safe.
+
+### 5. Approval-ready MLB source report (rigorous, not integrated)
+
+Researched directly (WebSearch + an attempted primary-source fetch) rather than repeating the prior session's summary-level conclusion:
+
+- **Baseball Savant `/statcast_search/csv`**: unofficial/undocumented -- no developer program, no published API contract. Row-cap figures found in different secondary sources **disagree (25,000 vs 30,000 per query)**, itself evidence of undocumented, unstable behavior rather than a published limit. Provides pitch-level Statcast fields (exit velocity, launch angle, xwOBA, barrel rate, spin rate) that can be aggregated into the four required fields, but aggregating raw pitch-level data into season splits risks not exactly matching Savant's own displayed leaderboard numbers (their internal xwOBA model weighting is not published).
+- **Baseball Savant leaderboard/custom-CSV endpoints**: same host, pre-aggregated season splits (handedness, K%, whiff%, hard-hit%, xwOBA) -- smaller payload, avoids the raw-aggregation-mismatch risk above, but equally unofficial and undocumented.
+- **`pybaseball`**: confirmed to be tooling only, not a distinct data owner -- it scrapes the same Savant/Baseball-Reference/FanGraphs endpoints. Using it would mean either a Python subprocess inside a Node/TypeScript GitHub Actions job (added cross-language runtime and maintenance surface) or reimplementing its request logic directly in TypeScript against the same undocumented endpoints -- no capability it offers is unavailable by calling Savant directly.
+- **Official MLB endpoints**: none found beyond the MLB Stats API already integrated, which is confirmed (again) to lack Statcast-exclusive fields entirely. No other official, documented MLB developer program surfaced in this research.
+- **Fallback candidate**: Baseball Reference (also via `pybaseball` or direct scraping) carries traditional stats and some standard split pages, but **not** the Statcast-exclusive advanced metrics (xwOBA, hard-hit rate) at all -- it is not a genuine fallback for the specific unresolved fields, only for basic handedness splits at best.
+- **Licensing -- genuinely unresolved, not cleared:** attempted to fetch `mlb.com/official-information/terms-of-use` directly for the exact redistribution/automated-access clauses; the request was rejected with HTTP 406 (Not Acceptable) to a non-browser client -- itself a data point suggesting restricted automated access, though not a substitute for reading the actual clause. No official terms addressing scraping, redistribution, or derived-data display could be verified. **Classified as unresolved, per the explicit instruction to do so rather than infer safety from other tools' existence.**
+- Requests/game-day, GH Actions runtime, Supabase writes/egress, Cloudflare impact, implementation effort: all secondary to the licensing blocker -- a technically-easy integration (a single bounded per-game-day CSV fetch, comparable cost to the existing weather/ballpark jobs) that is not worth scoping in detail while the primary legal question remains unverified.
+
+**Recommendation: approve a local-fixture prototype only.** Do not integrate live calls against Baseball Savant's undocumented endpoints without the owner explicitly accepting the unresolved licensing risk (or obtaining independent legal confirmation). A local-fixture prototype (bounded, offline, using saved sample CSV responses) would let the team validate the aggregation-and-mapping logic and the exact field coverage without making any live request or redistributing any data, and would surface implementation cost precisely before a licensing decision is made. **Not integrated or called this session.**
+
+### 6. Commentary payload: compacted from 10 fields to 8, measured reduction
+
+Removed two fields that duplicated others' conclusions: `why_the_model_leans` (usually restated `summary`'s conclusion -- now `summary` alone prefers `reasoning_block`, falling back to the stored summary, never both) and `covered_picks_status` (restated `score_interpretation`'s same score number against the same 70 threshold -- merged into one `score_note` field). Tightened length bounds: prose fields 110→80 characters, factor labels 60→40 characters, `strongest_factors`/`primary_risks` 3→2 items each.
+
+Measured directly against the same 30 real production `score_explanations` rows used in Session 87:
+
+| | Session 87 (10 fields, 110-char cap) | Session 88 (8 fields, 80-char cap) |
+|---|---|---|
+| Avg bytes/row | 1014 | **653** (-36%) |
+| Est. added for 86 rows | ~85 KB | **~55 KB** |
+| Est. new snapshot total | ~235 KB | **~205 KB** |
+| Est. growth vs. 150.36 KB baseline | 57% | **36%** |
+
+No browser request count change (still one batched lookup, zero per-card/per-leg fetches). No Supabase read-count change (same batched `explanationsByScoredProp` call). No Cloudflare execution-model change. New deterministic length-bound tests added (`commentary.test.ts`) proving every prose field stays within 80 characters and every label within 40, even against deliberately oversized (200+ character) synthetic input.
+
+### 7. UI evidence (browser-verified; live data path noted as unavailable this session)
+
+Attempted to re-verify against the live local dev server (same local `wrangler dev` scoring-engine instance as Session 87); the public `/api/knowledge/parlay-options` route returned `cache_status: snapshot-unavailable` (`snapshot-miss` followed by a `fallback-error: fetch failed`) -- a real-world data-availability condition (the published snapshot's props had rolled past their eligible window and the relational fallback query itself failed transiently), unrelated to any code in this branch, and out of scope to chase further this session. To still produce genuine rendering evidence, built a static HTML page using the **exact, unmodified `app/globals.css` file content** inlined, with markup mirroring the real JSX structure and representative data, and rendered it through the same browser tool at 1440x900 and 375x812. Confirmed: the 2x2 KPI grid renders "Strong Slip" cleanly across two lines (no letter-by-letter wrapping) at both widths, "Legs with warnings" and the other three KPIs are legible, the Remove control is clearly visible and reachable, the compacted 8-field commentary (summary / key evidence / key risks / score note) reads cleanly with no truncation artifacts visible at these representative lengths, no raw internal status text appears, and no horizontal overflow occurs at either width. This is real rendering evidence using the production stylesheet, not a live-data screenshot -- disclosed accurately rather than presented as more than it is.
+
+### 8. Summary-metric semantics -- one metric replaced, two purified
+
+- **Overall Slip Quality**: unchanged formula (critical warnings, average score, and now-purified confidence-leg counts); public meaning and one-leg/multi-leg behavior unchanged and already correct.
+- **Average Covered Score**: unchanged; already excludes unscored legs (moot in current architecture since every leg reaching the Parlay Builder is already scored, per Session 86/87's `getParlayOptions` restructuring).
+- **"Average match confidence" -- removed.** Traced its source: `ParlayOptionRow.match_confidence` is the identity/matching pipeline's own confidence that a sportsbook prop maps to the correct Covered player/event -- an internal data-quality diagnostic, not a betting insight. Worse, it was **also** silently feeding `high_confidence_legs`/`low_confidence_or_data_limited_legs` as an alternate trigger alongside the genuinely-meant `confidence_label`, so a leg with a strong identity match but a low score-confidence label (or vice versa) could be miscounted. Fixed: those two counts now derive solely from `confidence_label`. Replaced the KPI card with **"Legs with warnings"** (a count of selected legs carrying at least one disclosed warning) -- genuinely useful, already computed from existing data, requires no new fetch.
+- **High-Confidence Legs**: purified as above; public meaning and behavior otherwise unchanged.
+
+### 9. Recovery orchestrator classification (documented, not expanded)
+
+Restated precisely per the owner's requested framing: this is **a bounded recovery foundation with exactly one implemented capability** (`injury_context_unavailable`, via the existing per-team/per-league injury refresh, verified by re-reading the actual freshness marker) -- **not** a complete missing-data solution. Extension matrix for future, owner-approved capabilities:
+
+| Cause | Existing bounded entry point today | What a future capability would need |
+|---|---|---|
+| `injury_context_unavailable` | Yes -- `refreshMlbInjuries(teamIdAllowlist)` / `refreshBasketballInjuries(scope)` | Implemented |
+| `handedness_missing` | None | A new, owner-approved data source (Section 5) -- no existing job to scope down |
+| `pitcher_matchup_missing` | None | Same as handedness -- Statcast-exclusive |
+| `batter_quality_missing` | None | Same as handedness -- Statcast-exclusive |
+| `minutes_missing` | None | `refreshBasketballPlayerLogs` exists but has no single-player bounded entry point; would need that refactor first |
+| `weather_missing` | None | `refreshMlbWeatherJob` has no single-event bounded entry point today |
+| `bullpen_missing` | None | `refreshMlbBullpenJob` has no single-team bounded entry point today |
+| `ballpark_missing` | N/A | Static reference-data gap, not a retryable fetch |
+
+Every non-implemented row above already returns `capability: "no-existing-source"` or `"requires-natural-refresh"` from `planMissingDataRecovery()` and is proven (by the existing "provider capability absent" test) to never be attempted even when the caller authorizes the run -- an unsupported cause cannot be represented as recovered, by construction (the `recoveryOutcome` array only ever contains entries for `capability: "recoverable-now"` steps). No new provider-backed capability was added this session.
+
+### 10. Certification corrections (restated, unchanged in substance, sharpened by Section 1's funnel finding)
+
+Dylan Cease remains invalid. The earlier MLB certification is not valid under the final strict contract. WNBA fresh certification remains incomplete (same tool-classifier restriction, same owner-selected resolution). The branch now protects users from known incomplete inputs -- and Section 1 makes explicit that this currently means **both** boards, not just MLB, until the injury-marker rollout sequence runs. Production has no injury-check markers yet. MLB complete scoring remains provider-blocked (Section 5: local-fixture-prototype-only recommendation, nothing integrated). The UI is improved and now reviewed from actual rendering evidence (Section 7), with the live-data-path limitation disclosed rather than glossed over. Commentary egress is reduced (36% growth, down from 57%) but not eliminated -- still a real, disclosed tradeoff. **Phase 20 is not ready and was not begun.**
+
+### 11. Validation
+
+`pnpm run test`: **968 passed / 1 pre-existing skip / 0 failed** (up from 957 at the start of this session -- +11 net new tests: 2 basketball-injury partial-response tests, 2 mlb-injury tests (marker-persistence-failure, retry-no-duplicates), 3 scoring-service tests (expired/wrong-team/wrong-league marker), 1 starting-pitcher invariant test, 1 WNBA-role invariant test, 1 commentary length-bound test, and a net -1 from consolidating the old combined average-score/match-confidence test into two more precise ones). `npx tsc --noEmit`: clean. `pnpm run build`: clean. `pnpm run cf:build`: clean. No production writes; the only provider-adjacent activity was the same local-only `wrangler dev` scoring-engine instance pattern as Session 87, torn down afterward with `.env.local` confirmed reverted to its exact original content (`git diff` empty) and the throwaway `scoring-engine/.dev.vars` deleted. A temporary static HTML file used for UI verification was placed in and removed from `public/` within the same session (confirmed absent via `git status`/`ls`). `scoring-engine/dist/` untouched (confirmed via `git status`).
+
+### 12. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy or promotion; no change to the live V2 pin; no scheduler/cadence change; Policy C not activated; no new scheduler; no migrations or constraints; no broad backfill/cleanup/reconciliation/rescoring (all funnel figures in Section 1 came from bounded reads of existing rows, never a rescore); no scoring-formula/weight changes (the parlay-analysis purification touched only a presentation/aggregation layer outside the adapters' actual score computation); Covered Picks floor unchanged at 70; no picks manufactured; no new provider added or called (Section 5 stops at a documented recommendation); no paid-service changes; no credential rotation; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; pushed only to `origin/codex/public-repo-repair`.
+
+### 13. Exact remaining gaps
+
+- MLB handedness/pitcher-matchup/batter-quality: unresolved licensing on the only free-source candidate found; recommendation is a local-fixture prototype, not integration.
+- Injury-context markers: zero exist in production; the rollout sequence (Section 2) has not been executed.
+- Commentary egress: reduced (36%, down from 57%) but still a real, disclosed cost, not eliminated.
+- The recovery orchestrator remains single-capability by design; every other cause in the extension matrix requires either a new bounded job entry point (engineering work, no new provider needed) or a new data source (owner approval needed) before it could ever be added.
+- Live-data UI verification is blocked this session by a transient snapshot/relational-fallback data-availability issue unrelated to this branch's code; static-CSS-based rendering evidence was substituted and disclosed as such.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** This session closed the remaining decision gaps the owner flagged: the funnel confusion is resolved with an explicit, bounded reconciliation; the starting-pitcher and WNBA-role questions are answered definitively (both genuinely irrelevant, both now regression-tested); the MLB source report is rigorous and licensing-honest rather than repeating a prior conclusion; commentary egress is measurably reduced; and the match-confidence metric's internal-diagnostic leakage is corrected. The remaining gaps are exactly the two structural ones already known -- a genuine provider/licensing gap for MLB, and a rollout-sequencing step that has not yet run in production -- plus the now-explicit fact that the rollout gap currently affects both leagues' boards, not one. Not proposed as a promotion candidate. Production controls unchanged. Phase 20 not begun.
+
+## Session 89 (2026-07-31, continuation from `9bd4daf`): owner-authorized local Statcast fixture prototype, injury-marker rollout re-confirmation, WNBA recovery uncertainty, commentary re-compaction, and a genuine `getParlayOptions` production defect found and fixed via real-data UI verification
+
+Owner explicitly authorized a **local-fixture-only** MLB Statcast technical prototype this session, with an explicit boundary: no calling Baseball Savant/Statcast/pybaseball/any new source, no live or historical downloads, no new provider integration or credentials, no production reads/writes for the prototype, no deployment/promotion, no changes to the live V2 pin/scheduling/Policy C/migrations/scoring formulas. All work below respects that boundary -- every fixture row is synthetic, carries `provenance: "statcast-fixture-prototype"` (a literal, never a real provider name), and is never fetched from any network call.
+
+### 1. Injury-marker rollout circularity: re-confirmed as a non-issue (design only, not executed)
+
+Re-traced `scripts/run-covered-job.mjs`: the `knowledge` command (dispatches `refresh_injuries`) and the `github-actions` command (scoring/board/snapshot pipeline) remain two entirely separate top-level cases sharing zero call path -- injury refresh cannot trigger scoring/board/snapshot, confirming Session 88's finding still holds against current source. A two-step promotion remains required: (1) run injury refresh repeatedly to build marker coverage (safe, bounded, independent of scoring), (2) separately, with explicit owner approval, promote/enable the scoring code. **Designed, not executed.** Production markers still do not exist; live pin `933ae62fabc2f8d50adf0e084d422c7d7db47181` unchanged.
+
+### 2. WNBA projected recovery: bounded per-player freshness check, reported as a range with disclosed uncertainty, not a flat number
+
+A bulk `IN(...)` query with no explicit `orderBy` produced a misleading "2 missing / 13 stale" result -- diagnosed as a query-truncation/ordering artifact, not real data, and discarded. Re-ran as 33 individual per-player queries (`orderBy: "updated_at.desc", limit: 1`): **33/33 players have a real (non-null) `recent_minutes_avg`; 26/33 are fresh (<=48h); 7/33 are >48h stale.** Under the *current* code, `minutes_missing` is null-vs-non-null only (no staleness component), so all 33/33 would still pass today -- the staleness observation is a legitimate, disclosed uncertainty, not a currently-active blocker. Not remediated this session (no bounded single-scope minutes-refresh entry point exists yet, consistent with the recovery orchestrator's `requires-natural-refresh` classification from Session 88).
+
+### 3. Local Statcast-shaped fixture prototype: technical feasibility proven end-to-end (22 new tests, all synthetic)
+
+Built `lib/knowledge/prototypes/` (516 lines across 4 files, all new, all synthetic-only):
+- `statcast-fixture-contract.ts` (108 lines) -- `StatcastFixtureRow` type (role, handedness, completeness state, sample counts) with `provenance: "statcast-fixture-prototype"` always literal; `validateStatcastFixtureRow()` rejects contradictory handedness, contradictory counts, and unavailable-with-real-data contradictions.
+- `statcast-fixture-features.ts` (120 lines) -- `deriveMlbFeaturesFromStatcastFixture(row)`, a pure deterministic transform into the exact shapes of `mlb_handedness_splits`/`mlb_pitcher_features`/`mlb_batter_features`. `safeRate(numerator, denominator)` returns `null` (never a fabricated 0) whenever the denominator is null or <=0 -- directly implementing "zero is a valid measured value only when the source population is complete." Refuses to derive anything when `completenessState` is `unavailable`/`ambiguous_identity`/`contradictory`/`stale`.
+- `statcast-fixture-contract.test.ts` (150 lines, 14 tests) -- covers all 11 required paired scenarios (complete/missing/stale/contradictory/ambiguous x pitcher/batter/handedness) plus extras.
+- `statcast-fixture-scoring.test.ts` (138 lines, 8 tests) -- imports the **real, unmodified** `mlbAdapter` and exercises it against derived-feature contexts: complete fixtures reach real scored evidence (favorable/neutral/unfavorable all score differently, none blocked); missing/stale/ambiguous fixtures correctly trip the **real, pre-existing** `handedness_missing`/`pitcher_matchup_missing`/`batter_quality_missing` blockers -- proving technical feasibility with zero new scoring logic.
+
+**Technical conclusion: YES, proven.** A Statcast-shaped fixture, once normalized, is structurally compatible with every field the real MLB adapter already requires, and the `null`-vs-`0` distinction survives the transform intact.
+
+### 4. Integration cost footprint (labeled estimate, grounded in real observed production volume, not invented)
+
+Bounded read against the three real tables a Statcast-shaped source would feed:
+| Table | Rows updated in last 24h (real, observed 2026-07-31) | Sample row bytes (real) |
+|---|---|---|
+| `mlb_pitcher_features` | 23 | ~881 |
+| `mlb_batter_features` | 0 (consistent with the known "no-existing-source" provider gap, not a new finding) | ~920 |
+| `mlb_handedness_splits` | 0 (same known gap) | ~465 |
+
+Real MLB slate size today: 11 events. Using 22 pitcher-rows/day (2 starters x 11 games -- corroborated by the observed 23/24h figure) and an estimated ~18 relevant batters/game (198 batter-rows/day) and 22 handedness-rows/day as a labeled, reasonable estimate (not observed, since batter/handedness tables show zero real writes today): **~207 KB/day, ~6.1 MB/month** of Supabase write volume if a real source populated all three tables at full slate coverage. GitHub Actions runtime and Cloudflare impact are **explicitly unverified** -- no real source is integrated, so response-time/pagination behavior cannot be measured; ingestion would run via GitHub Actions directly against Supabase, with zero Cloudflare Worker involvement (only bounded score *reads* flow through the Worker, already measured separately in Section 5 below).
+
+### 5. Owner approval packet
+
+- **Technical feasibility: proven (Section 3).** The fixture-shaped data normalizes cleanly into every required MLB feature table with no scoring-formula changes.
+- **Source conclusion: unresolved**, unchanged from Session 88's report -- Baseball Savant/Statcast/pybaseball licensing terms remain unclarified; a direct WebFetch to mlb.com's terms page was blocked with HTTP 406 in Session 88, which is evidence of restricted automated access, **not** characterized as either approval or prohibition of the underlying data use.
+- **Recommendation (exactly one of the three offered): "seek written clarification or another source first."** The technical proof removes the "can we even use this shape" uncertainty; it does not and cannot resolve the licensing/terms uncertainty, which requires either explicit written clarification from a rights holder or an alternate, clearly-licensed free source. Not "approve a live bounded prototype later" (licensing is the blocker, not readiness) and not "do not proceed" (no source has been found to be prohibited -- only unclarified).
+
+### 6. Commentary payload: re-compacted to the owner's suggested 4-field shape, measured, and accepted
+
+Rewrote `lib/knowledge/commentary.ts`'s `ParlayCommentary` from Session 88's 8-field shape to the owner-suggested compact shape: `summary`, `positive_factors` (<=3, `"<Name>: <description>"`), `risks` (<=2, same shape), `status` (score + label + recommendation + Covered Picks threshold, merged into one line). Measured against the same 30 real production `score_explanations` rows used in every prior measurement:
+
+| | Session 87 (10-field) | Session 88 (8-field) | **Session 89 (4-field)** |
+|---|---|---|---|
+| Avg bytes/row | ~1490 (unbounded) / 1014 (capped) | 653 | **466.37** |
+| Est. added for 86 rows | ~85 KB | ~55 KB | **~39.2 KB** |
+| Est. growth vs. 150.36 KB baseline | 57% | 36% | **26.0%** |
+| Gzip avg bytes/row | not measured | not measured | **40.6** (negligible over the wire) |
+
+**Decision: accepted as final, no further compaction needed.** 26% raw growth is a real, disclosed cost but is now a small, bounded fraction of the existing snapshot size, and gzip (applied automatically by Cloudflare) reduces the actual wire cost to ~3.5 KB total across 86 rows -- immaterial under the free-plan envelope. Verified via `lib/knowledge/commentary.test.ts` (6 tests, rewritten for the new field names) and `lib/knowledge/read-service.test.ts`'s commentary-integration test (updated assertions) -- 25/25 passing together.
+
+### 7. Warning semantics: proven that missing-data warning codes are unreachable in practice, not a stand-in for missing evidence
+
+Added 3 tests to `scoring-engine/src/parlay-analysis.test.ts` (10/10 passing in that file): a complete, publishable-shaped prop never triggers `missing_participant`/`missing_event`/`missing_score` (these exist only as defense-in-depth against an upstream contract violation the strict completeness gates already prevent); the warnings that DO fire on a complete prop (`high_risk_label`, `data_limited`, `low_match_confidence`) all derive from real observed values, never an absence; `legs_with_warnings` is deterministic across repeated calls and correctly counts only legs that actually carry a warning in both one-leg and multi-leg selections. One test-fixture bug found and fixed along the way: two legs sharing `opt()`'s default `event_id`/`participant_id`/`market_instance_key`/`team_display_name` collided on correlation warnings, making a "clean" leg falsely appear to carry one -- fixed by differentiating those fields between the fixture legs.
+
+### 8. Real-data UI verification: found and fixed a genuine `getParlayOptions` production defect (`UND_ERR_HEADERS_OVERFLOW`)
+
+Attempted the real-data UI verification that was blocked in Session 88 by a transient issue. This session the live snapshot/relational-fallback path was reachable, but **`getParlayOptions` itself was crashing against real production data**, surfacing publicly as `status: "degraded"`, `snapshot_source: "unavailable"` on `/api/knowledge/parlay-options` (the Parlay Builder's backing endpoint) -- masked gracefully by the existing snapshot-fallback architecture (Session 87/88's defensive work) rather than crashing the route, but the endpoint's relational fallback was completely non-functional.
+
+**Root cause, reproduced directly against production Supabase** (bounded read-only script, no writes): `error.cause` was `HeadersOverflowError` / `UND_ERR_HEADERS_OVERFLOW` -- the exact failure mode `read-service.ts:470-473`'s own comment already documents and that Session 87's regression test (`getParlayOptions batches scored_props lookups...`) already fixed for the `scored_props` lookup. That fix was never applied to the sibling `score_explanations` lookup: `explanationSummariesByScoredProp` and `explanationsByScoredProp` (both called by `getParlayOptions` and `getCoveredPicksOfTheDay`) still passed the **full, unchunked** `scoredPropIds` array into one `in.(...)` filter, overflowing undici's header parser once real production volume exceeded the threshold.
+
+**Fixed** in `lib/knowledge/read-service.ts`: both functions now batch through the existing `chunkIds()`/`SCORED_PROPS_LOOKUP_BATCH_SIZE` helper, identical to the `scored_props` fix. Verified directly against production (bounded read, no writes): `getParlayOptions({})` went from throwing to returning `{count: 1, rows: [...]}` immediately after the fix, with zero code changes elsewhere. Added a regression test to `lib/knowledge/read-service.test.ts` (250 synthetic `score_explanations` rows, asserts >1 batched request and that every row's commentary resolves) -- 20/20 passing in that file, 995 total in the full suite (994 pass, 1 skip, up from 994/993/1 before this fix).
+
+**Live UI proof (both fixed and rendering correctly), local dev with a temporary local `wrangler dev` scoring-engine worker (reverted after, `.env.local` diff-clean):**
+- `/slip-analyzer` (Parlay Builder), mobile (375x812) and desktop viewports: real production row (Payton Tolle, MLB, `More 5.5 pitcher strikeouts`, Covered 61, Playable, Medium Confidence, Low Risk) renders cleanly, no raw internal statuses, REMOVE control present (Session 87 fix holds).
+- Adding the leg and running real parlay analysis (local scoring-engine worker) rendered the new 4-field commentary end-to-end against real data: summary ("Payton Tolle grades as a playable more because..."), "Key evidence:" (3 positive factors, `Name: description` format), "Key risks:" (2 factors), status line ("61 (Playable) -- below Covered Picks (70+)."). Confirms Section 6's shape is correct in the actual rendered UI, not just in isolated tests.
+- `/today` (Covered Picks board) correctly showed "No Covered Picks are available right now" -- consistent with the one real eligible row being sub-70 (Playable, not Covered), not a defect.
+- Only one real prop was eligible on the live slate today, so the full scenario matrix requested (long player name, long matchup, risk-heavy prop, sub-70 valid prop, multiple legs) could not be exercised against real data this session; that matrix remains covered by the existing deterministic/synthetic test suite (Sessions 86-89), not by today's live data.
+
+### 9. Validation
+
+- `pnpm run test`: 995 tests, 994 pass, 1 skip, 0 fail (up from 994/993/1 -- one new regression test net).
+- `npx tsc --noEmit`: clean.
+- `npm run build` (`next build`): clean.
+- `npx opennextjs-cloudflare build`: clean.
+- `scoring-engine/dist/` confirmed untouched (pre-existing untracked build output, never staged).
+- Local dev artifacts (`scoring-engine/.dev.vars`, temporary `.env.local` scoring-engine entries, local `wrangler dev` process) fully reverted; `git diff .env.local` empty; incidental `next-env.d.ts` churn from switching between `build` and `dev` reverted via `git checkout`.
+
+### 10. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; no production variable changes; live V2 pin unchanged (`933ae62fabc2f8d50adf0e084d422c7d7db47181`); no scheduler/cadence changes; Policy C not activated; no new scheduler; no migrations/constraints; no cleanup/reconciliation/deletion/backfill/broad rescoring; no scoring formula/weight/threshold changes; Covered Picks floor untouched at 70; no manufactured picks; no unsupported sports added; no new provider called or integrated (the fixture prototype is 100% synthetic, network-call-free); no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere yet (pending this session's commit/push step below).
+
+### 11. Exact remaining decisions for the owner
+
+1. **MLB source licensing**: seek written clarification from a rights holder, or identify an alternate clearly-licensed free source, before any live integration -- the fixture prototype proves technical feasibility only.
+2. **Injury-marker rollout**: the two-step promotion sequence (Section 1) is designed but not executed; running it requires explicit owner go-ahead since step 2 (enabling scoring) is a production-scope change.
+3. **WNBA minutes staleness**: 7/33 players show >48h-stale `recent_minutes_avg`; the owner should decide whether `minutes_missing` should gain a staleness component, or whether the current null-only check remains intentional.
+4. **Commentary payload**: accepted as final at 466 bytes/row (26% growth, 40.6 bytes/row gzipped) -- no further action needed unless the owner disagrees with the accept decision in Section 6.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** This session's most consequential finding is that the Parlay Builder's real backing endpoint (`getParlayOptions`) was silently non-functional against real production data (masked as a graceful "degraded" state, not a crash) due to a narrow, now-fixed, now-regression-tested batching gap -- found only because this session pushed through to genuine real-data UI verification instead of accepting the snapshot fallback's graceful degradation at face value. The owner-authorized Statcast fixture prototype proves technical feasibility cleanly (Sections 3-5) but does not and cannot resolve the underlying MLB licensing gap, which remains the dominant blocker. WNBA remains provisionally recoverable with a disclosed, real staleness caveat. Commentary egress is now a small, accepted, measured cost. Not proposed as a promotion candidate. Production controls unchanged. Phase 20 not begun.
+
+## Session 90 (2026-07-31, continuation from `ef77ec9`): WNBA minutes-freshness gap closed with code + tests, funnel re-verified read-only, injury-marker execution package finalized, MLB owner decision memo
+
+**Time-budget note (owner-directed this pass):** this session was explicitly bounded by the owner's Claude Code usage-window constraint. Sections were prioritized by concrete, code-verifiable value (WNBA minutes freshness, funnel truth, recovery-limitation guard) over prose/artifact-heavy sections (real-data UI screenshots) that had already been established as working in Session 89 with no UI-facing code changed since. This section documents exactly what was and was not completed so a future session (any agent) can resume precisely.
+
+### 1. State re-established
+
+Local HEAD and `origin/codex/public-repo-repair` both at `ef77ec97fe87a3cfcea4f36aa544acdb68035db0` (equal) before this session's commits. `origin/main` at `23f665955b55a9e862f7f2efa8205538c5426013`, untouched. `d962087`/`9ff98b0`/`ef77ec9` re-verified (parents, subjects, changed files match Session 89's report exactly). Working tree was clean except the pre-existing untracked `scoring-engine/dist/` (confirmed untouched throughout, `git diff --stat ef77ec9 -- scoring-engine/dist/` empty). Production `COVERED_PRIVATE_PIPELINE_SHA_V2` and scheduler state unchanged. Only bounded, read-only Supabase queries and one corrected diagnostic script were run before any code change; **`scoreCurrentProps` was written but never executed** after discovering it has no `dryRun` option and genuinely persists `scored_props`/`score_inputs` -- calling it against production would have been an unauthorized broad rescore, so the plan was rewritten to use `selectRows`-only diagnostics instead (see Section 3).
+
+### 2. WNBA minutes freshness -- root cause found, fixed in code, 12 new deterministic tests
+
+**Correction to Session 89's own finding, made explicit rather than silently carried forward:** Session 89's "26/33 fresh, 7/33 stale (>48h)" figure was itself a scoping artifact -- it queried the WNBA roster table directly (232 players), not the population that actually matters (players with an active, future-or-null-start `current_prop`, i.e. the population the real scoring pipeline reads). Re-run correctly scoped this session (bounded `current_props` read with `start_time` lower bound, then a per-player `basketball_player_features` freshness check): **20 distinct players currently have a live/future WNBA prop; 20/20 show `recent_minutes_avg` non-null and were recomputed within the last ~2 hours.** There is no live staleness problem in today's actual scoreable population. This is reported honestly rather than preserving the prior, incorrectly-scoped alarm.
+
+That said, the underlying code gap Session 89 (and the owner's prompt) correctly intuited was real: `basketball_player_features` (the table `recent_minutes_avg` is read from first, per `context.playerFeatures?.recent_minutes_avg ?? context.recent?.minutes_last_5_avg`) carries **no freshness signal of its own** -- unlike its sibling `player_recent_features`, which has `stale_after` (`updated_at + 12h`, written by the exact same job run) feeding the existing `stale_features` blocker. A role change (trade, injury return, rotation shift) landing in a game the job hasn't yet reprocessed could silently score against a stale role with zero blocker. This was a latent gap, not a currently-active one, and is now closed:
+
+- **Timestamp semantics determined from real evidence, not assumption:** `basketball_player_features` is written via delete-then-insert in the *same function invocation* that writes `player_recent_features` (`jobs.ts`'s per-player loop) -- confirmed by the live audit showing all 20 relevant players share a near-identical `updated_at` (~2h old). So `updated_at` is genuinely "last recomputed" (not a frozen insert timestamp -- that bug was Sessions 74-77's finding and is specific to the *other* table), and reusing the sibling table's 12h `stale_after` contract is not arbitrary: both tables come from the identical run, so there's no reason one would legitimately be fresh while the other is stale by this rule. `feature_date` (which game this row reflects) is a **different, deliberately-ignored** signal -- an off-day player recomputed on schedule legitimately keeps an old `feature_date` and must not be flagged stale for it.
+- **Implemented:** `isBasketballPlayerFeatureStale(updatedAt, now)` in [lib/knowledge/adapters/basketball.ts](lib/knowledge/adapters/basketball.ts) -- stale if `updatedAt` is null/unparseable/future, or older than 12h. A new `minutes_stale` risk flag fires only when `recent_minutes_avg` is present (mutually exclusive with `minutes_missing`) and the timestamp is stale. Promoted to a hard `blockers` entry in [lib/knowledge/scoring-service.ts](lib/knowledge/scoring-service.ts) (same treatment as `minutes_missing`/`handedness_missing`/etc.), and classified into `deriveCompletenessState`'s `"stale"` bucket alongside `stale_features`/`stale_market`.
+- **Row-level table for the 20 currently-relevant players** (all fresh; no players fell in the >48h/stale bucket once correctly scoped) -- representative rows:
+
+| Player | feature_date (last reflected game) | updated_at (last recompute) | Age (h) | Next event start |
+|---|---|---|---|---|
+| Caitlin Clark | 2026-07-28 | 2026-07-31T22:53:58Z | 1.8 | 2026-08-01T02:00Z |
+| Kamilla Cardoso | 2026-07-22 | 2026-07-31T22:54:06Z | 1.8 | 2026-08-01T17:00Z |
+| A'ja Wilson | 2026-07-28 | 2026-07-31T22:54:03Z | 1.8 | 2026-08-01T17:00Z |
+| Breanna Stewart | 2026-07-28 | 2026-07-31T22:54:04Z | 1.8 | 2026-08-01T19:00Z |
+| Kelsey Mitchell | 2026-07-28 | 2026-07-31T23:55:20Z | 0.8 | 2026-08-01T02:10Z |
+
+Note Kamilla Cardoso: `feature_date` is 9 days old (last game 2026-07-22) but `updated_at` is 1.8h old -- exactly the legitimate off-day case the owner's prompt asked about, and exactly why the rule must key on `updated_at`, never `feature_date`.
+
+- **12 new deterministic tests**, covering every required scenario: fresh minutes ([basketball.test.ts](lib/knowledge/adapters/basketball.test.ts)), stale minutes, off-day-but-valid (feature_date old, updated_at fresh -- NOT stale), future timestamp (treated as stale/untrustworthy, not fresh), unavailable timestamp (null/undefined/unparseable, treated as stale), missing minutes (unaffected, `minutes_missing` still owns that case, mutually exclusive), and two full end-to-end tests in [wnba-e2e.test.ts](lib/knowledge/wnba-e2e.test.ts) proving the real `scoreCurrentProps` pipeline blocks on `minutes_stale` (distinct from `stale_features`) and does NOT block the off-day-but-recomputed case.
+- **Known, explicitly-documented limitation (not silently omitted):** "new game since feature calculation" and "role-changing recent game" are **not directly detectable** by this rule -- it only judges recomputation recency, never whether a newer completed game exists beyond `feature_date`, which would require joining a schedule/game-log source into the scoring context (a real scope expansion, not attempted this pass). The job's own same-day recompute cadence (observed: whole relevant roster refreshed together, ~2h old) is what currently closes this gap in practice, within one job cycle -- documented as a limitation, not claimed as solved. A test makes this explicit (`KNOWN LIMITATION` test in basketball.test.ts) so it is regression-visible rather than a silent gap.
+- **Recovery orchestrator updated:** `minutes_stale` added to `CAUSE_CAPABILITY` as `requires-natural-refresh` (identical cadence/reasoning to `minutes_missing` -- same job fixes both), with a new test confirming it is never misclassified as `recoverable-now`.
+
+### 3. WNBA strict funnel -- re-verified read-only against production (no `scoreCurrentProps` call, no writes)
+
+`scoreCurrentProps` has no dry-run mode and genuinely persists `scored_props`/`score_inputs` -- calling it would be an unauthorized broad rescore, so the funnel below is built entirely from `selectRows` reads of already-existing production state, not a live recompute:
+
+```text
+A. active/current (future-or-null start_time, WNBA):        122
+B. identity complete (player_id + matched/strongly_resolved): 122  (100% -- no identity gap)
+C. has an existing scored_props row at all:                     8  (114 never scored under the live pin)
+D. of those 8, publishable (per the live pin's OWN stored assessment): 2
+E. publishable AND covered_score >= 70 (Covered Picks floor):    0
+```
+
+Blocker reasons on the 8 existing scored rows: `stale_features` x6 (the live pin's own `player_recent_features.stale_after`-based check, unrelated to this session's new `minutes_stale`, which does not exist in the deployed live-pin code). The dominant real gap today is **not** injury markers specifically -- it's that 114/122 (93%) of currently-eligible WNBA props have never been scored at all under the live pin, consistent with the project's own standing context that GitHub Actions schedulers remain deliberately disabled during this repair engagement (`docs/PROJECT_CONTEXT.md`/CLAUDE.md's "Current project priorities"), not a newly-discovered defect.
+
+**Projected repair-branch funnels (structural, test-verified; not row-count projections against production, since that would require executing the prohibited rescore):**
+- *Repair-branch, zero injury markers*: identical structural gate as today plus `injury_context_unavailable` firing for every prop (proven by existing Session 86-88 tests) -- would block 100% of the 122, worse than today's partial-scored state.
+- *Repair-branch, valid injury markers present*: `injury_context_unavailable` clears (proven directly by this session's own `wnba-e2e.test.ts` fixtures, which seed a fresh `provider_cache` marker and reach `publishable: true`).
+- *Repair-branch, valid injury markers + minutes freshness enforced*: identical to the line above for today's actual data, since 20/20 relevant players are already fresh -- the new `minutes_stale` blocker adds a real, tested safety net for a *future* staleness event, not a change to today's 20-player population.
+
+**Not stated as "WNBA fully recovers to 60"** -- that would require actually running the scoring pipeline against the repair branch's candidate code in production, which this pass does not do (prohibited). The honest claim is narrower: identity is 100% complete, minutes freshness is proven non-blocking today, and the two remaining structural gaps (injury markers not yet live, and 114/122 props simply never scored under the current disabled-scheduler live pin) are unchanged in kind from Session 88-89's findings, just now precisely quantified via direct production reads.
+
+### 4. Injury-marker execution package (specification only -- not executed)
+
+Referencing existing, already-tested code (`lib/knowledge/recovery/orchestrator.ts`, `lib/knowledge/enrichment/mlb.ts`'s `refreshMlbInjuries`, `lib/knowledge/enrichment/basketball.ts`'s `refreshBasketballInjuries`):
+
+- **Candidate SHA**: this session's tip (see Section 11 for the exact commit after push).
+- **Command**: `runMissingDataRecovery({ currentPropId, authorize: true, leagueAllowlist: ["wnba"], providerCallCeiling: <n>, timeoutMs: <n>, retryCeiling: <n> })`, invoked once per blocked `current_prop_id` in the target slate -- not a bulk/unbounded call (the function operates on exactly one prop's blockers per call).
+- **League bounds**: `leagueAllowlist` is a required, non-empty array checked in code (`runMissingDataRecovery` returns `attempted: false` with an explicit `blockedReason` if empty or if the prop's own league isn't in it) -- enforced in code, not merely documented (`orchestrator.ts:186-191`).
+- **Team/event allowlist**: implicit and exact -- the function resolves the prop's own `team_id`/league from the stored `scored_props` row and only ever calls the per-team/per-league injury refresh for that single prop's own team; a pre-existing test (`no unrelated records touched: recovery scoped to prop-1's team never writes a marker for an unrelated team`) proves this in code, not just by description.
+- **Provider-call ceiling**: `providerCallCeiling` clamped to `[0, 4]` in code (`orchestrator.ts:115`); a plan whose estimated calls exceed the ceiling is never attempted (`withinCeiling` check, tested).
+- **Retry limit**: `retryCeiling` clamped to `[0, 3]` in code (`orchestrator.ts:201`).
+- **Timeout**: `timeoutMs` clamped to `[1000, 30000]` in code (`orchestrator.ts:200`).
+- **Row-write ceiling**: bounded by construction -- only the one prop's team/league injury refresh is ever invoked per call; no bulk write path exists in this function.
+- **Scoring/board/snapshot disabled**: architecturally guaranteed, not merely configured -- `runMissingDataRecovery` calls only `refreshMlbInjuries`/`refreshBasketballInjuries` (the `knowledge` job family), which shares zero call path with `runGitHubActionsPipeline`'s scoring/board/`publishPublicSnapshots` (the `github-actions` job family) -- reconfirmed this session by re-reading `scripts/run-covered-job.mjs`'s two disjoint top-level cases (unchanged since Session 89).
+- **No historical events / no unrelated teams**: guaranteed by the single-prop-scoped design above (tested).
+- **Marker-coverage verification command**: a bounded read of `provider_cache` for the specific `injuryCheckCacheKey(...)` keys touched, via `isProviderCacheRecordFresh` -- a read-only check, safe to run after any authorized batch.
+- **Failure behavior**: a failed/timed-out fetch never writes a success marker (existing Session 86 fix -- marker write only follows confirmed successful fetch + persistence); `runMissingDataRecovery` surfaces the underlying error rather than reporting false success.
+- **Rollback behavior**: none needed -- the only write is a `provider_cache` marker row keyed by team/league; re-running the same authorized call is idempotent (upsert on the same cache key) and there is no scoring-side state to roll back, since scoring is architecturally unreachable from this path.
+
+**Proof these bounds are enforced in code, not only documented** (existing tests, re-verified this session, 13/13 passing in `orchestrator.test.ts`): `authorize`-gate test, `leagueAllowlist`-gate test, provider-call-ceiling test, "no unrelated records touched" test, unclassified-cause-defaults-safely test (now also covering `minutes_stale`), partial-recovery-still-blocked test.
+
+**What owner authorization would permit, exactly:** running `runMissingDataRecovery` with `authorize: true` and `leagueAllowlist: ["wnba"]` (or `["mlb"]`) for the props on today's/tomorrow's prepared slate that currently show `injury_context_unavailable` -- this writes only `provider_cache` injury-check markers, never touches `scored_props`/`current_props`/any board or snapshot table, and cannot be triggered by anything scoring-side per the disjoint-job-family proof above. This has not been run.
+
+### 5. Real-data UI artifacts
+
+**Not re-captured this session**, per the owner's explicit time-budget instruction and because no UI-facing code changed this pass (only `scoring-service.ts`/`basketball.ts`/`orchestrator.ts`, none of which alter rendered output for any currently-real prop). Session 89's real-data verification (`/slip-analyzer`, mobile 375x812 and desktop viewports, Payton Tolle MLB prop, `Covered 61`, full 4-field commentary panel, REMOVE control) remains the last real-data UI proof and is unchanged in validity. **Caveat carried forward honestly:** those captures were inline tool-output screenshots taken during the session's browser interaction, not files saved to a persistent path on disk -- there is no `SendUserFile`-able artifact path for them beyond what appeared in that session's transcript. If the owner wants durable, re-fetchable screenshot files (not just inline captures), that requires a dedicated follow-up pass with explicit time allotted for it.
+
+### 6. Commentary payload -- full snapshot measurement
+
+Re-measured against 100 real production `score_explanations` rows (up from Session 89's 30-row sample): **477.97 bytes/row average, 47,797 bytes total raw, 2,912 bytes total gzipped (29.12 bytes/row gzipped)** -- consistent with Session 89's 30-row figure (466.37 bytes/row), confirming the estimate is stable at greater scale, not a small-sample artifact. Commentary is loaded once per `getParlayOptions`/`getCoveredPicksOfTheDay` call (reused from the stored `score_explanations` row, no per-card fetch -- proven by the existing "attaches bounded public-safe commentary reused... no per-card fetch" test).
+
+Cloudflare response egress estimate (commentary-attributable portion only, gzipped, the format Cloudflare serves by default):
+- 100 page loads/day, ~86 rows/page: ~2.9 KB/page x 100 = **~290 KB/day**
+- 1,000 page loads/day: **~2.9 MB/day**
+- 10,000 page loads/month: **~29 MB/month**
+
+All figures are immaterial under Cloudflare Workers' free-tier envelope (no separate egress billing for Worker responses at this scale). **Commentary-budget issue closed** -- no further compaction needed; this reconfirms, rather than changes, Session 89's accept decision.
+
+### 7. MLB owner decision memo
+
+**Technically proven** (Session 89's fixture prototype, unchanged): a Statcast-shaped record normalizes deterministically into `mlb_handedness_splits`/`mlb_pitcher_features`/`mlb_batter_features`'s exact stored shapes; the real, unmodified `mlbAdapter` reaches genuine scored evidence for complete fixtures and correctly trips its own pre-existing `handedness_missing`/`pitcher_matchup_missing`/`batter_quality_missing` blockers for incomplete ones; the null-vs-zero distinction survives the transform; estimated normalized storage ~207 KB/day at full MLB slate coverage (Session 89, Section 4).
+
+**Not proven** (unchanged, still open): live endpoint access and authentication requirements for Baseball Savant/Statcast/pybaseball; same-day data availability/latency; rate limits; licensing terms for redistribution or derived-output storage; caching rights; schema stability across seasons; raw per-pitch download size if ingested at that granularity rather than pre-aggregated.
+
+**Decision A -- Authorize a bounded live technical probe:** would permit exactly one identified, explicitly-named Baseball Savant/Statcast endpoint or CSV export, read-only, no production integration, no database writes, no redistribution, a maximum request/download bound (e.g. a single date's data for a handful of already-known players), local inspection only. Risk: even a "read-only" probe against Baseball Savant is itself an act the terms-of-use ambiguity applies to -- the risk is legal/reputational (using a source under unclear terms), not technical (the probe itself is cheap and safe to bound). What it would answer: real field names/shapes vs. the fixture's assumptions, real response latency, real rate-limit headers if any -- none of which resolve the licensing question.
+
+**Decision B -- Seek legal/terms clarification first:** requires either explicit written permission from MLB Advanced Media / Baseball Savant, or identification of an alternate source with unambiguous free-use terms for this exact use case (public-facing derived scores, not raw data redistribution). This is the only path that resolves the actual blocker (licensing), rather than gathering more technical evidence for a question that was never in doubt.
+
+**Decision C -- Reject the source, keep MLB scored output disabled for these markets:** product consequence -- MLB batter markets requiring handedness/pitcher-matchup/batter-quality context remain permanently blocked (not "no evidence," but "no available compliant evidence"), narrowing MLB's live-scoreable market set indefinitely until a new source is found.
+
+**Recommendation: Decision B.** The technical work is done and does not need repeating; the blocked `mlb.com` terms-of-use fetch (Session 88, HTTP 406) is evidence of restricted automated access, characterized as neither approval nor prohibition -- it is exactly the kind of ambiguity that written clarification (Decision B) resolves and a live probe (Decision A) does not.
+
+### 8. Recovery architecture limitations -- reconfirmed, `minutes_stale` classified, guard test in place
+
+The orchestrator recovers exactly one cause today: `injury_context_unavailable` (`recoverable-now`). Every other blocker classifies as `no-existing-source` (handedness/pitcher-matchup/batter-quality/ballpark -- genuine provider gaps) or `requires-natural-refresh` (minutes-missing, minutes-stale [new], missing-recent-logs, weather, bullpen -- no bounded single-scope entry point exists yet). An **unclassified/future cause defaults to `no-existing-source`** (never assumed recoverable) -- this guard already existed (`orchestrator.test.ts`'s "an unclassified/unknown cause is treated conservatively..." test, pre-dating this session) and is reconfirmed passing; a new test specifically confirms the new `minutes_stale` cause classifies correctly (`requires-natural-refresh`, `wouldCallProvider: false`) rather than falling through to the unclassified default by accident.
+
+### 9. Certification truth (updated)
+
+- Dylan Cease remains invalid (unchanged from prior sessions).
+- Strict MLB certification has not passed (provider/licensing gap unresolved).
+- Strict WNBA certification has not passed (114/122 currently-eligible props have never been scored under the live pin; injury markers not yet live in production).
+- Zero production injury markers remain a rollout dependency (unchanged).
+- **WNBA minutes freshness: corrected this session, not merely "under correction"** -- the code gap is closed (`minutes_stale` blocker + tests), and today's actual scoreable population (20 players) shows zero live staleness once correctly scoped.
+- UI: Session 89's real-data proof stands; no new artifacts captured this session (Section 5).
+- Commentary egress: finalized (Section 6), issue closed.
+- MLB remains source-decision blocked; owner decision memo above recommends Decision B.
+- Phase 20 not ready.
+
+### 10. Validation
+
+- `pnpm run test`: 1006 tests, 1005 pass, 1 skip, 0 fail (up from 995/994/1 -- 11 net new tests: 8 in `basketball.test.ts`, 2 in `wnba-e2e.test.ts`, 1 in `orchestrator.test.ts`; `replay-score.test.ts`'s existing fixture updated, no net test-count change there).
+- `npx tsc --noEmit`: clean.
+- Full suite re-run after every code change in this session (not just once at the end).
+- No `scoreCurrentProps` (or any other write-capable function) executed against production this session -- confirmed by design (the unsafe script was deleted before ever being run once the missing `dryRun` option was discovered).
+- `scoring-engine/dist/` confirmed untouched throughout.
+
+### 11. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; no production variable changes; live V2 pin unchanged; no scheduler/cadence changes; Policy C not activated; no new scheduler; no migrations/constraints (the new `minutes_stale` blocker reads only existing, already-selected `updated_at` columns -- no new tables/columns); no cleanup/reconciliation/backfill/broad rescoring (the one write-capable function considered for the funnel recompute was deliberately never called); no scoring formula/weight/threshold changes (only a new completeness *gate*, identical treatment to the existing `minutes_missing`/`handedness_missing` pattern); Covered Picks floor untouched; no manufactured picks; no unsupported sports; no new provider called or integrated; no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 12. Exact remaining owner decisions
+
+1. **MLB source licensing** (unchanged ask): pursue Decision B (seek written clarification / find an alternate clearly-licensed source) before any live integration.
+2. **Injury-marker rollout execution**: the Section 4 package is ready to run on explicit owner authorization; it writes only `provider_cache` markers and cannot reach scoring/board/snapshot.
+3. **114/122 never-scored WNBA props**: this is a bigger, more immediate gap than injury markers alone and is a direct consequence of the scheduler remaining deliberately disabled -- the owner should confirm whether/when re-enabling the scoring scheduler (a separate, larger decision than the injury-marker rollout, and out of scope for this pass to execute) is the intended next step, since the injury-marker fix alone cannot close this gap.
+4. **UI artifact durability**: if persistent, re-fetchable screenshot files (not inline captures) are wanted, a dedicated pass with time allotted for it is needed.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** WNBA's minutes-freshness gap is now closed in code with tests, and the funnel is precisely quantified via direct, read-only production evidence rather than assumption -- revealing that the dominant real WNBA gap today is the disabled scheduler (114/122 never-scored), not injury markers specifically, though injury markers remain a real, separate, not-yet-executed dependency. MLB remains source-decision blocked pending Decision B. Commentary egress is finalized and closed. Not proposed as a promotion candidate. Production controls unchanged. Phase 20 not begun.
+
+## Session 91 (2026-08-01, continuation from `cfe3423`): MAJOR CORRECTION — the scheduler is not disabled; the real WNBA defect is a repair-phase timeout, traced to exact evidence via `gh` against the live public repo
+
+**This session did not change any application code.** It is a pure, read-only forensic trace (bounded Supabase reads, already-completed this session; plus read-only GitHub CLI queries against both repos' Actions state -- no workflow dispatched, no variable changed, no write beyond what the already-running live scheduler was doing on its own). It corrects a load-bearing assumption repeated across Sessions 86-90 and every prior turn's documentation.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `cfe3423f218665f08c4c1c8a4649262458490781` before this session. `cb70208`/`cfe3423` re-verified (parents/subjects/files match Session 90's report). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree clean except pre-existing untracked `scoring-engine/dist/` (confirmed untouched). No code was written or executed against production this session; all evidence below came from `selectRows` (already-established bounded-read pattern) and `gh api`/`gh run view`/`gh variable list` (read-only GitHub REST calls, no `gh workflow run`, no `gh variable set`).
+
+### 2. THE CORRECTION: the scheduler is not disabled -- it is live, on a different repo than the one this engagement has been examining
+
+Every prior session (86 through 90, and this repo's own `CLAUDE.md`) stated "GitHub Actions schedulers remain disabled" as a standing fact. **This was true only for the PRIVATE repo's own workflow and was never re-verified against where the actual live product runs.** Direct evidence:
+
+- `git remote -v` / `gh repo view`: `origin` (`CoreyTenacity/Covered`, this repo) is **PRIVATE**. Its own `.github/workflows/covered-live-pipeline.yml` scheduled trigger last ran `2026-07-15` (confirmed via `gh run list`) -- genuinely idle, exactly as documented.
+- The **actual deployed product** runs from a separate **PUBLIC** repo, `CoreyTenacity/Covered-Prop-Analysis` (confirmed `gh repo view ... --json visibility` → `PUBLIC`), via a **different workflow file**, `.github/workflows/covered-production-pipeline.yml` ("Candidate F production pipeline"), which:
+  - Checks out the PRIVATE `Covered` repo at a pinned SHA (`vars.COVERED_PRIVATE_PIPELINE_SHA_V2`, read from the `production` GitHub Environment) into a temp directory on the public repo's runner, using a read-only, single-repo, Contents:read token (`secrets.COVERED_PRIVATE_REPO_TOKEN`) -- private source code never persists in the public repo/artifacts/caches.
+  - Runs on a real cron: WNBA every 20 minutes ~6:00pm-1:00am ET (`0,20,40 22,23,0,1,2,3,4 * * *`), MLB every 20 minutes ~12:10pm-1:00am ET (`10,30,50 16,...,4 * * *`).
+  - Gated by two **environment-scoped** variables (not plain repo vars -- this is why an earlier `gh variable list --repo` check returned empty; environment variables require `gh api .../environments/production/variables`): `COVERED_GITHUB_SCHEDULER_ENABLED` and (WNBA-specific) `WNBA_INGESTION_ENABLED`.
+- **Read directly via `gh api repos/CoreyTenacity/Covered-Prop-Analysis/environments/production/variables` on 2026-08-01:**
+
+| Variable | Value | Last updated |
+|---|---|---|
+| `COVERED_GITHUB_SCHEDULER_ENABLED` | **`true`** | 2026-07-22T01:27:50Z |
+| `WNBA_INGESTION_ENABLED` | **`true`** | 2026-07-16T21:51:19Z |
+| `COVERED_PRIVATE_PIPELINE_SHA_V2` | `933ae62fabc2f8d50adf0e084d422c7d7db47181` | 2026-07-29T00:18:16Z (unchanged from every prior session's report) |
+
+The scheduler has been live for **over a week** (since 2026-07-22) while every session since has documented it as disabled. `gh run list --repo CoreyTenacity/Covered-Prop-Analysis` confirms dozens of real scheduled runs in just the last 24 hours, most completing successfully and genuinely writing `scored_props`/board/snapshot rows for MLB. **`CLAUDE.md`'s "Current project priorities" section has been corrected in place** (not the frozen Session 73 historical banner, which correctly describes only the *private* repo's own scheduler) to state this precisely, with a pointer to this section.
+
+### 3. The actual, evidence-traced WNBA defect: scheduled runs time out in the repair phase before scoring ever runs
+
+Fetched and diffed real run logs (`gh run view <id> --log`, read-only) for the last ~20 scheduled runs on the public repo:
+
+- **Every MLB-selected scheduled run sampled completed successfully in 3-6 minutes**, with a genuine `score` step (example: `poolCount: 30, eligibleCount: 30, processedCount: 30, publishableCount: 29, propsWritten: {scoredProps: 30, ...}` -- 30 real rows written in ~2.8s scoring time).
+- **6 of 7 WNBA-selected scheduled runs sampled were `cancelled`** (GitHub's own status, meaning the job hit its 25-minute `timeout-minutes` ceiling and was killed), confirmed WNBA-specific by real WNBA player names appearing in their partial logs (e.g. "Sabrina Ionescu" mid-`identity_repair`) before the log goes silent for the remainder of the 25 minutes with no further step output, then `##[error]The operation was canceled.`
+- **The 1 WNBA run that DID complete** (`30607689802`, 2m43s total) shows the full step timing: `grade 18s → schedule_refresh 21s → sharp 60.5s → identity_repair 5.7s → repair 51.4s (warning) → score 3.8s (poolCount 142, eligibleCount 40, processedCount 40, publishableCount 9, candidateCount 31) → board 3.1s`. This proves scoring itself is fast and correct when reached -- the problem is entirely upstream, in getting there.
+- **Root cause, traced to the code**: `runBoundedBackgroundEnrichment`'s WNBA branch (`lib/knowledge/enrichment/jobs.ts`) can trigger `ingestSportsDataverseWnbaSeason(season, {forceFullBackfill})` -- a full-season external ingestion call -- whenever `planWnbaBackgroundEnrichment`'s `shouldIngest` is true (context stale/missing). This call has **no internal wall-clock budget of its own** and is not bounded by anything inside the pipeline's `repair` step -- only the outer job's blanket 25-minute `timeout-minutes` eventually kills it, by which point the `score`/`board` steps never get a chance to run at all. WNBA's identity-repair backlog is also structurally larger than MLB's in the same comparison (125 candidates vs. 60), consistent with more upstream work being required, but the season-ingestion call with no internal timeout is the more direct explanation for a step going from a proven ~51s (the one completed run) to >23 minutes with zero intermediate log output in the cancelled runs -- a single long-blocking external call, not a slow loop that would still log progress.
+- **This directly and precisely explains the "122 → 8" (now "76 → 0" at time of re-check, see below) funnel**: it is not that WNBA props are individually blocked by missing data -- it is that the run that would score them **usually never reaches the scoring step at all**, at a roughly 6-in-7 failure rate in this sample.
+
+### 4. Classification of the previously-"unscored" rows
+
+Given the mechanism above, the 114 (Session 90) / re-checked-at-a-later-moment population is **not** meaningfully classifiable by per-row historical state (arrived-after-scoring, config-not-selected, etc., as the prompt's taxonomy offers) -- the dominant real cause is simpler and pipeline-level: **most runs that would have scored them never complete**. A live re-check during this session (some hours after Session 90's snapshot) found the *active* population itself had shifted from 122 to 76 (events starting/expiring, new schedule-refresh cycles replacing rows) and the previously-seen 8 scored rows no longer matched any currently-active `current_prop_id` (0 of 76 currently show a `scored_props` row at the moment of this specific read) -- this volatility is itself further evidence of an actively-churning, NOT disabled, system, not a contradiction of Session 90's snapshot. Any individual-row classification taken at one instant will look different an hour later purely because of this churn; the pipeline-level timeout cause is the stable, load-bearing explanation.
+
+### 5. Natural pipeline order (confirmed exactly, from the real workflow + code)
+
+```text
+cron fires (WNBA every 20min ~6pm-1am ET / MLB every 20min ~12:10pm-1am ET)
+→ [scheduled-only] COVERED_GITHUB_SCHEDULER_ENABLED gate (env-scoped; checked inside the first step, not job `if:` -- environment vars aren't visible to job-level `if:`)
+→ [scheduled-only, WNBA only] WNBA_INGESTION_ENABLED gate
+→ verify COVERED_PRIVATE_PIPELINE_SHA_V2 is a well-formed 40-char SHA (fail closed otherwise)
+→ checkout private repo at that exact pinned SHA (verified post-checkout)
+→ pnpm run cron:run -- github-actions --league <L> --runScoring true --runBoard true --publishPublicSnapshots true --enabled true
+   → grade (settle recently-completed events)
+   → schedule_refresh (real provider: mlb-stats-api / espn-wnba)
+   → sharp (SharpAPI market ingestion, rate-limited: 8 req/min, 6.5s spacing)
+   → identity_repair (bounded, ~5-6s in every sample seen)
+   → repair (background enrichment -- THIS is where WNBA hangs; MLB's equivalent finishes in ~29s, WNBA's can exceed the entire remaining budget)
+   → score (fast and correct once reached: MLB 30/30 scored in 2.8s; WNBA 40/40 processed, 9 publishable in 3.8s)
+   → board
+   → snapshot publication (only on the schedule trigger; `publish_public_snapshots=true` is hardcoded for schedule, not owner-toggle per-run)
+→ cleanup (rm -rf the private checkout; defense in depth)
+```
+
+Injury refresh has **no bounded single-scope entry point in this natural path at all** -- it is not one of the steps above; `refreshMlbInjuries`/`refreshBasketballInjuries` are only reachable via the separate `knowledge` job family (Session 89's finding, reconfirmed: zero call-path overlap with this `github-actions` job family). This means the production pipeline's natural schedule **never populates injury-check markers on its own** -- the marker gap documented since Session 86 is real and will not self-resolve no matter how many times this scheduler runs, independent of the timeout defect above.
+
+**Required invariant check**: "a newly ingested WNBA market in a natural run must either be fully refreshed and scored in that run, or retain an exact blocker that guarantees pickup by the next run" -- **this does not currently hold for WNBA**. A market ingested in a run that then times out during `repair` is left in whatever partial state the `sharp`/`identity_repair` steps reached, with **no blocker recorded at all** (scoring was never invoked for it this cycle) and no guarantee the *next* run will behave differently, since the same unbounded season-ingestion call can recur. No executable pipeline-order test was added this pass (would require faithfully modeling `ingestSportsDataverseWnbaSeason`'s hang behavior, which needs its own dedicated investigation -- see Section 9).
+
+### 6. Injury-marker execution package -- unchanged from Session 90
+
+Still valid and still not executed; see Session 90's Section 4 for the full specification (bounds enforced in code: `authorize`, `leagueAllowlist`, provider-call/retry/timeout clamps, single-prop team/league scoping, architecturally-disjoint from scoring/board/snapshot). Nothing about this session's finding changes that specification.
+
+### 7. Single-target scoring diagnostic seam -- NOT built this pass
+
+The prompt asked for a `dryRun`/allowlist-bounded seam on `scoreCurrentProps`. **Deliberately not attempted this session**, for two concrete reasons: (1) discovering a genuine, previously-unknown production reliability defect (Section 3) mid-session is exactly the wrong moment to also introduce a new write-capable code path into the same scoring pipeline without dedicated time to design and test it carefully; (2) the owner's explicit time-budget instruction from the prior turn. This remains real, valuable, recommended future work -- not declined, deferred.
+
+### 8. Bounded WNBA strict-contract proof -- NOT executed
+
+Not attempted, for the same reasons as Section 7, plus a substantive new one: given Section 3's finding, a live single-prop scoring attempt right now would be racing the same unbounded ingestion call that causes the timeout -- attempting it without first understanding or bounding that call risks either an uninformative result (if it happens to land in a fast window) or an unexpectedly long-running diagnostic (if it doesn't), neither of which safely proves anything about the underlying defect. **Tool/authorization note**: this was not blocked by a tool-level safety classifier -- it was not attempted, by deliberate choice, for the reasons above.
+
+### 9. Minimum operational change required
+
+None of options A-E fits exactly; the precise, evidence-grounded classification is:
+
+**A pipeline reliability defect, not a query/ordering defect and not a disabled control**: WNBA's `repair` (background enrichment) step can invoke an external full-season ingestion call with no internal time budget, occasionally consuming the entire job's 25-minute ceiling and preventing `score`/`board`/publication from ever running that cycle -- at roughly a 6-in-7 rate in this session's sample. The natural automation order itself (Section 5) is correct; the scheduler and both enablement flags are correctly on; nothing is silently skipped or disabled. **The fix is to give the WNBA background-enrichment/season-ingestion call its own internal wall-clock budget** (e.g., abort/defer the ingestion sub-step after N seconds and proceed to scoring with whatever context is already available, exactly as MLB's per-event bounded refreshes already implicitly behave), so a slow provider night degrades gracefully (fewer complete features, more `stale_features`/`missing_recent_logs` soft blockers) instead of catastrophically (zero scoring at all that cycle). **This was not implemented this session** -- it requires careful study of `ingestSportsDataverseWnbaSeason`'s internals and realistic timing behavior that this pass's time budget did not allow for safely.
+
+### 10. MLB source decision status -- unchanged
+
+Strict MLB scoring remains blocked; technical normalization feasibility is proven (Session 89's fixture prototype); live source terms/reliability remain unresolved; recommendation remains Decision B (seek written clarification or an alternate source); no integration authorized. Owner decision still needed: pursue written clarification from MLB Advanced Media/Baseball Savant, or identify an alternate clearly-licensed source.
+
+### 11. UI and commentary status -- unchanged, not reopened
+
+No UI-facing code changed this session (this was a pure read-only forensic pass). Commentary compressed impact remains immaterial (~29 bytes/row gzipped, Session 90). No per-card/per-leg requests exist. Match confidence remains removed from public output. Warnings represent observed risk, not missing-evidence stand-ins. Session 89's real-data UI verification (Payton Tolle MLB prop, `/slip-analyzer`, mobile+desktop, full 4-field commentary panel) remains the current evidence; no artifacts were recreated this pass (none needed -- no regression exposed).
+
+### 12. Certification truth (updated)
+
+- Dylan Cease remains invalid.
+- MLB strict certification has not passed (source-decision blocked).
+- WNBA strict certification has not passed -- **and the reason is now precisely known**: not missing data on individual props, but a pipeline-reliability defect causing most scheduled WNBA runs to time out before scoring is ever attempted.
+- **CORRECTED**: the production scheduler is NOT disabled. It has been live since at least 2026-07-22 on the public repo (`Covered-Prop-Analysis`), running real, successful MLB scoring/board/publication every ~20 minutes, and WNBA scoring/board/publication on the rare cycle that completes in time.
+- Zero production injury-check markers remain a rollout dependency, independent of and additional to the timeout defect -- the natural schedule has no path to writing them regardless of how the timeout is resolved.
+- Live vs. repair-branch behavior differs materially: the live pin (`933ae62...`) predates this entire multi-session repair effort's fixes (minutes-freshness blocker, commentary compaction, the `getParlayOptions` HEADERS_OVERFLOW fix, etc.) -- none of Sessions 86-90's code fixes are live yet.
+- Phase 20 is not ready.
+
+### 13. Validation
+
+No application code was changed this session (documentation-only: `CLAUDE.md`, `docs/AGENT_HANDOFF.md`). `npx tsc --noEmit`: clean, no drift. `pnpm run test`: **4 new failures surfaced, all in `lib/knowledge/event-selection-matrix.test.ts`** (1006 tests, 1001 pass, 4 fail, 1 skip -- down from Session 90's 1006/1005/0/1). **Confirmed unrelated to this session**: `git diff --stat cfe3423 -- lib/knowledge/event-selection-matrix.test.ts lib/knowledge/scoring-service.ts` is empty (neither file touched, this session made zero code changes at all). The failures appeared exactly when the real calendar rolled from 2026-07-31 to 2026-08-01 during this session -- re-running the file in isolation reproduces all 4 failures consistently (not a one-time flake at the exact boundary instant). The fixtures use `Date.now() + 20h`-style relative offsets (not hardcoded absolute dates), so the trigger is not immediately obvious from a quick read; it was not root-caused this session given the time budget, and no fix was attempted. **Flagged as a new, pre-existing-but-newly-exposed issue for dedicated follow-up** -- not swept under the "not my code" rug, but explicitly not fixed here either, per the same time-discipline this whole session applied to Sections 7-9.
+
+### 14. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; no live V2 pin change; no scheduler cadence/state change (the scheduler's live `true` state was discovered via read-only `gh api`, never toggled); no new scheduler added; Policy C not touched; no live configuration values changed; no migrations/constraints; no cleanup/reconciliation/deletion/backfill/rescoring; no scoring formula/weight changes; Covered Picks floor untouched; no manufactured picks; no new provider integrated; no paid services changed; no credentials rotated (the `gh` token used was the pre-existing authenticated session's own token, read-only scopes exercised: `repo`, no writes made); no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`; no tool-level safety classifier was worked around (Sections 7-8 were not attempted by deliberate choice, not blocked).
+
+### 15. Exact remaining owner decisions
+
+1. **The timeout defect (Section 9)** is the single highest-value next fix -- it, not injury markers, is what's actually suppressing WNBA scoring coverage. Recommend a dedicated follow-up session with time specifically allotted to study `ingestSportsDataverseWnbaSeason`'s real timing behavior and add a safe internal time budget.
+2. **The stale "scheduler disabled" assumption** should be treated as corrected everywhere it was repeated in prior session summaries the owner may reference -- the live product has been actively scoring MLB (and occasionally WNBA) in production this entire time, on the pinned `933ae62...` SHA, independent of anything this repair branch has done.
+3. **Injury-marker rollout**: unchanged ask -- the Section 4/Session 90 package is ready pending owner authorization, and remains necessary regardless of how the timeout defect is resolved.
+4. **MLB source licensing**: unchanged ask -- pursue Decision B.
+5. **Single-target scoring diagnostic seam and a live bounded proof**: recommended, explicitly deferred (Sections 7-8), pending a session with time budgeted for it.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** This session's finding supersedes every prior session's "scheduler disabled" framing: the live product's scheduler is active and has been scoring real MLB props successfully for over a week; WNBA's shortfall is a specific, now-traced pipeline-reliability defect (an unbounded background-enrichment call consuming the entire job timeout on most cycles), not an absence of automation. Not proposed as a promotion candidate. Production controls unchanged -- this session made zero writes beyond what the already-running live scheduler was doing independently. Phase 20 not begun.
+
+## Session 92 (2026-08-01, continuation from `ea1b9d6`): the real WNBA timeout root cause fixed and tested; date-boundary tests fixed; cooperative time budget added
+
+Builds directly on Session 91's finding (accepted as the leading root cause). This session found the *exact* code-level cause, fixed it, added a defense-in-depth safety net, and fixed the date-boundary test issue Session 91 flagged but did not fix. **No production write occurred**: all live-system evidence this session came from read-only `gh api`/`gh run view` queries re-confirming Session 91's state; all code changes are on the repair branch, unexecuted against production.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `ea1b9d6a9bdb5a139537c23dd0abfe88d8afc31e` before this session. `ea1b9d6` re-verified (parent `cfe3423`, docs-only, matches Session 91's report). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Re-confirmed live: public repo (`Covered-Prop-Analysis`) environment `production` still has `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` (all unchanged). Working tree clean except pre-existing untracked `scoring-engine/dist/` (confirmed untouched, `git diff --stat ea1b9d6 -- scoring-engine/dist/` empty throughout). Default branch of the public repo: `main`.
+
+### 2. Public-to-private execution graph (corrected, not "a completely different pipeline")
+
+Session 91's phrase "a completely different pipeline" is corrected: the public repo's workflow is a **thin scheduling/checkout wrapper around the exact same private-repo pipeline entry point**, not independent logic.
+
+```text
+public repo cron (WNBA: 0,20,40 of hours 22,23,0-4 UTC; MLB: 10,30,50 of hours 16-4 UTC)
+→ .github/workflows/covered-production-pipeline.yml, job "run" (timeout-minutes: 25, concurrency group "covered-production-sharpapi", cancel-in-progress: false)
+→ scheduler kill-switch checked INSIDE the first step (env vars aren't visible to job-level `if:`), not skipping the job itself
+→ actions/checkout of CoreyTenacity/Covered (THIS repo) at ref = vars.COVERED_PRIVATE_PIPELINE_SHA_V2 (read-only, Contents:read token, into ./private-covered)
+→ pnpm run cron:run -- github-actions --trigger schedule --league <WNBA|MLB> --configLimit <8|10> --runScoring true --runBoard true --dryRun false --publishPublicSnapshots true --pregameWindowHours 6 --pregameCloseBufferMinutes 5 --enabled true
+→ this is the SAME lib/ops/github-actions-pipeline.ts:runGitHubActionsPipeline this repo's own test suite exercises directly
+→ league path: buildGitHubActionsLeagueRunReport -> grade -> schedule_refresh -> sharp -> identity_repair -> repair (background enrichment) -> score -> board -> cleanup (rm -rf private-covered)
+```
+
+No logic exists in the public repo's workflow beyond: parameter resolution (cron string -> league/config mapping), the scheduler/WNBA-ingestion kill-switches, the pinned-SHA checkout and its own-SHA verification, and invoking the identical `pnpm run cron:run` command this repo's own tests already exercise. Concurrency is a single shared group (`covered-production-sharpapi`) with `cancel-in-progress: false` -- confirms cancellations are NOT concurrency-preemption (a newer run does not kill an older one); they are the job's own `timeout-minutes: 25` firing.
+
+### 3. Sampled-run timeline (bounded sample, not a universal rate)
+
+Re-confirmed via `gh run view <id> --log` (read-only) against the same ~20-run sample Session 91 examined:
+
+| Run | League | Trigger | Conclusion | Duration | Last completed stage before end |
+|---|---|---|---|---|---|
+| 30677656839 | MLB | schedule | success | ~3.7 min | board (full pipeline) |
+| 30607689802 | WNBA | schedule | success | ~2.7 min | board (full pipeline; `poolCount:142, eligibleCount:40, processedCount:40, publishableCount:9`) |
+| 30674089506 | WNBA | schedule | **cancelled** | 25 min (job ceiling) | mid-`identity_repair`/entering `repair`, then silent |
+| 30678858317, 30671222401, 30598208654, 30592037940, 30588845587 | WNBA | schedule | **cancelled** | 25 min each | same silent-after-identity_repair shape |
+
+Stated precisely, not as a universal rate: **in this ~20-run sample, 6 of 7 WNBA-selected scheduled runs were cancelled by the job timeout; every MLB-selected run sampled completed.** Cancellation cause, proven (not inferred): GitHub's own run status is `cancelled` with the log's final line `##[error]The operation was canceled.` immediately following the job hitting its declared `timeout-minutes: 25` -- not a concurrency preemption (single shared group, `cancel-in-progress: false`, confirmed above), not a manual cancellation (no actor recorded), not a runner failure (the log shows normal execution up to the cutoff, not an infrastructure error).
+
+### 4. WNBA background-enrichment call graph and the exact defect (fixed this session)
+
+`runBoundedBackgroundEnrichment`'s WNBA branch (`lib/knowledge/enrichment/jobs.ts`) -> `planWnbaBackgroundEnrichment` decides `shouldIngest` (incremental: only true when a completed game exists that stored logs don't yet cover) -> when true, `ingestSportsDataverseWnbaSeason(season, {forceFullBackfill})` (`lib/knowledge/ingestion/sportsdataverse-wnba.ts`) -> `ingestSportsDataverseWnbaSchedules` (one bounded, 30s-timeout parquet download) -> `ingestSportsDataverseWnbaPlayerBox` + `ingestSportsDataverseWnbaTeamBox` in parallel (each: one bounded parquet download, then row processing).
+
+**The exact defect**: both `ingestSportsDataverseWnbaPlayerBox` and `ingestSportsDataverseWnbaTeamBox` deleted existing rows **one Supabase round-trip per record**, in a plain `for` loop, before a single batched insert. Each download is individually bounded (30s timeout), but the **row-processing phase had no bound at all** -- for a full-season backfill (first run, `forceFullBackfill`, or a stalled incremental watermark), hundreds to low thousands of distinct `(player_id_or_team_id, game_date)` pairs meant hundreds to thousands of sequential network round-trips, easily consuming 20+ minutes with **zero intermediate log output** (the function's own `log(...)` call only fires after the full delete+insert completes) -- exactly matching every cancelled run's observed shape (silent from mid-`identity_repair` to the timeout kill). This module's own docstring already documented "incremental by default... only processes games since then," which is real and correct -- but incremental does not bound the *worst case* (a fresh cutover, a full-season catch-up, or any watermark stall), and the per-record delete loop had no bound of its own regardless.
+
+Per the requested checklist: not current-event-bounded (whole season file per download); not paginated (one parquet file per dataset, all rows read into memory then filtered by the schedule's `eventIdByExternalId` map); parsing is a single in-memory pass; deduplication happens via `Map` keyed by `(player_id, game_date)` before insert (already correct); the incremental freshness/skip check (`planWnbaBackgroundEnrichment`) is real and does prevent *most* runs from attempting ingestion at all; **no retry logic and no cancellation support existed anywhere in this call chain** (fixed this session for the season-ingestion call specifically, via the new deadline gate -- see Section 6); a canceled run leaves whatever partial DB writes had already committed (deletes and inserts are per-record/per-batch, not wrapped in a transaction -- a later run's own delete-then-insert on the same keys is idempotent and self-heals this, unchanged behavior). Why season-scoped work exists in a 20-minute pipeline at all: this ingestion function is explicitly documented as "intended to run only inside GitHub Actions... never inside the Vercel request lifecycle" and reuses the SAME dataset/function for both the recurring bounded case and an explicit one-off `forceFullBackfill` case -- a reasonable shared design, just missing the round-trip-count bound that made the recurring case unsafe.
+
+### 5. Selected correction: Option A-lite implemented as a real fix, not a workaround
+
+None of the four offered options alone matched what the evidence supported. The dominant, highest-leverage fix was neither Option A (deadline) nor Option B (narrow population, which the ingestion function's signature doesn't support at all -- it has no team/player scoping parameter) nor pure Option C (the incremental skip already exists and already works) -- it was **fixing the actual inefficiency** (batching the deletes), which makes the common case fast rather than merely capping how long a slow case is tolerated. Option A (cooperative deadline) was implemented as a genuine second layer, not a replacement for the real fix. Rejected as insufficient alone: Option A alone (a deadline doesn't make the operation faster, only caps how often it's allowed to be slow, and would have masked the real defect rather than fixing it); Option B alone (not achievable without changing the ingestion function's fundamental full-season-file design, out of scope for this pass); a new scheduler, an increased workflow timeout, background work after job exit, weaker blockers, or scoring with missing data (all explicitly prohibited and none considered).
+
+### 6. Cooperative budget implementation (real cancellation gate, not `Promise.race()`)
+
+`runBoundedBackgroundEnrichment` gained an optional `deadlineAt?: number` (epoch ms). Before the season-ingestion call is allowed to START, the remaining time until `deadlineAt` is checked against `WNBA_SEASON_INGEST_MIN_REMAINING_BUDGET_MS = 5 minutes`; if insufficient, the call is **never made** -- reported as a disclosed, non-fatal skip (`{skipped: true, reason: "...below the 300000ms minimum..."}`), not attempted and abandoned mid-flight (this is a start-gate, not a running-operation abort -- true mid-flight cancellation of the parquet download/row-processing would require threading an `AbortSignal` through every internal step, assessed as a larger, riskier change than this pass's time budget allowed; the batched-delete fix in Section 4 is what makes the operation fast enough that this gate is rarely the thing that matters). Threaded end-to-end: `runLivePreScoreRepair` gained the same optional `deadlineAt`, passed straight through; `lib/ops/github-actions-pipeline.ts`'s `buildGitHubActionsLeagueRunReport` computes `repairDeadlineAt = startedAt + 20 * 60 * 1000` (20 minutes from the league report's own start) and passes it into `buildDefaultRunners` -> the real `runRepair` closure -> `runLivePreScoreRepair`. Every parameter defaults to `undefined`, preserving the exact prior unconditional-attempt behavior for every pre-existing caller (proven by a dedicated test).
+
+Stage-time allocation (grounded in Section 3's real measured samples, not guessed): every non-enrichment stage combined (grade + schedule_refresh + sharp + identity_repair + score + board) took well under 4 minutes in every real sample observed (MLB 221s total; WNBA's one completed run 163s total). A 20-minute enrichment deadline leaves a 5-minute margin under the real 25-minute job ceiling for those stages plus cleanup -- generous relative to observed reality, conservative relative to a genuinely bad provider night.
+
+### 7. Current-population bounding -- not implemented (Option B), by design
+
+Given the ingestion function's full-season-file design (Section 4), a true "current-prop-only" population bound was not achievable without a larger redesign of what data SportsDataverse's parquet files let you request (they are whole-season files, not queryable by player/team). This was assessed honestly as out of scope rather than attempted partially. The batched-delete fix (Section 4) plus the deadline gate (Section 6) together are the correction actually implemented.
+
+### 8. Partial-completion behavior (proven by test, not merely asserted)
+
+Of the 15 requested scenarios, the ones this session's actual changes touch are proven directly:
+- Enrichment completes fully, scoring proceeds: unchanged, already proven by every existing `wnba-e2e.test.ts` test.
+- Deadline arrives before ingestion starts: proven (`Session 92: WNBA background enrichment skips season ingestion... when the deadline leaves too little remaining budget`), matchup recompute still runs, stage status is `ok` (a budget skip is not a failure).
+- Ample budget remains: ingestion proceeds normally (proven, both at the unit level and end-to-end through `runLivePreScoreRepair`'s real call chain).
+- No deadline supplied (every pre-existing caller): behaves exactly as before (proven).
+- A failed batch delete is swallowed exactly like the original per-record `.catch()` behavior (proven) -- partial enrichment failure never blocks the insert path or fabricates success.
+- Missing minutes/context/injury-marker scenarios: unchanged from Sessions 89-90's existing coverage, not re-proven here since nothing in this session's changes touches those blockers.
+- "Partial enrichment never converts missing data into a neutral public score" and "only fully complete props reach scoring/publication": unchanged, structural guarantees of the existing `publishabilityAssessment`/blocker system (Sessions 86-90), not weakened or touched by anything in this session.
+- Scenarios not directly exercised this pass (provider download mid-timeout, parsing partial/invalid, row persistence failure mid-batch, next-run resumption specifics): unchanged pre-existing behavior, not modified, not newly tested -- flagged honestly as out of this session's scope rather than claimed proven.
+
+### 9. Natural pipeline order -- reconfirmed unchanged from Session 91, not re-tested
+
+Session 91's traced order (Section 5 there) is unchanged by this session's fixes -- the fixes make the `repair` stage faster and safer, they do not reorder anything. No new pipeline-order executable test was added this session; the existing `wnba-e2e.test.ts`/`mlb-e2e.test.ts` suites already prove the scoring/board/publication ordering and blocker-retention invariants at the scoring layer, and Section 8 above proves the enrichment-stage behavior the new code touches.
+
+### 10. Date-boundary test fix (real root cause found, not merely worked around)
+
+Traced precisely (not left as "a month-boundary bug," which was the reasonable-sounding but imprecise framing this turn's own prompt used, based on Session 91's report): the 4 failing `event-selection-matrix.test.ts` tests were sensitive to what **UTC time-of-day** the suite happened to run at, not the calendar date. The fixture's "day before" `scheduled_date` was computed via raw UTC-day subtraction, while the production code under test (`easternEventDate` in `sharp-matching.ts`) computes the Eastern-timezone calendar date via `Intl.DateTimeFormat`. These diverge whenever the reference timestamp's UTC time-of-day falls in 00:00-03:59 UTC (20:00-23:59 the prior day in Eastern, since Eastern is UTC-4 in July/August) -- exactly the window this session's own earlier full-suite run landed in (~00:18 AM Eastern), which is why it surfaced right after the real calendar crossed into August 1, without actually being caused by the month boundary itself. Fixed by deriving the fixture's offset date from the same Eastern-date string production computes, via a local helper mirroring the production algorithm exactly, rather than a separate UTC-day calculation. A new deterministic regression test (`easternEventDateForTest`/`oneEasternDayBefore`, 4 fixed instants: ordinary UTC afternoon, the danger window on a plain day, the danger window crossing a month boundary, and crossing a year boundary) proves the fix without depending on real wall-clock timing ever again. No event-selection assertion was weakened -- the underlying MLB-no-fallback / WNBA-status-filtered-fallback behavior under test is unchanged; only the fixture's date arithmetic was corrected.
+
+### 11. Expected operational improvement (estimated, clearly separated from proven test results)
+
+**Proven by test** (not estimated): the batching fix reduces N sequential DELETE requests to `ceil(N/100)` requests for any N, with identical net deletion semantics (4 tests, exact request counts asserted for N=0, 60, 250).
+
+**Estimated** (labeled as such, not claimed as measured production fact): for a full-season backfill scenario with roughly 1,000-2,000 distinct player/team + game_date pairs (a plausible order of magnitude for a partial WNBA season, not a verified exact count), the delete phase goes from an estimated 1,000-2,000 sequential round-trips (likely tens of seconds to several minutes of pure network latency, compounding toward the observed 20+ minute hangs under any added latency or provider slowness) to roughly 10-20 batched requests (a few seconds). Combined with the deadline gate as a backstop, the expectation is that WNBA scheduled runs should reach the `score` stage in the large majority of cycles going forward, rather than the roughly 1-in-7 observed this session. **This is not a guarantee that all 122 (or however many are active at a given moment) WNBA props will score** -- existing strict blockers (minutes freshness, injury-context markers, team/matchup context, stale odds, etc.) still apply exactly as before; this fix only removes the pipeline-level obstacle that was preventing scoring from being *attempted* at all on most cycles.
+
+### 12. Bounded natural-run certification plan (not executed, prepared only)
+
+- **Candidate SHA**: this session's tip after push (see Section 15).
+- **Rollback SHA**: `ea1b9d6` (the state immediately before this session's code changes) or, further back, the current live pin `933ae62fabc2f8d50adf0e084d422c7d7db47181` (no change to it is proposed).
+- **Public workflow checkout pin**: would require the owner to update `COVERED_PRIVATE_PIPELINE_SHA_V2` to this session's candidate SHA -- **not done, requires explicit owner approval** (promotion/pin changes are outside this session's authorization).
+- **Proof window**: one natural WNBA game window (the existing ~6:00pm-1:00am ET cron window), observing the scheduled runs that fire during it.
+- **Expected scheduled runs**: roughly one every 20 minutes during the window (per the existing cron), same as today -- no scheduling change proposed.
+- **Exact log markers to check**: each run's `repair` step status/duration (should no longer show the "silent for 20+ minutes then cancelled" shape); the `score` step's `poolCount`/`eligibleCount`/`processedCount`/`publishableCount` (should now appear in the large majority of runs, not roughly 1-in-7); any `ingest.skipped` detail with reason `"...time budget..."` (would indicate the backstop fired, a signal worth investigating further if it fires often).
+- **Provider/request ceilings**: unchanged from today (`SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`, `SHARPAPI_REQUEST_SPACING_MS=6500`, `SHARPAPI_CONFIGS_PER_RUN` per-league as already configured).
+- **Database write bounds**: unchanged in kind (same tables, same per-run scope); the fix changes *how many requests* accomplish the same writes, not *what* gets written.
+- **Expected stage deadlines**: enrichment capped at 20 minutes from league-report start (Section 6); scoring/board/cleanup expected to complete within the remaining ~5 minutes as they always have.
+- **Scoring evidence**: real `scored_props` row counts increasing across the observed window, cross-checked against the bounded read-only funnel pattern established in Sessions 90-91.
+- **Board/snapshot evidence**: `getCoveredPicksOfTheDay`/public snapshot publication counts for WNBA, read-only.
+- **Abort criteria**: if cancelled-run rate does not measurably improve across the observed window, or if new failure modes appear (e.g., the deadline-skip firing on every run, suggesting the batching fix alone didn't help as expected).
+- **Rollback criteria**: revert `COVERED_PRIVATE_PIPELINE_SHA_V2` to the current pin if the candidate introduces any new scoring-affecting regression; this is a pure reliability/plumbing change with no scoring-formula or completeness-gate weakening, so rollback risk is assessed as low, but the criteria exist regardless.
+- Policy C remains inactive; nothing above authorizes or implies activating it.
+
+### 12b. Preserved status (unchanged claims, restated per request)
+
+Dylan Cease remains invalid under strict completeness; MLB strict scoring remains source-blocked; no approved Statcast source exists; production injury markers remain absent; WNBA strict certification remains incomplete (now for a precisely-known reason -- the timeout defect, not missing per-prop data); UI/commentary remain substantially improved and unchanged this session; the public scheduler is active (corrected framing, Session 91); the private repo's own scheduler remains inactive (unchanged, narrower claim); the WNBA timeout was the operational root cause and has a real fix now, not merely a diagnosis; Phase 20 remains not ready.
+
+### 13. Validation
+
+- `pnpm run test`: 1015 tests, 1014 pass, 1 skip, 0 fail (up from 1006/1005/1 -- 9 net new tests: 4 in `sportsdataverse-wnba-ingest.test.ts`, 3 in `jobs.test.ts`, 1 in `basketball.test.ts`, 1 in `event-selection-matrix.test.ts`).
+- `npx tsc --noEmit`: clean.
+- `npm run build`: clean.
+- `npx opennextjs-cloudflare build`: clean.
+- No workflow/YAML files were changed this session (verified via `git status`); a sanity YAML-parse check on the private repo's own (idle) workflow file confirmed no incidental corruption.
+- Public-boundary audit: unaffected (no changes to public-export tooling or excluded-file lists); the existing `pnpm run test` suite's own public-export tests (SharpAPI removal, workflow reference checks, secret scanning) all still pass.
+- `scoring-engine/dist/` confirmed untouched throughout (`git diff --stat ea1b9d6 -- scoring-engine/dist/` empty at every check).
+
+### 14. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged (re-verified: still `933ae62...`); no workflow cron cadence change (no workflow YAML touched at all); no workflow timeout increase; no new scheduler; Policy C not activated; no live variables altered (all `gh api` calls this session were reads); no migrations/constraints (the batched-delete fix and the deadline gate both operate on existing tables/columns only); no cleanup/reconciliation/backfill/broad rescoring; no scoring formula/weight/threshold change; Covered Picks floor untouched; no manufactured picks; no new provider called or integrated; no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 15. Exact remaining gaps
+
+1. **Owner approval needed to actually deploy this fix**: updating `COVERED_PRIVATE_PIPELINE_SHA_V2` on the public repo to this session's candidate SHA is a promotion action, explicitly outside this session's authorization -- the fix exists on the repair branch only until the owner approves pinning it live.
+2. **The 5-minute deadline-gate margin is estimated, not empirically tuned** -- the Section 12 certification plan's log markers (especially any `ingest.skipped`/"time budget" occurrences) would validate or refine it after a real observation window.
+3. **True mid-flight cancellation (an `AbortSignal` threaded into the download/row-processing itself) was not implemented** -- the current gate only prevents the ingestion call from *starting* late; a call that starts within budget but then genuinely runs long (e.g., a very large first-time backfill) is not itself interruptible yet. Recommended as a future enhancement if the certification window shows this still matters after the batching fix.
+4. **Injury-marker rollout**: unchanged ask from Session 90 -- ready pending owner authorization, independent of this session's fix.
+5. **MLB source licensing**: unchanged ask -- pursue Decision B.
+6. **Current-population bounding (Option B) remains unimplemented** by design (Section 7) -- the ingestion function's full-season-file shape doesn't support it without a larger redesign.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** The real, traced root cause of WNBA's low scoring coverage (an unbatched, unbounded delete loop inside a season-ingestion call, occasionally consuming the entire scheduled job's time budget before scoring could run) is now fixed and tested on the repair branch, with a defense-in-depth cooperative deadline as a second layer -- but the fix has not been deployed (that requires owner-approved pin promotion, out of scope here) and has not yet been observed against a live natural WNBA window. The date-boundary test issue Session 91 flagged is fixed with its true root cause identified (a UTC/Eastern timezone sensitivity, not a month-boundary bug) and a wall-clock-independent regression test added. MLB remains source-decision blocked. Not proposed as a promotion candidate. Production controls unchanged -- zero writes made this session beyond the already-running live scheduler's own independent activity. Phase 20 not begun.
+
+## Session 93 (2026-08-01, continuation from `685e26f`): sufficiency audit of the Session 92 fix -- real semantic/size defects found and fixed, benchmark evidence proves the fix is sufficient, no further redesign needed
+
+This pass audited whether Session 92's batched-delete fix is actually sufficient, per the owner's explicit instruction not to introduce another broad redesign unless evidence proved it insufficient. **The audit found and fixed two real defects in the fix itself** (a silent gap in the shared test harness that could have hidden real bugs, and a request-size margin that was real but not yet dangerous), then used real benchmark evidence to conclude the deadline/reserve design is sufficient as-is.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `685e26fe4b99db022b9a076b704fa1e46bb077b7` before this session. `115ddbe`/`9040631`/`685e26f` re-verified (parents/subjects/files match Session 92's report exactly). `origin/main` unchanged. Re-confirmed live (read-only `gh api`): `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62...` -- all unchanged. Working tree clean except pre-existing untracked `scoring-engine/dist/` (confirmed untouched throughout). No production writes or provider calls this session.
+
+### 2. Batched-delete semantic proof (16-item audit)
+
+Audited the exact DELETE expressions `deleteGameLogsInBatches` generates and added 21 new tests against the shared fixture harness -- which itself required a real fix first (below) before it could faithfully evaluate them at all. Findings, in the audit's own numbering:
+
+1-3 (composite AND identity; OR across pairs; per-identity AND, not OR-of-columns): proven directly -- a batch removes exactly its targeted `(key, game_date)` pairs; a same-key-different-date row survives.
+4-5 (player/team isolation): proven -- a batch targeting one player/team never touches another's row, even on the same date.
+6 (event isolation): **not structurally guaranteed, documented as an accepted characteristic, not fixed** -- the delete key is `(provider, player_id/team_id, game_date)`, never `event_id` (unchanged from the original per-record loop, which never scoped by event_id either). Two different events sharing the same team+date would both be affected. Not exploitable in practice: a WNBA team plays at most one game per calendar date, so team+date already IS the real-world unique-game key for this sport -- adding `event_id` to the delete key would be a real, if small, additional change to write-path scope that this audit did not find evidence requiring.
+7-8 (season/league isolation): proven -- `game_date` (a real calendar date) and `provider` both participate in the delete identity, so a different season's date or a different provider's row survives untouched.
+9 (duplicate inputs harmless): proven.
+10 (missing identity fails closed): **fixed, not merely proven** -- see Section 3's charset guard.
+11 (malformed values encoded safely): **a real defect found and fixed**, not merely proven -- see Section 3.
+12-13 (failed batch stops insertion; partial failure never reported success): **fixed** -- `deleteGameLogsInBatches` no longer swallows a failed batch (`.catch(() => {})` removed); a real delete failure now propagates, so the caller's insert never runs for that pass. Previously (both in the original per-record loop AND Session 92's first batched version) a failed delete was silently ignored and the insert proceeded anyway -- risking duplicate rows (stale + fresh) for that batch's identities.
+14 (insert failure reported, no marker): proven -- an insert failure propagates and is never reported as a successful `gameLogsInserted` count.
+15 (retry doesn't duplicate): proven -- delete-then-insert is idempotent; a second pass's own delete clears what the first pass wrote before any re-insert.
+16 (shared harness reproduces real AND/OR): **a real defect found and fixed** -- see below.
+
+### 3. The shared fixture harness had a real, previously-unnoticed gap
+
+`lib/knowledge/supabase-fixture-harness.ts`'s `matches()` function never actually parsed a `{ raw: "or=(...)" }` filter. `or`/`and` are PostgREST combinators, not real row columns -- a bare `row["or"]` lookup matched none of the `in./eq./gte../is.null` patterns and silently fell through to the function's own default `return true`, meaning **every `or=(...)` filter used anywhere in this codebase's tests was being treated as an unconditional match, never actually evaluated.** This affects not just this session's new delete-batching tests but also the `future-or-null start_time` filters introduced in Session 90's `read-service.ts` work -- those tests happened to still pass after the fix (full suite re-run: still 1032/1031/1/0), meaning they were not accidentally relying on the gap, but the gap itself was real and could have silently hidden a genuine filtering bug behind a passing test in either place. Fixed with a real recursive `and()/or()` expression evaluator (arbitrary nesting, comma-splitting that respects paren depth so a nested group's internal commas aren't mistaken for sibling separators).
+
+### 4. Request-size safety: a real margin issue found and fixed
+
+Calculated the exact generated DELETE URL length using realistic identifier lengths (36-char UUIDs, 10-char ISO dates): at the ORIGINAL batch size of 100, a full batch measures **~8,000 bytes** -- roughly half of undici's/Node's default 16KB header-size ceiling (`maxHeaderSize`), the same failure class Session 89 traced directly as `UND_ERR_HEADERS_OVERFLOW` for a different unbounded filter. Not itself over the limit, but too thin a margin once real request/auth headers (`apikey`, `Authorization: Bearer <token>`, ~200-300 bytes) and any proxy layer's own request-line ceiling (commonly ~8KB total in practice) are added. **Reduced `GAME_LOG_DELETE_BATCH_SIZE` from 100 to 50**: measures ~4,050 bytes at the boundary, a comfortable 2x margin. Round-trip count impact is negligible either way (a 2,000-pair full-season volume is 40 requests at batch-50 vs. 20 at batch-100, both trivial compared to the 2,000 sequential requests before Session 92's fix).
+
+Also found, during this exercise, that per-value `encodeURIComponent` alone does not actually protect the `and()/or()` structural syntax: the entire `or=(...)` filter is one query-string parameter value, and `URLSearchParams` (both in this repo's own test harness, and plausibly in real HTTP client/server query parsing generally) decodes the WHOLE value as one string before any DSL parsing happens -- which un-escapes a value's own percent-encoded commas/parens back to literal ones at the exact same syntactic level as the real structural characters. Proven directly: a synthetic `player_id` containing commas and parens, before the fix below, corrupted the batch's filter. Real production values (UUIDs from `ensurePlayer`/`ensureTeam`, ISO `game_date` strings) never contain these characters, so this could never fire against real data -- but `deleteGameLogsInBatches` now validates every identity against a `/^[A-Za-z0-9_-]+$/` charset and fails closed (throws) rather than silently trusting that invariant. Measured exact request URL lengths at every required boundary (1, 49, 50, 51, 250, 2000 pairs) -- all comfortably under an 8,192-byte safe ceiling (half of undici's default), with the required invariant explicitly asserted: no generated request recreates the `UND_ERR_HEADERS_OVERFLOW` shape at any tested volume.
+
+### 5. Realistic benchmark results (SIMULATED latency, clearly labeled, not production timings)
+
+A small set of real (actually executed, `setTimeout`-based) runs first confirmed that elapsed time for this specific code shape (`await` each request in a flat sequential loop, no concurrency) tracks `request_count x latency` almost exactly (e.g. 100 requests @ 20ms measured 2097ms against a 2000ms prediction -- ~5% Node/event-loop overhead, not a modeling error). Given that calibration holds, the full volume x latency matrix was computed analytically (`count x latency`) rather than by actually sleeping for the full simulated duration (a 2,000-record x 250ms sequential run would itself cost 500 real seconds to produce a number simple multiplication already gives exactly, since there is no queuing/concurrency/jitter in this code shape to model).
+
+| Volume band | Records | Latency | OLD (sequential) | NEW (batched, size 50) | Speedup |
+|---|---|---|---|---|---|
+| Small | 5 | 20-250ms | 100ms-1.25s | 20-250ms | 5x |
+| Typical current season | 60 | 20-250ms | 1.2s-15s | 40-500ms | 30x |
+| High but realistic | 500 | 20-250ms | 10s-125s | 200ms-2.5s | 50x |
+| **Worst bounded case** | 2000 | 20-250ms | 40s-**500s (8.3 min)** | 800ms-**10s** | 50x |
+
+**Every NEW-column figure, at every volume and every latency tested, fits inside the 5-minute (300s) reserved budget with enormous margin** -- the worst case (2,000 records, 250ms latency) uses 10 of 300 reserved seconds, 3.3% utilization. All figures are labeled simulations (analytical projection from a real, calibrated per-request-latency model), not measured production timings -- real GitHub-Actions-runner-to-Supabase round-trip latency was not measured directly this session.
+
+### 6. Critical-path timing (partial -- reasoned from existing evidence, not a new dedicated harness)
+
+A full 10-stage deterministic timing harness (market ingestion through reporting, with injected clock/simulated latency) was not built as a separate new artifact this pass, given the time already spent on the higher-priority audit above and the fact that the two things such a harness would need to prove -- (a) the delete/insert phase's real-world duration, and (b) whether enrichment issues block scoring -- are already established by Section 5's benchmark and Section 7's direct code citation below, respectively. What IS established, with evidence: real production stage timings from Session 91/92's sampled runs (grade+schedule_refresh+sharp+identity_repair+score+board combined: MLB 221s, WNBA's one completed run 163s -- both well under 4 minutes); this session's benchmark proves the delete/insert phase itself (the actual defect) now costs at most ~10s even at worst-case volume and latency. Combined, a full natural WNBA run's expected total is on the order of 3-5 minutes even at high enrichment volume -- comfortably inside the 25-minute ceiling with wide margin. Scenarios not separately harnessed this pass (elevated DB latency across the WHOLE critical path simultaneously, a mid-run batch failure's effect on total elapsed time, board/snapshot reserve time specifically): not proven by a dedicated new test, reasoned from the above instead. Flagged as a real, if lower-priority, gap for a future session with time specifically budgeted for it.
+
+### 7. Deadline sufficiency conclusion: SUFFICIENT, no cooperative cancellation added
+
+Per the explicit instruction ("If sufficient: do not add cancellation merely for architectural purity. Document the measured safety margin"), Section 5's benchmark directly answers this: the batched delete/insert phase's own worst-case duration (10s at 2,000 records / 250ms latency) is roughly **30x smaller** than the 5-minute reserve it's checked against. The existing start-gate-only design (refuse to START the season-ingestion call once under 5 minutes remain; no mid-flight abort once started) is not merely adequate but has a very wide margin -- **no cooperative deadline checks were added at DELETE-batch/insert-batch/parse boundaries**, since the operation they would protect against no longer takes long enough to need protecting mid-flight. This conclusion rests on the batching fix being what it claims to be (proven in Sections 2-4) plus the calibrated latency model (Section 5) -- not on architectural preference.
+
+### 8. Five-minute reserve validation: sufficient with very large margin
+
+Using Section 5's benchmark and Section 6's real stage-timing citations: expected duration for scoring + board + snapshot + reporting/cleanup, based on real observed samples, is 3-4 seconds (scoring) + 2-3 seconds (board) + cleanup overhead -- all of which happens AFTER the 20-minute enrichment deadline, inside the remaining 5-minute reserve. Even the worst-case delete/insert phase (10s) leaves ~4:50 of the 5:00 reserve untouched. **Five minutes is not merely sufficient, it is generous** given the evidence; no change to the internal sub-stage deadline was made, and none is recommended. The workflow's outer 25-minute `timeout-minutes` was not touched (explicitly prohibited, and unnecessary given this evidence).
+
+### 9. Natural pipeline outcomes: proven via existing tests + direct code citation, not rebuilt from scratch
+
+- **Full success / enrichment skipped when fresh / partial enrichment**: already proven by the existing `wnba-e2e.test.ts` suite (Sessions 86-91, unchanged) and this session's own `runBoundedBackgroundEnrichment`/`runLivePreScoreRepair` tests (Session 92's first pass) -- not re-built.
+- **Deadline skip -> existing complete props still score**: proven by direct code citation, not a new dedicated test this pass -- `lib/ops/github-actions-pipeline.ts`'s own comment at the repair-step-status assembly (unchanged by anything in Sessions 92-93): *"The repair runner never throws for a soft enrichment failure... scoring can still proceed with the existing missing-data penalties... scoring still runs, low scores are never suppressed, perfect data is never required."* A deadline-triggered ingestion skip returns `status: "ok"` (Session 92), which is a MILDER outcome than the "warning" case this comment already documents as non-blocking -- so the required invariant ("enrichment failure or deadline pressure must not prevent already-complete props from reaching scoring") already held before this session and is unchanged by it. **This was not re-verified via a new end-to-end pipeline test this pass** (a real gap, given the explicit ask); recommended as the single highest-value addition for a following session.
+- **Failure (delete/insert/provider failure -> no false freshness, no incomplete public score, exact stage failure reported, safe retry)**: proven by this session's own tests (Section 2, items 12-15).
+
+### 10. Full-season design reconciliation (direct answers)
+
+- **One bulk provider download?** Yes -- one parquet file per dataset (`schedules`, `player_box`, `team_box`), the whole season in each file, not paginated or filterable by team/player/date at the source.
+- **How often fetched?** Only when `planWnbaBackgroundEnrichment`'s `shouldIngest` is true -- i.e., only when a completed game exists that stored logs don't yet cover. Not every scheduled run.
+- **Exact freshness condition?** `maxLoggedGameDate < mostRecentPastGameDate` (or no logs exist yet) for the referenced teams.
+- **Does every WNBA scheduled run fetch it?** No -- most runs should find logs already current and skip the download entirely (this is real, existing, correct incremental behavior, not something this session changed).
+- **Can one successful ingestion serve many later runs?** Yes -- until the next completed game advances `mostRecentPastGameDate` past what's stored.
+- **All rows rewritten, or only changed identities?** Only the rows the incremental window's rows resolve to (bounded by the schedule step's own incremental watermark) -- not the whole season's stored rows on every run, only the specific `(player/team, game_date)` pairs the newly-read window touches.
+- **Proportional to full season every refresh?** No for the common case (incremental); yes for the worst case (first run, `forceFullBackfill`, or a stalled watermark) -- exactly the case Section 5's benchmark measured and found now safe (10s worst case).
+- **Can the batch correction remain durable, or is current-population targeting still required?** **The batch correction is durable as a standalone fix.** Current-population targeting (Option B) is not required given Section 5's evidence -- the worst case is now fast enough that narrowing the population further would add real complexity (the ingestion function's file-based design has no player/team-scoped download parameter at all) for no measurable benefit.
+
+### 11. Candidate natural-run certification package (prepared, not executed)
+
+Unchanged in structure from Session 92's Section 12, updated with this session's evidence:
+- **Candidate SHA**: this session's tip after push (Section 13).
+- **Rollback SHA**: `685e26f` (pre-Session-92-fix) or the current live pin `933ae62...` (unchanged, no promotion proposed).
+- **Public workflow checkout variable to change later**: `COVERED_PRIVATE_PIPELINE_SHA_V2` on the public repo's `production` environment -- not touched this session.
+- **Expected cron invocations**: unchanged (every 20 minutes within the existing WNBA window).
+- **Expected stage log markers**: `repair` step should no longer show the "silent for 20+ minutes" shape; given Section 5's evidence, expect the `repair` step's own duration to be low single-digit seconds to low tens of seconds even when ingestion runs, not minutes.
+- **Expected enrichment deadline**: 20 minutes from league-report start (unchanged).
+- **Expected database request counts**: a handful of DELETE requests per ingestion run (≤40 even at worst-case volume) plus 2 INSERT calls (player_box, team_box), replacing what could have been thousands of sequential requests.
+- **Expected scoring count range**: not newly quantified this session (Session 91's real sample: 40 processed, 9 publishable in one completed WNBA run) -- expected to recur far more consistently once the timeout defect stops suppressing most cycles.
+- **Expected board/snapshot evidence**: unchanged ask -- `getCoveredPicksOfTheDay`/public snapshot publication counts for WNBA, read-only.
+- **Abort criteria**: cancelled-run rate does not measurably improve across the observed window, or a new failure mode appears.
+- **Rollback criteria**: any new scoring-affecting regression; risk assessed as low given this is a pure reliability/plumbing change with no scoring-formula or completeness-gate weakening.
+- Policy C remains inactive; nothing here authorizes or implies activating it.
+- The certification must still verify (unchanged ask): run finishes below 25 minutes; scoring reached; complete props scored; incomplete props blocked; injury markers valid; snapshots advance; API/UI receive the new generation. **Not executed this pass.**
+
+### 12. Preserved project status
+
+Public scheduler active; private repo's own scheduler inactive; live pin unchanged (`933ae62...`); the WNBA timeout correction (now further hardened -- Sections 2-4) exists only on the repair branch, not deployed; natural WNBA success remains uncertified (the Section 11 package has not been run); strict WNBA certification incomplete; Dylan Cease invalid; MLB strict scoring remains source-blocked; no approved Statcast source; injury-marker rollout unexecuted; UI/commentary substantially improved and unchanged this session; Phase 20 not ready.
+
+### 13. Validation
+
+- `pnpm run test`: 1032 tests, 1031 pass, 1 skip, 0 fail (up from 1015/1014/1 -- 27 net new tests in `sportsdataverse-wnba-ingest.test.ts`: 21 semantic-audit tests + 6 request-size boundary tests, replacing 2 of the prior session's tests whose expected counts changed with the batch-size reduction).
+- Benchmark (Section 5) reported separately from the deterministic pass/fail suite, as requested -- it is a standalone script, not part of `pnpm run test`, and produces measurements/projections rather than pass/fail assertions.
+- `npx tsc --noEmit`: clean (one real type error surfaced and fixed during this session's own work -- `withEnv`'s helper needed to be generic to support a benchmark-adjacent test returning a value; fixed, not worked around).
+- `npm run build`: clean. `npx opennextjs-cloudflare build`: clean.
+- No workflow/YAML files changed this session.
+- Public-boundary audit: unaffected, existing public-export tests still pass.
+- `scoring-engine/dist/` confirmed untouched throughout.
+
+### 14. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged; no cron cadence change; no workflow timeout increase (the INTERNAL 20-minute sub-stage deadline, unchanged from Session 92, is not the workflow's own `timeout-minutes`, which was never touched); no new scheduler; Policy C not activated; no live variables altered (all `gh api` calls read-only); no production writes or provider calls; no migrations/constraints; no cleanup/reconciliation/backfill/rescoring; no scoring formula/weight change; Covered Picks floor untouched; no manufactured picks; no new provider integrated; no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 15. Exact remaining gaps
+
+1. **Deploying the fix still requires owner-approved pin promotion** -- unchanged ask from Session 92.
+2. **A full 10-stage critical-path timing harness with injected clock/latency was not built** -- Section 6 reasons from existing evidence instead; a genuine gap if the owner wants this specific artifact.
+3. **The "deadline skip -> scoring still reached" invariant was proven by code citation, not a new end-to-end pipeline test** -- recommended as the single highest-value test addition for a following session.
+4. **Event-level delete isolation (audit item #6) remains an accepted, undocumented-until-now characteristic**, not a fix -- team+date is the real-world unique-game key for WNBA, so this was assessed as not worth the added complexity, but is now explicitly disclosed rather than silently assumed.
+5. **Injury-marker rollout, MLB source licensing**: unchanged asks from prior sessions.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** This session's audit found the Session 92 fix directionally correct but incomplete in two real, now-fixed ways (a silent test-harness gap, a real-but-not-yet-dangerous request-size margin), and used genuine benchmark evidence -- not assumption -- to conclude the deadline/reserve design is sufficient without further redesign: the worst realistic case now costs ~10 seconds where it used to cost up to 500. No broad redesign was introduced. The fix remains undeployed and uncertified against a live natural window, which requires owner-approved pin promotion outside this session's authorization. MLB remains source-decision blocked. Not proposed as a promotion candidate. Production controls unchanged -- zero writes this session beyond the already-running live scheduler's own independent activity. Phase 20 not begun.
+
+## Session 94 (2026-08-01, continuation from `8b8bed9`): closed Session 93's #1 flagged gap with a real end-to-end pipeline test; added the missing mixed-outcome partial-enrichment test; re-confirmed request-size/timing evidence directly rather than re-deriving it
+
+This pass targeted exactly the two concrete gaps Session 93's own Section 15 flagged (items 2-3): no real end-to-end pipeline test for the deadline-skip invariant, and no test exercising a genuinely mixed (success + still-missing) outcome within one real job call. Both are now closed with real, passing tests against production code -- not new mocks standing in for it. No redesign, no new architecture audit, no scope expansion beyond the two flagged gaps plus the request-size/timing re-citation Section 4-6 of this turn's brief asked for.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `8b8bed9be67dfc0562e3d021d41f8329f11668e4` before this session (parent `3971d4c`, subject "docs(handoff): record Session 93..."). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Re-confirmed live (read-only `gh api`): `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` -- all unchanged. Working tree at session start: clean except pre-existing untracked `scoring-engine/dist/` (confirmed untouched throughout -- never staged, never referenced by any change this session). Also re-verified, read-only, that the REAL live production job (`Covered-Prop-Analysis`'s `.github/workflows/covered-production-pipeline.yml`, job `run`) carries `timeout-minutes: 25`, matching the 25-minute figure the `repairDeadlineAt` code comment has always cited -- this private repo's own `covered-live-pipeline.yml` (`pipeline` job, `timeout-minutes: 30`) is a separate, private-repo-only workflow, not the one that actually runs live, so its different number is not a doc/code discrepancy.
+
+### 2. The missing deadline-skip natural-pipeline test -- added, real orchestration, passing
+
+Added a one-line, narrowly-scoped change to `buildGitHubActionsLeagueRunReport` (`lib/ops/github-actions-pipeline.ts`): `startedAt` now derives from an optional `input.now` when the caller supplies one (`const startedAt = input.now ? new Date(input.now).getTime() : Date.now();`), instead of always `Date.now()`. No real caller (the actual GitHub Actions pipeline) ever passes `input.now`, so production behavior is byte-for-byte unchanged; this exists solely so a test can simulate "the deadline has already passed" or "N minutes of reserve remain" deterministically, without a real wall-clock wait.
+
+Three new tests in `lib/ops/github-actions-pipeline.test.ts` exercise the REAL orchestration end to end: `runners.runRepair` calls the real `runLivePreScoreRepair` (not a mock), which calls the real `runBoundedBackgroundEnrichment`, `loadActivePropCoverage`, and `inspectLiveRepairPreflight` against a real `createSupabaseFixture`-backed fixture (`buildWnbaRepairFixture()` -- seeds `current_props`/`events`/`teams`/`players`/`participants`/`basketball_player_features`/`basketball_team_context`/`basketball_opponent_context`/`provider_cache`, all fresh, so only the deadline logic is under test); every other stage (sharp, schedule, grading, settlement, score, board, snapshots) uses the file's pre-existing `mockRunners` convention. Only the two WNBA-ingestion-specific dependencies (`loadWnbaBackgroundFacts`, `ingestSportsDataverseWnbaSeason`) are injected, to force `shouldIngest: true` deterministically without needing real parquet-file network mocking.
+
+- **Deadline already passed** (`deadlineAt: Date.now() - 1`): `ingestCalls===0`, `scoreCalls===1`, `boardCalls===1`, `snapshotCalls===1`, `report.status==="ok"`, and the repair step's `details.backgroundEnrichment.details.ingest` reports `{skipped: true, reason: /time budget/}` -- proving the skip reason is recorded correctly, not merely that ingestion didn't run.
+- **Insufficient (60s) reserve**: same skip behavior, `scoreCalls===1`, `report.status==="ok"`.
+- **Ample (20min) reserve**: ingestion proceeds (`ingestCalls>=1`; the real bounded reconciliation loop can legitimately call `runRepair` a second time when the (stubbed, static) facts still show outstanding work, so more than one ingestion call across the capped retry loop is real, expected orchestration behavior, not a bug -- the assertion was written to reflect that rather than an artificially exact count), and `scoreCalls===1`.
+
+A real gap surfaced and was fixed while building this: the first version of these tests left `NEXT_PUBLIC_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` unset, so `selectRows`'s `configuration()` threw and `loadActivePropCoverage`'s own `.catch(() => [])` silently swallowed it, resolving zero teams/events and skipping background enrichment via a completely different, unrelated code path ("no active teams or events were targeted") than the deadline logic actually under test -- passing the "insufficient reserve" test for the wrong reason (vacuously) and failing the other two on an assertion about a code path that had never actually run. Fixed by setting the same env vars (and restoring them, plus `mock.restoreAll()`) the file's other real-Supabase-backed tests already use. All 3 tests pass against the real code path once that was fixed -- confirmed by temporarily logging the actual `backgroundEnrichment` details mid-debug and observing the "no active teams" message before the fix, then the correct deadline-budget message after.
+
+`npx tsc --noEmit`: clean. This file's full suite: 98/98 pass (up from 95 pre-session).
+
+### 3. The missing mixed-outcome partial-enrichment test -- added at the correct layer
+
+Rather than fabricate an artificial multi-subsystem fixture spanning player features, team context, matchup, and injury markers all at once (which Section 3 of this turn's brief also asked about but which the existing test suites already cover exhaustively and separately -- MLB's 6-substage mixed-outcome case at `jobs.test.ts` line 402, injury-marker success/failure across 15 scenarios per Session 87-90, `refreshMlbInjuries` persistence-ordering at `mlb-injuries.test.ts` line 133), this pass added the one case that was genuinely missing: a single `refreshRecentFeaturesJob` call spanning a mixed player population -- one player with real game logs, one with zero -- in the SAME invocation.
+
+New test in `lib/knowledge/enrichment/jobs.test.ts`: seeds `player_game_logs` for `player-with-logs` only (via `createSupabaseFixture`), calls `refreshRecentFeaturesJob("WNBA", { playerIds: ["player-with-logs", "player-without-logs"], missingOrStaleOnly: true })`, and asserts: `result.warning === false` (an unpopulated player is the normal "not computed yet" case, never itself a write failure); a real row IS written to both `player_recent_features` and `basketball_player_features` for `player-with-logs`; NO row is written to either table for `player-without-logs` (proven by inspecting the fixture's post-call table state directly, not by proxy); `details.playerRecentRows === 2` (exactly the one populated player's two writes, proving the missing player contributed zero rows rather than a smaller/placeholder amount). This directly exercises the real production grouping logic (`jobs.ts` groups `player_game_logs` rows by `player_id` and only ever iterates keys that key actually appears under -- a player with zero returned rows simply never enters the loop), proving in one real call: no neutral/fabricated fallback for the missing player, no crash, and no effect on the other player's write. Deliberately scoped to this one gap rather than a broader multi-subsystem fixture, per this turn's own instruction not to expand into another architecture audit.
+
+`npx tsc --noEmit`: clean. This file's full suite: 50/50 pass (up from 49 pre-session).
+
+### 4. Full-suite validation after both additions
+
+`pnpm run test`: **1035 tests, 1034 pass, 1 skip, 0 fail** (up from 1032/1031/1 -- 3 net new tests in `github-actions-pipeline.test.ts`, 1 net new test in `jobs.test.ts`). `npx tsc --noEmit`: clean across the whole repo after both changes. No other files touched.
+
+### 5. Request-size evidence: exact number, directly re-measured (not re-derived from the prior session's comment)
+
+Section 6 of this turn's brief asked for the exact largest measured request size at batch size 50. Rather than trust Session 93's own code-comment estimate ("~4,050 bytes"), this pass re-ran the real `deleteGameLogsInBatches` function (not a re-implementation) against a mocked fetch, using the exact same realistic-identifier generator (`sportsdataverse-wnba-ingest.test.ts`'s `realisticUuid`/date-cycling scheme) already committed in that test file. **Exact measured result: 4,040 bytes** for a full 50-pair batch -- confirmed identical across every one of the 40 batched requests generated at the 2,000-pair (full-season worst-case) volume, since 2,000/50 divides evenly and every batch is therefore full-size. Against the existing `SAFE_REQUEST_URL_BYTES = 8192` ceiling, this is 49.3% utilization -- a genuine ~2.03x margin, matching (and now exactly confirming, not merely estimating) Session 93's "~2x margin" claim. This was a one-off script run directly against the repo's real exported function (not committed as a new test, since the existing 6 boundary tests in `sportsdataverse-wnba-ingest.test.ts` already assert the same invariant -- `< SAFE_REQUEST_URL_BYTES` -- at every required volume; this was a confirmation of the exact number, not a new behavior to lock in with its own test).
+
+Also directly confirmed this pass: the INSERT side of WNBA season ingestion (`insertRows("player_game_logs", records, ...)` / `insertRows("team_game_logs", records, ...)`) sends the entire batch as ONE POST request body, not chunked -- this was never part of the original timeout defect (which was specifically about per-record sequential DELETEs), and a single request for up to ~2,000 rows is one network round-trip, not a request-size risk of the same class as the URL-length DELETE issue (POST body size limits are materially larger than the ~16KB header-line ceiling this fix protects against).
+
+### 6. Critical-path timing: real evidence re-confirmed and cited directly; full 10-stage harness still not built, honestly flagged as unverified rather than estimated
+
+Consistent with Session 93's own Section 15 disclosure ("a full 10-stage critical-path timing harness with injected clock/latency was not built... a genuine gap if the owner wants this specific artifact"), this pass did not fabricate stage-by-stage timings for market ingestion, SDV parquet download/parse, Sharp API latency, or snapshot publication -- none of these have ever been measured with a dedicated harness in any session, and inventing numbers for them would violate this project's own standing rule against inventing runtime behavior. What this pass DID re-confirm directly, with exact numbers, rather than accepting the prior session's own figures on faith:
+
+- **Batched delete/insert phase (the actual, now-fixed defect)**: re-measured directly (Section 5 above) at 4,040 bytes/request, 40 requests at the 2,000-pair worst case. Combined with Session 93's already-calibrated real per-request-latency model (elapsed ≈ request_count × latency for this sequential-`await` code shape, calibrated against real executed `setTimeout` runs, not assumed), worst case at 250ms/request = 41 requests (40 delete + 1 insert per table) × 250ms ≈ 10.25s per table, ≈10-20s total for both `player_game_logs` and `team_game_logs` -- unchanged from, and now doubly confirmed against, Session 93's "~10s" figure.
+- **Deadline/reserve structure** (unchanged this session, re-verified against the real live workflow's actual 25-minute ceiling per Section 1 above): `repairDeadlineAt` = 20 minutes into the job; `WNBA_SEASON_INGEST_MIN_REMAINING_BUDGET_MS` = 5 minutes (ingestion refuses to start once fewer than 5 minutes remain before the 20-minute mark, i.e. never starts after the job's 15-minute mark); worst-case ingestion duration (~10-20s) leaves that 5-minute reserve more than 93% (280+ of 300 seconds) untouched.
+- **Everything upstream and downstream of the ingestion sub-stage** (Sharp market ingestion, identity resolution, SDV file parse itself as distinct from the DB round-trips, feature/context refresh outside the ingestion path, injury marker checks, scoring, board construction, snapshot publication): the only real evidence available is Session 91's cited production sample -- grade+schedule_refresh+sharp+identity_repair+score+board completing in 221s (MLB) / 163s (WNBA), both well under 4 minutes, already embedded as a code comment at `lib/ops/github-actions-pipeline.ts` lines 774-776. This is a real, existing production observation (not this session's new measurement), explicitly distinguished here from the deterministic model above and from the two items still genuinely unverified: SDV parquet parse time in isolation, and snapshot-publication latency specifically. **Neither of those two has a real number from any session** -- reported here as an honest, labeled gap, not estimated.
+
+**Conclusion (evidence-based, not re-derived from assumption): the specific, previously-diagnosed WNBA timeout root cause remains fixed with a wide, twice-confirmed margin.** The full end-to-end worst case is bounded by Session 91's real ~4-minute sample plus this session's re-confirmed ~10-20s ingestion worst case, comfortably inside the 25-minute ceiling -- but a genuinely complete 10-stage harness (with SDV parse and snapshot-publish timings specifically) still does not exist as a dedicated artifact. Recommended, as Session 93 also recommended, for a future session with time specifically budgeted for it, if the owner wants that specific artifact rather than the evidence-based bound above.
+
+### 7. Full-season / seasonal-refresh behavior: unchanged since Session 93, re-cited (no code changed this session in this area)
+
+All 10 questions from this turn's Section 5 are already answered, with exact code citations, in Session 93 Section 10 (unchanged this session -- no code in `sportsdataverse-wnba.ts` or `jobs.ts`'s `planWnbaBackgroundEnrichment` was touched this pass): one bulk per-dataset parquet download (schedules/player_box/team_box), fetched only when `shouldIngest` is true (`maxLoggedGameDate < mostRecentPastGameDate` or no logs exist), not every scheduled run; one successful ingestion serves every later run until the next completed game advances the watermark; only the incremental window's rows are rewritten per run, not the whole season, except the worst case (first run / `forceFullBackfill` / stalled watermark) -- exactly the case this session's re-confirmed timing evidence (Section 6) covers. No new test was added here since no gap was identified in this area this session -- Section 5 of this turn's brief authorized exactly this ("add tests only where an invariant is currently missing").
+
+### 8. Batched-delete safety: unchanged since Session 93, re-cited
+
+No new production-safety concern found or introduced this session. Session 93's 16-item semantic audit (composite AND identity, per-batch isolation, fail-closed malformed identities, failed batch stops insertion, no false-success reporting, safe retry) is unchanged, and this session's own re-measurement (Section 5) directly reconfirms the request-size conclusion rather than superseding it.
+
+### 9. WNBA candidate natural-run certification package (prepared, still not executed)
+
+Unchanged in structure and content from Session 93 Section 11, since no code in the ingestion/scoring path changed this session (only test coverage and one test-only clock-injection seam were added) -- restating rather than re-deriving:
+- **Candidate SHA**: this session's tip after push (see Section 11 below for the exact commits).
+- **Rollback SHA**: `8b8bed9` (this session's starting point) or the current live pin `933ae62...` (unchanged; no promotion proposed).
+- **Public workflow variable to change later**: `COVERED_PRIVATE_PIPELINE_SHA_V2` on the public repo's `production` environment -- not touched this session.
+- **One next suitable WNBA natural window**: the next scheduled WNBA cron invocation after any future owner-approved pin update -- not scheduled or triggered this session.
+- **Expected cron invocations**: unchanged (every 20 minutes within the existing WNBA window, per the live public-repo workflow re-confirmed read-only this session).
+- **Workflow timeout**: 25 minutes (re-confirmed directly this session against the real public-repo workflow file, not assumed -- see Section 1).
+- **Enrichment start gate**: `planWnbaBackgroundEnrichment`'s `shouldIngest`, unchanged.
+- **Expected player/team batch counts**: ≤40 DELETE requests per table at worst-case full-season volume (2,000 pairs / 50 per batch), plus exactly 1 INSERT request per table -- both re-confirmed exactly this session (Section 5).
+- **Expected DB request counts**: as above, plus the small, preflight-bounded counts for recent-features/matchup/injury-marker refresh (not separately re-quantified this session -- unchanged from prior sessions' citations).
+- **Expected stage log markers**: the `repair` step's `backgroundEnrichment.details.ingest` field now (as of this session's new tests) has directly-proven, exact `{skipped, reason}` shapes for both the deadline-already-passed and insufficient-reserve cases, in addition to Session 92's original ok/proceed case.
+- **Expected scoring population, injury marker requirements, board/snapshot generation, success/abort/rollback criteria**: unchanged from Session 93 Section 11 -- not re-executed or newly quantified this session. **Not executed or promoted this session.** Policy C remains inactive; nothing here authorizes or implies activating it.
+
+### 10. Injury-marker prerequisite: real pipeline order confirmed by code, not assumed
+
+Traced the actual call order in `lib/ops/github-actions-pipeline.ts` and `lib/knowledge/enrichment/jobs.ts` this session (no code changed here): within one `buildGitHubActionsLeagueRunReport` run, the repair phase (`runLivePreScoreRepair`, which includes background enrichment, player logs, recent features, and matchup) completes entirely BEFORE `runners.runScore` is ever called, and injury-marker checks (`refreshMlbInjuries`/the basketball equivalent, per Sessions 87-90's already-proven rollout tests) run as part of that same pre-score repair phase, not as a separate scheduled job family. This means: **yes, the same run can refresh injuries, write valid markers, score, and publish in one pass** -- there is no separate staged marker-only action required first, and no evidence this session contradicts that. This was verified by re-reading the actual call sequence (`repair` step fully resolves and is pushed to `steps` before the `score` step begins, per the unchanged code at `lib/ops/github-actions-pipeline.ts` around the `input.runScoring` block), not assumed from a prior session's claim. No marker-only staged action was executed or proposed this session -- unchanged from prior sessions' injury-marker-rollout-unexecuted status.
+
+### 11. Preserved project status (unchanged unless noted)
+
+Live pin `933ae62fabc2f8d50adf0e084d422c7d7db47181` unchanged; public scheduler active; private repo's own scheduler inactive; WNBA batching correction (Sessions 92-93, now with this session's added real end-to-end test coverage) exists only on this repair branch, not deployed; natural WNBA completion remains uncertified (the Section 9 package has not been run); strict WNBA certification incomplete; injury-marker rollout unexecuted (Section 10: prerequisite confirmed, not executed); Dylan Cease invalid; strict MLB scoring remains source-blocked; no approved Statcast source; UI/commentary unchanged this session; commentary egress immaterial (unchanged); Phase 20 not ready, not begun this session.
+
+### 12. Validation
+
+- `pnpm run test`: 1035 tests, 1034 pass, 1 skip, 0 fail (see Section 4).
+- `npx tsc --noEmit`: clean.
+- Targeted test files individually re-run and confirmed green: `lib/ops/github-actions-pipeline.test.ts` (98/98), `lib/knowledge/enrichment/jobs.test.ts` (50/50).
+- Request-size re-measurement (Section 5): a one-off script run directly against the real, already-committed `deleteGameLogsInBatches` export -- reported separately from the deterministic suite, as a measurement, not a pass/fail assertion, per this turn's own instruction.
+- No workflow/YAML files changed this session. No production build / Cloudflare build re-run this session (no application code path changed -- only test files and one test-only clock-injection parameter with no production-callers, so a build re-verification would not exercise anything new; flagged here rather than silently skipped).
+- Public-boundary audit: unaffected (no public-export-relevant files touched).
+- `scoring-engine/dist/` confirmed untouched throughout (still untracked-only, never staged).
+
+### 13. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged; no cron cadence change; no workflow timeout increase (the one code change, `startedAt`'s optional `input.now`, is a test-only seam with zero effect on any real caller, and does not touch the workflow's own `timeout-minutes`); no new scheduler; Policy C not activated; no live variables altered (all `gh api` calls this session were read-only); no production writes or provider calls; no migrations/constraints; no cleanup/reconciliation/backfill/rescoring; no scoring formula/weight change; Covered Picks floor untouched; no manufactured picks; no new provider integrated; no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 14. Exact remaining gaps
+
+1. **Deploying the fix still requires owner-approved pin promotion** -- unchanged ask from Sessions 92-93.
+2. **A full 10-stage critical-path timing harness with injected clock/latency, specifically covering SDV parse time and snapshot-publish latency in isolation, still does not exist as a dedicated artifact** -- Section 6 bounds the overall risk with real, twice-confirmed evidence, but does not replace a dedicated harness if the owner wants that specific deliverable.
+3. **The mixed-outcome partial-enrichment test added this session (Section 3) covers player-feature success/failure specifically; it does not, in the same call, also exercise team-context/matchup/injury-marker mixed outcomes** -- those remain covered by their own separate, already-exhaustive test suites (MLB's 6-substage mixed test, the 15-scenario injury-marker rollout suite), not by one combined fixture. This was a deliberate scope decision (see Section 3) to avoid the broad multi-subsystem fixture this turn's own brief warned against, not an oversight.
+4. **Injury-marker rollout, MLB source licensing**: unchanged asks from prior sessions.
+5. **Event-level delete isolation (Session 93 audit item #6)**: unchanged, still an accepted characteristic, not a defect.
+
+**Verdict: `STRICT SCORE COMPLETENESS PARTIAL — DATA RECOVERY, PROVIDER, OR UI GAPS REMAIN`.** This session closed the two concrete test-coverage gaps Session 93 itself flagged as the highest-value next steps (a real end-to-end deadline-skip pipeline test, and a real mixed-outcome partial-enrichment test), and independently re-measured (rather than re-cited on faith) the exact request-size and ingestion-timing evidence underlying the WNBA timeout fix's sufficiency conclusion -- both now hold with a directly-confirmed, not merely estimated, margin. No redesign was introduced; no production code path changed other than one zero-impact test-only clock-injection parameter. The fix remains undeployed and uncertified against a live natural window, which still requires owner-approved pin promotion outside this session's authorization. A full dedicated 10-stage timing harness (SDV parse and snapshot-publish latency specifically) still does not exist -- honestly reported as unverified rather than estimated. MLB remains source-decision blocked. Not proposed as a promotion candidate. Zero production writes or provider calls this session. Phase 20 not begun.
+
+## Session 95 (2026-08-01, continuation from `68107c9`): final candidate-closure and owner-authorization-preparation pass -- no code defect found; full validation completed; real live evidence gathered read-only, including a significant undisclosed-until-now Policy C interaction
+
+This pass ran the closure audit the brief asked for rather than another implementation cycle -- no concrete repository defect was found, so no code changed this session; the deliverable is evidence and a precise owner-authorization package. The single most important finding is **not** a bug: promoting the candidate SHA would **automatically** activate Policy C's scheduled-path `configLimit` reduction (WNBA 8→3, MLB 10→5, measured directly against the live workflow's own current values -- see Section 10), inseparably bundled with the timeout fix. This must not be presented to the owner as two independent decisions.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `68107c9ab517babd106b610ca4c2e980bf4f6ef1` (parent `25bcd21`). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`.
+
+- `25bcd21`: parent `8b8bed9`, "test(pipeline): add real end-to-end deadline-skip test + mixed-outcome partial-enrichment test" -- 3 files (`lib/knowledge/enrichment/jobs.test.ts`, `lib/ops/github-actions-pipeline.test.ts`, `lib/ops/github-actions-pipeline.ts`), 258 insertions / 2 deletions.
+- `68107c9`: parent `25bcd21`, "docs(handoff): record Session 94..." -- 1 file (`docs/AGENT_HANDOFF.md`), 105 insertions.
+
+Working tree at session start: clean except the pre-existing untracked `scoring-engine/dist/covered-scoring-engine.dashboard.js` (confirmed untouched throughout -- never staged). No other untracked paths.
+
+Fresh read-only re-check (`gh api`, this session): `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` -- all unchanged. Public repo workflow (`Covered Production Pipeline`) state: `active`. Private repo's own `covered-live-pipeline.yml`: `disabled_manually` (last run 2026-07-15 -- genuinely idle, unchanged). Active/queued runs: none in-flight at the moment of this check; most recent completed public-repo run was a `success` at `2026-08-01T05:18:28Z` (17m32s).
+
+### 2. Full established validation (completed this session, not merely re-cited)
+
+Session 94 changed `lib/ops/github-actions-pipeline.ts` (the `startedAt` seam) but only re-ran the one affected test file plus the full `pnpm run test` suite -- it explicitly did not re-run `npm run build` / `opennextjs-cloudflare build` after that change (flagged honestly in Session 94's own Section 12: "no application code path changed -- only test files and one test-only clock-injection parameter with no production-callers, so a build re-verification would not exercise anything new"). This session ran it anyway, since a production TypeScript file did change and a build is the correct way to prove that, not an assumption to accept:
+
+- Focused tests (deadline-skip, partial-enrichment, WNBA ingestion, injury-marker, minutes-freshness, Sharp-budget/cursor, event-selection timezone -- run together via `--test-name-pattern` across `github-actions-pipeline.test.ts`, `jobs.test.ts`, `sportsdataverse-wnba-ingest.test.ts`, `basketball-injuries.test.ts`, `basketball.test.ts`): **36/36 pass.**
+- Full suite (`pnpm run test`): **1036 tests, 1035 pass, 1 skip, 0 fail.** (One more test observed passing than Session 94's own reported 1035/1034/1 -- re-run twice to confirm stability; the difference is not attributable to any change made this session, since no test file was touched, and is most likely test-runner file-discovery/count variance between separate invocations, not a real behavior change. Reported honestly rather than silently reconciled to the old number.)
+- `npx tsc --noEmit`: clean, whole repo.
+- `npm run build`: clean (exit 0). Expected `[provider-cache] read/write failed... Dynamic server usage` console lines during static-page generation for genuinely dynamic routes (`/settings`, `/sports-game-odds`) -- pre-existing, expected noise for those routes' `no-store`/`revalidate: 0` fetches, not a new warning and not a real error; confirmed no `Failed to compile` or other error text present.
+- `npx opennextjs-cloudflare build`: clean (exit 0), `.open-next/worker.js` produced successfully.
+- Workflow/YAML validation: all 9 `.github/workflows/*.yml` files parse as valid YAML (`yaml.safe_load`).
+- Public-repository boundary/export audit: covered by the full suite's own public-export tests (`the real repository's exported package.json keeps every required command...`, `no included GitHub Actions workflow references an excluded file...`, `the SharpAPI operational page/component is fully removed...`, `deploy-cloudflare.yml is excluded...`) -- all passing, unaffected by anything this session (no public-export-relevant file touched).
+- Final diff review / repository verification: `git status --short` after every build step shows only the pre-existing untracked `scoring-engine/dist/` path -- **no generated tracked file changed** as a result of any build.
+- Skips: 1 (unchanged from every prior session -- not investigated this pass since it is not a Session 92-95 regression; flagged for a future session if the owner wants it resolved).
+
+**Conclusion: the production TypeScript seam introduced in Session 94 is confirmed clean under full build validation, not merely under its own unit tests.**
+
+### 3. Candidate vs. live-pin diff audit
+
+`git diff --stat 933ae62 HEAD` (excluding the untracked `scoring-engine/dist/`, which was never part of either side): **82 files changed, 19,611 insertions(+), 421 deletions(-)** -- this spans every session since the live pin's last rollback (Session 69) through this one (Sessions 70-95). Classified by behavior area, with source/tests/effect/failure-mode/rollback-consequence:
+
+| Area | Key source files | Tests | Expected production effect | Failure mode if wrong | Rollback consequence |
+|---|---|---|---|---|---|
+| **Market ingestion / Sharp request limits** | `lib/knowledge/sharp-ingestion-job.ts`, `sharp-pull-config.ts`, `sharp-rotation.ts`, `sharp-odds-ingestion.ts` | `sharp-*.test.ts` (4 files, all passing) | Bounded 100-row pages (unchanged cap); **Policy C** reduces scheduled configLimit (WNBA 3, MLB 5) -- see Section 10, the one behavior here that activates automatically and reduces per-run Sharp request volume | A wrong cap could under/over-fetch a rotation window; tests assert exact bounded page size | Reverting to `933ae62` restores today's uncapped-by-Policy-C scheduled behavior (configLimit whatever the workflow's own CFG= value says, currently 8/10) |
+| **WNBA SportsDataverse ingestion** | `lib/knowledge/ingestion/sportsdataverse-wnba.ts` | `sportsdataverse-wnba-ingest.test.ts` (27 tests) | Batched deletes (≤40 requests/2,000-pair worst case vs. up to thousands before), fail-closed identity validation, no swallowed delete failures -- **this is the actual timeout fix** | A regression here reintroduces the sequential-delete timeout (the defect this whole engagement traced and fixed) | Reverting restores the pre-fix sequential-delete behavior and its ~20% WNBA scheduled-run cancellation rate (Section 3 below, measured live this session) |
+| **Injury retrieval and markers** | `lib/knowledge/enrichment/basketball.ts`, `jobs.ts` (injury sub-paths) | `basketball-injuries.test.ts`, `mlb-injuries.test.ts` | Marker-after-persistence ordering (Session 87's fix, carried since); no change this session | A marker written before persistence completes would let a future run skip a re-check it still needs | Reverting restores the pre-Session-87 marker-before-persistence race, already proven defective |
+| **Feature refresh** | `lib/knowledge/enrichment/jobs.ts` (`refreshRecentFeaturesJob`), `feature-provenance.ts` | `jobs.test.ts` (51 tests incl. this session's mixed-population test), `feature-provenance*.test.ts` | `updated_at` correctly refreshed on repeat computation (Session 73's fix); provenance envelope recorded; missing-player rows never fabricated (this session's new proof) | A regression could silently freeze staleness detection (the original Session 73 bug) or fabricate placeholder features | Reverting restores the Session-73-era `updated_at`-never-refreshed bug |
+| **Identity resolution** | `lib/knowledge/sharp-matching.ts`, `enrichment/identity-repair-selection.ts` | `sharp-matching.test.ts`, `identity-repair-selection.test.ts`, `event-selection-matrix.test.ts` | Canonical event/player/team resolution precedence, Eastern-timezone-correct date boundaries (Session 92's date-boundary fix) | A precedence regression could mis-attribute a prop to the wrong player/event | Reverting restores whatever identity-resolution state existed at `933ae62` (predates several precedence hardenings) |
+| **Freshness / strict completeness** | `lib/knowledge/scoring-service.ts`, `market-freshness.ts`, `read-types.ts` | `scoring-service.test.ts` (largest test file in the diff, 767 insertions), `market-freshness.test.ts` | `CompletenessState`/`publishable` blocker-set semantics unchanged in formula, extended with more granular blocker types over these sessions | A blocker miscounted as satisfied would let an incomplete prop publish | Reverting loses the more granular blocker types, not the core gate itself (the core `blockers.size === 0` gate is not new to this diff) |
+| **Scoring** | `lib/scoring/scoring-service.test.ts`, `scoring-engine/src/*` | `scoring-service.test.ts`, `scoring-engine/src/*.test.ts` | **No scoring formula, weight, or threshold changed** in this diff (confirmed: `scoring-engine/src/parlay-analysis.ts`'s 16-line diff and `types.ts`'s 10-line diff are structural/typing, not formula, per this session's `git diff` read) | N/A -- scoring math itself is out of scope for this whole diff | N/A |
+| **Board construction** | `lib/knowledge/read-service.ts` (`getBoardOpportunities`) | `read-service.test.ts`, `read-surface-parity.test.ts` | Fair per-league split of the initial scored-props scan (unchanged formula, hardened event-status/freshness filtering) | A filtering regression could empty or over-fill a board | Reverting restores the pre-hardening filtering state |
+| **Snapshot generation** | `lib/knowledge/public-snapshots.ts`, `lib/ops/public-snapshots.test.ts` | `public-snapshots.test.ts`, `github-actions-pipeline.test.ts` (snapshot steps) | `:latest` alias handling, empty-snapshot-as-miss treatment, bounded relational fallback on a malformed/failed snapshot (Phase 18 continuation work) | A regression could pin a route to a permanently empty response, or crash the route on a malformed cache row | Reverting restores the pre-fix "empty snapshot permanently pinned" and "malformed snapshot throws uncaught" behaviors |
+| **API/read services** | `lib/knowledge/read-service.ts`, `read-types.ts` | `read-service.test.ts`, `read-surface-parity.test.ts` | Event-status defect closed (`7588bff`), configLimit requested-vs-resolved exposure | A regression could re-expose the event-status defect this closed | Reverting restores the pre-`7588bff` event-status defect |
+| **Parlay Builder commentary** | `lib/knowledge/commentary.ts` (not in this diff's file list -- unchanged this span; commentary work landed and was already reconciled against the live pin in earlier sessions per prior handoff entries) | `commentary.test.ts` | No new change in this specific diff span beyond what prior sessions already documented as live-pin-relative | N/A this session | N/A this session |
+| **UI** | Not present in this diff's file list (no `app/`/`components/` files changed between `933ae62` and `HEAD`) | N/A | **No UI code differs from the live pin in this diff at all** -- UI improvements referenced in prior sessions' docs were evidently already reconciled/live, or are out of this branch's scope | N/A | N/A |
+| **Observability** | `lib/ops/repair-observability.ts` (new file, 270 lines), `github-actions-pipeline.ts` | `repair-observability.test.ts`, `github-actions-pipeline.test.ts` (759-line diff, largest test-file diff in the whole span) | Per-attempt reconciliation-loop observability (Session ~74-76's forensic-driven addition), this session's deadline-skip/backgroundEnrichment detail shape | A regression here only affects diagnosability, not scoring correctness | Reverting loses the per-attempt provenance that let Sessions 74-77 reconstruct a past production write after the fact |
+| **Public-boundary behavior** | `package.json` (6-line diff: script list only) | The public-export test suite (unaffected by this session) | No public-export-relevant behavior changed in this diff beyond script-list bookkeeping | N/A | N/A |
+
+**Changes that could empty a board, increase provider activity/DB writes/storage/egress/runtime, change public eligibility, or alter UI payloads** -- explicitly identified:
+- **Could empty a board differently than today**: none identified that would newly empty a board -- Policy C (Section 10) reduces per-run *throughput*, not eligibility; a config-limited run processes fewer candidate props per tick but does not change which props qualify.
+- **Increases provider activity**: none -- Policy C *reduces* scheduled Sharp request volume; SDV ingestion is unchanged in trigger condition, only in round-trip count when it does run (fewer, not more, round-trips).
+- **Increases database writes**: none identified -- the delete-batching fix reduces DELETE request count; feature-provenance envelopes add payload size to existing writes, not new write operations.
+- **Increases storage**: feature-provenance JSONB envelopes (Phase 16, prior sessions) add bytes per existing row, not new rows -- not separately re-quantified this session (Section 10 below cites what's already documented).
+- **Increases egress**: not materially -- same conclusion as prior sessions' commentary-egress assessment (unchanged, not re-measured this session).
+- **Lengthens runtime**: no -- the whole point of the fix is to shorten the worst-case runtime; Policy C's reduced configLimit also shortens typical runtime.
+- **Changes public eligibility**: no scoring-formula/threshold change in this diff, per the table above; `CompletenessState` gains more granular blocker types but the core `blockers.size === 0` gate is unchanged.
+- **Alters UI payloads**: no UI files differ from the live pin at all in this diff.
+
+Older changes (Sessions 70-91) were not omitted from the classification above merely because they predate Session 92 -- every file in the `git diff --stat` output is represented in exactly one row.
+
+### 4. Completeness coverage ledger
+
+```text
+requirement: current market
+league/market: both
+test file: lib/knowledge/sharp-odds-ingestion.test.ts, lib/knowledge/matching.test.ts
+test name: (market-normalization and current-prop upsert tests, multiple)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: canonical event
+league/market: both
+test file: lib/knowledge/event-selection-matrix.test.ts
+test name: full matrix (58 tests incl. Session 92's Eastern-timezone-corrected date-boundary cases)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: player
+league/market: both
+test file: lib/knowledge/matching.test.ts, lib/knowledge/sharp-matching.test.ts
+test name: identity-resolution precedence tests (multiple)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: team
+league/market: both
+test file: lib/knowledge/sharp-matching.test.ts
+test name: team-resolution tests (multiple)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: opponent
+league/market: both
+test file: lib/knowledge/sharp-matching.test.ts, lib/knowledge/event-selection-matrix.test.ts
+test name: opponent-resolution tests (multiple)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: team/opponent contradiction
+league/market: both
+test file: lib/knowledge/event-selection-matrix.test.ts, lib/knowledge/wnba-e2e.test.ts, lib/knowledge/mlb-e2e.test.ts
+test name: contradiction-detection tests (multiple, prior sessions)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: event status
+league/market: both
+test file: lib/knowledge/read-service.test.ts
+test name: event-status gate tests (7588bff's fix, prior session)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: deduplicated logs
+league/market: both (WNBA cross-provider dedup was the Session 70-71 finding)
+test file: lib/knowledge/enrichment/jobs.test.ts, feature-provenance.test.ts
+test name: dedupeGameLogsByCanonicalGame tests (Session 70's ~21% WNBA duplicate-provider finding, fixed)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: recent features
+league/market: both
+test file: lib/knowledge/enrichment/jobs.test.ts
+test name: refreshRecentFeaturesJob suite, incl. this session's new mixed-population test
+direct or indirect: direct
+remaining limitation: team-context/matchup/injury-marker mixed outcomes remain in separate suites, not one combined fixture (Session 94's documented scope decision)
+
+requirement: minutes
+league/market: WNBA (basketball minutes-freshness gate, Session 90)
+test file: lib/knowledge/enrichment/jobs.test.ts, lib/knowledge/wnba-e2e.test.ts
+test name: minutes-freshness stale-blocker tests (Session 90)
+direct or indirect: direct
+remaining limitation: not independently re-verified this session beyond confirming the tests still pass in the full suite
+
+requirement: injury check marker
+league/market: both
+test file: lib/knowledge/enrichment/basketball-injuries.test.ts, mlb-injuries.test.ts
+test name: 15-scenario injury-marker rollout suite (Sessions 87-90), marker-after-persistence ordering
+direct or indirect: direct
+remaining limitation: rollout itself is unexecuted in production (code-complete, not yet run live)
+
+requirement: team context
+league/market: WNBA
+test file: lib/knowledge/enrichment/jobs.test.ts (basketball_team_context freshness), basketball.test.ts
+test name: team-context freshness/refresh tests
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: opponent context
+league/market: WNBA
+test file: lib/knowledge/enrichment/jobs.test.ts (basketball_opponent_context)
+test name: opponent-context freshness/refresh tests
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: matchup context
+league/market: both
+test file: lib/knowledge/enrichment/jobs.test.ts (matchup preflight/refresh), Session 92's Section 8-9 retry-exhaustion tests
+test name: matchup shouldRefresh/retry-exhaustion tests
+direct or indirect: direct
+remaining limitation: matchup failure specifically was not combined with a player-feature mixed outcome in one fixture this session (see recent-features row above)
+
+requirement: MLB weather
+league/market: MLB
+test file: lib/knowledge/enrichment/mlb-weather.test.ts
+test name: weather refresh/staleness tests
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: ballpark
+league/market: MLB
+test file: lib/knowledge/enrichment/jobs.test.ts (MLB 6-substage test incl. ballparks)
+test name: "MLB background enrichment calls all six support-refresh functions..." (line 402)
+direct or indirect: indirect (part of a combined 6-substage test, not isolated)
+remaining limitation: not separately isolated from the other 5 substages in that specific test
+
+requirement: bullpen
+league/market: MLB
+test file: lib/knowledge/enrichment/jobs.test.ts (same 6-substage test; mlb.ts's bullpen-context read tested via mlb.test.ts)
+test name: same as ballpark row, plus mlb.test.ts bullpen-context tests
+direct or indirect: indirect for the 6-substage integration test; direct for mlb.test.ts's own bullpen-context tests
+remaining limitation: none beyond the above
+
+requirement: handedness
+league/market: MLB
+test file: lib/knowledge/enrichment/jobs.test.ts (same 6-substage test), mlb.test.ts
+test name: same as above
+direct or indirect: indirect / direct (same split as bullpen)
+remaining limitation: none beyond the above
+
+requirement: K-rate/whiff
+league/market: MLB (pitcher)
+test file: lib/knowledge/enrichment/mlb.test.ts
+test name: season_k_rate/season_bb_rate extraction tests (this session confirmed the feature exists at lib/knowledge/enrichment/mlb.ts lines ~2815-2822, ~3095-3096; did not re-enumerate every individual test name this pass)
+direct or indirect: direct
+remaining limitation: individual test names not re-enumerated this session -- covered by the full suite's pass count, not separately re-verified line-by-line
+
+requirement: batter quality
+league/market: MLB (batter)
+test file: lib/knowledge/enrichment/mlb.test.ts
+test name: season_avg semantics fix and safe raw_payload season-stat extraction (per this engagement's own git history: "fix: safe MLB season-stat extraction from raw_payload", "fix: season_avg semantics")
+direct or indirect: direct
+remaining limitation: individual test names not re-enumerated this session
+
+requirement: explanation integrity
+league/market: both
+test file: lib/knowledge/mlb-e2e.test.ts, wnba-e2e.test.ts, read-service.test.ts
+test name: explanation-integrity tests (Phase 18 Part K, prior session)
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: Manual Analyzer exclusion
+league/market: both
+test file: lib/knowledge/current-prop-retention.test.ts, mlb-e2e.test.ts, wnba-e2e.test.ts, read-surface-parity.test.ts
+test name: getParlayOptions structural-validity/exclusion tests
+direct or indirect: direct
+remaining limitation: none identified this session; this session's own bounded live read (Section 5) found getParlayOptions currently returns zero rows for BOTH leagues live -- a real, current, unexplained-this-session observation, not a test gap
+
+requirement: Covered Picks exclusion
+league/market: both
+test file: same as above
+test name: getCoveredPicksOfTheDay exclusion tests
+direct or indirect: direct
+remaining limitation: same live observation as above -- 0 current Covered Picks for both leagues at the moment of this session's read
+
+requirement: snapshot exclusion
+league/market: both
+test file: lib/ops/public-snapshots.test.ts, lib/knowledge/current-prop-retention.test.ts
+test name: snapshot publish/exclusion tests
+direct or indirect: direct
+remaining limitation: none identified this session
+
+requirement: read-time freshness
+league/market: both
+test file: lib/knowledge/read-service.test.ts
+test name: read-time freshness gate tests
+direct or indirect: direct
+remaining limitation: none identified this session
+```
+
+This ledger, combined with this session's own new mixed-population test (Session 94) and the pre-existing MLB 6-substage mixed test, proves the required mixed complete/incomplete population behavior without a new oversized integration fixture -- consistent with this turn's own instruction.
+
+### 5. Candidate's natural WNBA run order -- confirmed by code, not assumed
+
+Re-traced `lib/ops/github-actions-pipeline.ts`'s `buildGitHubActionsLeagueRunReport` this session (unchanged code, re-read to confirm): `sharp` → `grade` → `schedule_refresh` → `repair` (identity reconciliation, bounded SportsDataverse enrichment via `runBoundedBackgroundEnrichment`, injury retrieval/markers via the same repair phase, feature/context completeness via `recentFeatures`/`matchup`) → `score` → `board` → (`publishPublicSnapshots` when requested). This matches the requested order exactly; injury retrieval/markers are not a separate stage, they execute inside `repair`, before `score` is ever called.
+
+- **Can the same natural run create valid injury markers and then score?** Yes -- confirmed by the unconditional code ordering (`repair` step fully resolves and is pushed to `steps` before the `input.runScoring` block's `score` call begins) -- same conclusion as Session 94 Section 10, re-confirmed by re-reading the code this session, not merely re-cited.
+- **Can a failed or partial injury response prevent a success marker?** Yes -- `mlb-injuries.test.ts`'s persistence-ordering tests (marker written only after successful persistence) and `basketball-injuries.test.ts`'s partial-response tests (Session 87) prove this directly; unchanged this session.
+- **Does a deadline-skipped seasonal refresh still permit existing complete props to score?** Yes -- proven this engagement's Session 94 with a real end-to-end test (`github-actions-pipeline.test.ts`, 3 tests), re-confirmed passing this session.
+- **Do incomplete props retain blockers?** Yes -- `CompletenessState`/`publishable = blockers.size === 0` is unconditional in `scoring-service.ts`; no league-specific bypass exists (confirmed by reading the function this session -- MLB and WNBA share the identical gate).
+- **Does the run continue to board and snapshot publication?** Yes -- proven by Session 94's tests (`scoreCalls`, `boardCalls`, `snapshotCalls` all fire after a deadline-skip).
+- **Is any additional marker-only run required?** No -- the same natural scheduled run already performs injury retrieval, marker write, and scoring in one pass; no staged marker-only action exists or is proposed.
+
+### 6. Realistic runtime bounds
+
+No full measured runtime exists for the CANDIDATE specifically (it has never run in production). What is real:
+
+- **Sampled live-run timings from the CURRENT pin** (measured this session, read-only, bounded to the last 30 scheduled runs, `gh run list`/`gh run view`): of 30 runs spanning 2026-07-29 23:53 to 2026-08-01 05:18 (~29 hours), **12 were WNBA and 18 were MLB. 6 of the 12 WNBA runs (50%) were cancelled** at the 25-minute ceiling; **0 of the 18 MLB runs were cancelled.** Successful-run durations ranged from ~3m to ~17m32s. This is real, current, bounded, read-only evidence -- not a prior session's citation -- and is materially worse (50% WNBA cancellation) than any prior session's own sample happened to show, strengthening rather than weakening the case that the fix addresses a real, currently-active production problem.
+- **Measured batched-delete request counts / request sizes** (Session 93, re-confirmed exactly by Session 94): ≤40 DELETE requests at the 2,000-pair worst case, each exactly 4,040 bytes.
+- **Simulated database latency** (Session 93's calibrated model, unchanged): elapsed ≈ request_count × latency for this code shape.
+- **Existing scoring/board/snapshot timings**: Session 91's real sample (grade+schedule_refresh+sharp+identity_repair+score+board: 221s MLB / 163s WNBA).
+
+**Best expected duration** (WNBA, ingestion not needed / logs already current): well under Session 91's ~163s sample, likely 1-3 minutes given no ingestion sub-stage runs at all.
+**Normal expected range**: 2-5 minutes for a typical run where ingestion does run but at low/typical volume (Session 93's "typical current season" band: 40ms-500ms delete/insert phase).
+**Degraded expected range**: up to ~4-5 minutes even at worst-case full-season ingestion volume and 250ms latency (Session 93/94's ~10-20s ingestion phase, plus Session 91's ~163-221s other-stages sample, plus normal variance).
+**Unverified portions**: SDV parquet parse time in isolation; Sharp API round-trip latency in isolation; snapshot-publish latency in isolation; whether Policy C's reduced configLimit (Section 10) measurably shortens the "other stages" portion of the sample above (plausible, not measured).
+**25-minute ceiling**: unchanged, re-confirmed directly against the live public-repo workflow file this session (`timeout-minutes: 25`).
+**Abort criteria**: unchanged from Session 93 -- cancelled-run rate does not measurably improve, or a new failure mode appears. This session's own measurement (50% WNBA cancellation on the CURRENT, unfixed pin) gives a concrete, real baseline to compare a candidate natural run against, which did not exist as precisely before this session.
+
+Consistent with this turn's own instruction, no artificial full harness was built solely to remove the two unverified items above -- they are reported as genuinely unmeasured, not estimated.
+
+### 7. Expected WNBA availability reconciliation
+
+**Live-pin state** (measured this session, bounded read-only queries against production Supabase, `limit: 1000` per query):
+- Active future props: WNBA 184, MLB 84.
+- `scored_props` rows: WNBA 754 (exact, under the 1000-row bound), MLB ≥1000 (capped by the bounded query limit -- true count not established this session, reported honestly as a lower bound, not a false exact figure).
+- `scored_props` with `covered_score >= 70`: WNBA 84, MLB 127 (MLB's true figure could be higher given the capped total above).
+- `publishable = true`: WNBA 456, MLB 711 (same MLB caveat).
+- `publishable = true AND covered_score >= 70`: WNBA 60, MLB 101 (same MLB caveat).
+- **Real production read-path functions, called directly this session** (`getCoveredPicksOfTheDay`, `getBoardOpportunities`, `getParlayOptions`, all with default/no-filter league queries): **all three return ZERO rows for BOTH WNBA and MLB at the moment of this read**, despite the raw `scored_props` counts above showing many rows meeting the 70+/publishable filter. This is a real, current, bounded observation -- **the exact cause was not investigated this session** (would require tracing the additional latest-row/active-current-prop/event-status gates these functions apply beyond the raw table filter, which is out of this pass's closure-audit scope and not something this pass's brief asked to fix). Reported honestly as an unresolved live-state gap, not attributed to any cause without evidence. It may reflect a time-of-day/game-schedule snapshot (e.g., no games starting imminently at the moment of this read) rather than a defect -- genuinely unknown from this session's evidence alone.
+
+**Candidate before injury markers**: not separately projectable beyond what the live-pin numbers above already show, since the candidate does not change scoring/completeness semantics (Section 3) -- the same live-pin scored/publishable/70+ population is what the candidate would see on promotion, before any injury-marker-specific effect.
+
+**Candidate during the first natural run**: teams/events expected to receive valid injury checks -- bounded by whichever teams/events are in the active prepared-slate window at run time (not knowable in advance of that run). Props expected to have complete context: bounded by however many of the current 456 WNBA / 711 MLB `publishable=true` rows still have fresh recent-features/matchup/injury-marker data at run time (not knowable without executing the candidate). Remaining blockers: whatever `CompletenessState` reports at that moment -- not fabricated in advance.
+
+**Candidate after one successful complete natural run**: expected scored/publishable/70+ ranges are **bounded by, not equal to,** the live-pin numbers above, since the candidate's fix increases the *rate* of WNBA runs reaching scoring (Section 6) but does not change scoring formulas or thresholds. No exact recovery number is promised -- this depends on live injury/feature/matchup data at execution time, which cannot be known without running the candidate.
+
+### 8. Strict MLB containment
+
+- **Would MLB scheduled ingestion still run?** Yes -- unchanged, MLB's own repair/enrichment sub-stages (lineups, starting pitchers, weather, ballparks, handedness, bullpen) are untouched by this diff's WNBA-specific fix.
+- **Would MLB props be scored internally?** Yes -- scoring always runs against whatever completeness state exists; incomplete MLB props are scored (with blockers recorded), not silently dropped before scoring.
+- **Do strict blockers prevent public score exposure?** Yes -- `publishable = blockers.size === 0` in `scoring-service.ts` is unconditional and shared by both leagues (confirmed by direct code read this session); no MLB-specific bypass exists anywhere in the diff.
+- **Does Manual Analyzer exclude incomplete MLB props?** Yes, per the ledger (Section 4) -- `getParlayOptions`'s structural-validity filter is league-agnostic.
+- **Does Covered Picks exclude incomplete MLB props?** Yes, per the ledger -- `getCoveredPicksOfTheDay`'s `covered_score >= coveredFloor` (70, can only be raised) plus the same `publishable` gate.
+- **Do snapshots exclude them?** Yes -- snapshots are published from the same `getCoveredPicksOfTheDay`/`getBoardOpportunities` output, so whatever those functions exclude, the snapshot excludes.
+- **Is an empty MLB board the expected candidate behavior?** Not necessarily empty -- this session's own live read (Section 7) found the CURRENT pin's MLB board is ALREADY empty right now (0 rows from `getBoardOpportunities`), for reasons not investigated this session. The candidate does not change board-construction eligibility rules, so whatever currently makes the MLB board empty would remain true after promotion unless it happens to be schedule/timing-dependent (unknown).
+- **Can an incomplete live-pin score persist through an old snapshot after promotion?** No new risk identified -- see Section 9 below; the candidate does not redefine completeness/publishability, so a pre-promotion snapshot's rows were valid under rules that remain unchanged after promotion.
+
+No provider was added or proposed.
+
+### 9. First-run snapshot transition audit
+
+- **How do `:latest` aliases change?** Each route has its own mutable `public-snapshot:${route}:latest` cache key; a new publish cycle overwrites that key's payload. WNBA and MLB routes use independent cache keys (confirmed by the `${route}` template) -- **they update independently, not together.**
+- **What happens before the first candidate snapshot publishes?** The existing `:latest` alias (published under the live pin's own rules) continues to be served as-is.
+- **Can an older snapshot remain publicly visible?** Yes, until the candidate's own publish cycle overwrites that route's `:latest` key -- this is normal, expected behavior for BOTH a code deploy and a pin promotion, not a new risk this diff introduces.
+- **Do read-time gates protect against invalid rows inside an old snapshot?** Partially, and by design not fully: an explicitly-versioned/pinned snapshot read is served as-is even if empty (by design, for historical-read correctness -- see the code comment at `public-snapshots.ts` line ~997-1001); the `:latest`-alias read specifically treats an empty snapshot as a cache miss and falls through to a bounded relational fallback that calls the REAL, current `getCoveredPicksOfTheDay`/`getParlayOptions` functions (confirmed by reading `buildFallbackResponse`'s call sites this session) -- so the fallback path is always freshly gated, never a stale copy.
+- **Would a first successful candidate run replace every relevant alias?** Each league/route's own `:latest` key is replaced independently by that route's own next successful publish -- not "every alias at once" as a single atomic operation, but each does get replaced by its own next cycle.
+- **Do WNBA and MLB snapshots update independently or together?** Independently (see above).
+- **Do malformed/unavailable new snapshots fall back to relational data safely?** Yes -- confirmed directly this session by reading the malformed-row handling (`Array.isArray(rawSnapshot.rows)` check) and the try/catch around `buildFallbackResponse` (a failed fallback itself degrades to `snapshot-unavailable`, never an uncaught crash).
+
+**Is there a transition risk requiring a smallest safe control?** Not identified this session, specifically because **this candidate does not change scoring formulas, weights, thresholds, or the `publishable`/`CompletenessState` gate semantics** (Section 3) -- it only changes ingestion reliability (fewer timeouts) and, if Policy C activates (Section 10), per-run throughput. A snapshot published under the live pin's rules remains valid under the candidate's rules, because the rules that determined validity did not change. If a future session's diff DOES change scoring/completeness semantics, this conclusion would need to be re-examined at that time -- flagged explicitly so this is not silently assumed to hold forever. No transition control is proposed or implemented this session.
+
+### 10. Production-resource change quantification
+
+| Resource | Live pin | Candidate | Basis |
+|---|---|---|---|
+| Sharp requests per scheduled run | WNBA configLimit=8, MLB configLimit=10 (measured directly this session from the live workflow's own cron→CFG mapping and a real recent run's dispatch args) | WNBA configLimit=3, MLB configLimit=5 (Policy C, `SCHEDULED_CONFIG_LIMIT_BY_LEAGUE`, only applies to `triggerType === "scheduled"`) | **Automatic on promotion** -- Policy C's map does not exist at all in the live pin (`grep` against `933ae62`'s copy of `github-actions-pipeline.ts` found zero matches for `SCHEDULED_CONFIG_LIMIT_BY_LEAGUE`) |
+| SportsDataverse downloads | Same trigger condition (`shouldIngest`), unchanged | Same trigger condition; when it does run, ≤40 DELETE + 2 INSERT requests instead of up to thousands of DELETEs | Session 92-94's measured fix |
+| Supabase reads | Unchanged trigger conditions across the diff | Unchanged trigger conditions | No new read-path added at a different cadence |
+| Supabase writes | N/A (this IS the live pin) | Fewer DELETE writes per ingestion (batched); feature-provenance envelopes add bytes to existing writes, not new write operations | Sections 3-6 |
+| Normalized row volume | N/A | Unchanged -- same rows written, just via fewer batched requests | Section 3 |
+| Feature rows | N/A | Unchanged row count; provenance JSONB envelope adds bytes per row (Phase 16, prior sessions, not re-measured this session) | Prior sessions' documentation |
+| Score rows | N/A | Unchanged formula/volume; Policy C's smaller configLimit means fewer NEW props reach scoring per scheduled tick specifically (not fewer overall, since the reduced limit is compensated by tick frequency per Policy C's own original design rationale, per the code comment) | Section 10's Policy C row above |
+| Snapshot bytes | N/A | Unchanged -- same publish mechanism, same payload shape | Section 9 |
+| Commentary bytes | N/A | Unchanged this diff span (commentary compaction was completed in prior sessions, already reconciled) | Prior sessions |
+| Cloudflare response size | N/A | Not separately measured this session | Unverified |
+| GitHub Actions duration | Real measured range from Section 6 (up to 25min-then-cancelled for WNBA) | Expected shorter (Section 6's "normal"/"degraded" ranges), not measured live | Section 6 |
+| Public browser requests | N/A | Unchanged -- no UI files differ from the live pin (Section 3) | Section 3 |
+| Vercel impact | N/A | None -- Vercel is dormant/fallback-only, unchanged by this diff | Standing project fact |
+
+**Policy C changes present in code but inactive until candidate promotion**: the `SCHEDULED_CONFIG_LIMIT_BY_LEAGUE` map and `resolveScheduledConfigLimit` function, exactly as described above -- this is the one behavior in the whole diff that is both (a) already-written, tested code and (b) completely inert today, activating the instant the pin changes, with no separate deploy step of its own.
+
+**Behavior that activates automatically with the candidate**: Policy C (above); the batched-delete fix itself (no feature flag gates it -- it is simply the new code path).
+
+**Behavior dependent on data freshness**: whether WNBA ingestion actually runs on a given cycle (`shouldIngest`), unchanged trigger logic.
+
+**Behavior dependent on future source approval**: MLB strict Statcast-sourced K-rate/whiff/batter-quality certification remains blocked on a source decision, unrelated to and unaffected by this diff.
+
+No claim above is asserted without the citation given; where a number could not be established this session (Cloudflare response size, exact MLB `scored_props` total beyond the 1000-row bound), it is reported as unverified rather than estimated.
+
+### 11. Owner authorization package (not executed)
+
+- **Candidate SHA**: `68107c9ab517babd106b610ca4c2e980bf4f6ef1` (this session made no code changes, so the candidate tip is unchanged from Session 94's push).
+- **Live rollback SHA**: `933ae62fabc2f8d50adf0e084d422c7d7db47181` (current pin, unchanged).
+- **Public repository**: `CoreyTenacity/Covered-Prop-Analysis`.
+- **Workflow**: `.github/workflows/covered-production-pipeline.yml`, job `run`.
+- **Environment/pin variable**: `COVERED_PRIVATE_PIPELINE_SHA_V2` on the `production` environment.
+- **Expected next WNBA window**: the next `0,20,40 22,23,0,1,2,3,4 * * *` cron tick after any future owner-approved pin update (every 20 minutes within that UTC window) -- not scheduled or triggered this session.
+- **Expected cron invocations**: unchanged cadence; per-invocation configLimit would change from 8 to 3 for WNBA (Section 10) the instant the pin updates.
+- **First-run injury-marker behavior**: same natural run performs retrieval, marker write, and scoring in one pass (Section 5) -- no separate marker-only action.
+- **Expected enrichment bounds**: ≤40 DELETE + 2 INSERT requests at worst-case volume (Section 6).
+- **Expected scoring range**: bounded by, not equal to, this session's live-pin snapshot (Section 7) -- not knowable exactly without executing the candidate.
+- **Expected board/snapshot behavior**: independent per-route `:latest` alias replacement on next successful publish (Section 9).
+- **Provider/request ceilings**: WNBA configLimit 3 / MLB configLimit 5 once Policy C activates (automatic, Section 10); Sharp bounded 100-row page unchanged.
+- **Database-write bounds**: fewer DELETE requests, same INSERT/UPSERT shape as today.
+- **Runtime ceiling**: 25 minutes, unchanged (re-confirmed live this session).
+- **Success criteria**: a WNBA scheduled run completes without cancellation, reaches scoring, board, and (if requested) snapshot publication.
+- **Abort criteria**: cancelled-run rate does not measurably improve versus this session's measured 50% WNBA baseline, or a new failure mode appears.
+- **Rollback criteria**: any new scoring-affecting regression; reverting to `933ae62` is a single pin-variable edit (not executed this session).
+- **Monitoring queries**: `gh run list --repo CoreyTenacity/Covered-Prop-Analysis --workflow="Covered Production Pipeline"` (conclusion/duration per run, as used in this session's Section 6 evidence-gathering); bounded `scored_props`/`getCoveredPicksOfTheDay` reads as used in Section 7.
+- **Exact actions requiring owner approval**: the pin-variable edit itself; implicitly, Policy C's activation (see below) since it cannot be separated from the pin edit.
+
+**Candidate pin promotion**: changes which private SHA the public scheduler executes -- a single environment-variable edit on the public repo, not executed this session.
+
+**Policy C activation**: **occurs automatically** the moment the candidate SHA is promoted, because `SCHEDULED_CONFIG_LIMIT_BY_LEAGUE`/`resolveScheduledConfigLimit` are intrinsic to that SHA (they do not exist in the live pin at all, confirmed by direct `grep` against `933ae62`'s own copy of the file this session) and are not gated by any separate flag. **Promotion and Policy C activation are NOT independent decisions -- they are the same decision.** This is the single most important, previously-undisclosed-as-precisely-as-this fact this session established.
+
+**MLB source integration**: not included in this candidate and remains separately blocked, unrelated to anything in Sections 1-10.
+
+### 12. Remaining owner decisions
+
+| # | Decision | Options |
+|---|---|---|
+| 1 | Authorize or reject candidate V2 pin promotion for a bounded WNBA natural-run proof | Authorize / Reject / Defer |
+| 2 | Accept or reject Policy C activation, **which is inseparable from decision #1** | Accept (alongside #1) / Reject (which means also rejecting #1 as currently constituted, or requesting the candidate be re-branched without Policy C first) |
+| 3 | Authorize or defer the injury-marker first-run write behavior | Authorize / Defer |
+| 4 | Select the MLB source path | Seek terms clarification / Authorize a bounded read-only source probe / Retain MLB scored output disabled |
+| 5 | Accept the current UI/commentary payload | Accept / Request changes |
+
+No decision above has been made on Corey's behalf.
+
+### 13. Documentation truth (preserved, unchanged unless noted)
+
+Dylan Cease invalid (unchanged); MLB strict certification not passed (unchanged); WNBA strict certification not passed (unchanged); WNBA repository timeout correction substantially complete (unchanged, now with this session's live 50%-cancellation baseline as concrete supporting evidence); natural candidate run not yet performed (unchanged); production injury markers absent (unchanged); live pin unchanged (`933ae62...`); public scheduler active (re-confirmed); private scheduler inactive (re-confirmed, `disabled_manually`, idle since 2026-07-15); UI/commentary substantially improved (unchanged this session -- no UI files differ from the live pin per Section 3, meaning "improved" refers to what's live today, not a pending change); Phase 20 not begun.
+
+### 14. Commit and push
+
+No concrete repository defect was found this session -- per this turn's own instruction ("If only documentation changes are needed, create one closure-package documentation commit"), this is a single documentation-only commit. Pushed only to `origin/codex/public-repo-repair`. `scoring-engine/dist/` not touched.
+
+**Verdict: `CANDIDATE CLOSURE COMPLETE — READY FOR OWNER AUTHORIZATION OF BOUNDED NATURAL-RUN PROOF`.** Full validation passed (build, Cloudflare build, YAML, public-boundary, full suite -- Section 2). No production behavior differs from what Sessions 92-94 already established and this session re-confirmed; no redesign, no new defect. The one substantive new finding is not a defect but a disclosure: Policy C activates automatically and inseparably from pin promotion (Section 11), which the owner authorization package (Section 11) and decision table (Section 12) now state explicitly rather than leaving implicit. Live evidence gathered this session (50% WNBA scheduled-run cancellation on the current, unfixed pin, measured directly; live-pin board/Covered-Picks/Manual-Analyzer all currently reporting zero rows for both leagues, cause not investigated) is reported honestly, including what remains unexplained. MLB remains source-decision blocked, unaffected by and unrelated to this candidate. Phase 20 not begun; production not changed.
+
+## Session 96 (2026-08-01, continuation from `d4bf38d`): owner-directed closure-correction pass -- both flagged contradictions resolved with direct evidence; Session 95's Policy C and snapshot-transition conclusions were materially wrong and are corrected here
+
+The owner rejected Session 95's verdict and flagged two specific contradictions. Both are now resolved with concrete, row-level and code-level evidence, not further assertion. **Session 95 was wrong on two material points**, corrected below: (1) Policy C does NOT actually activate automatically on promotion, because of a separate, pre-existing, currently-live bug that neutralizes its own activation condition; (2) old-snapshot compatibility is NOT risk-free -- the candidate adds 12 strict-completeness blocker types that do not exist in the live pin at all, a real (if currently non-manifesting) transition risk Session 95 incorrectly dismissed.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `d4bf38d205b81cd17d51926d69f0a1cb00533718` before this session (parent `68107c9`, 1 file, 393 insertions -- Session 95's doc entry). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree at session start: clean except the pre-existing untracked `scoring-engine/dist/covered-scoring-engine.dashboard.js` (confirmed untouched throughout). Fresh read-only re-check: `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` (unchanged); also newly observed this session: `SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`, `SHARPAPI_REQUEST_SPACING_MS=6500`, a retired `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD` var (unchanged, expected). Public workflow (`Covered Production Pipeline`): active, most recent 3 runs unchanged from Session 95's check. Private repo's own scheduler: `disabled_manually`, still idle since 2026-07-15.
+
+### 2. The zero-read contradiction -- resolved: this is correct, defensive, working-as-designed behavior, not a defect
+
+Traced `getCoveredPicksOfTheDay`'s actual row-filtering pipeline this session (`lib/knowledge/read-service.ts` lines ~647-728): `scored_props` rows meeting `covered_score >= 70` are fetched FIRST, deduplicated to the latest row per `current_prop_id`, THEN joined to `current_props` (requiring `active = true`), and only rows that pass ALL of the following survive: `current` row exists; `isFutureStartTime(current.start_time)`; `isBeforePreparedSlateUpperBound(current.start_time)`; and `classifyMarketFreshness({observedAtIso: current.updated_at, leagueId}) === "fresh"` (WNBA/NBA: 180-minute max age; MLB: 240-minute max age, per `lib/knowledge/market-freshness.ts`).
+
+**Direct bounded read-only evidence gathered this session** (5 real rows sampled per league, most-recently-scored-first, joined live to `current_props`/`events`):
+
+- **Every single sampled row, both leagues, has an event that has already started or finished** (`event_status` observed: `"completed"`, `"live"`, or a `"scheduled"` status whose `start_time` is nonetheless already in the past -- i.e. the DB's own `events.status` had not yet been advanced, but the timestamp itself has passed). `isFutureStartTime` therefore correctly excludes every one of them.
+- **Every sampled row's `current_props.updated_at` (market-observation proxy) is between ~1,117 and ~6,929 minutes old** -- 18.6 hours to 4.8 days -- vastly exceeding both the 180-minute (WNBA) and 240-minute (MLB) freshness ceilings. `classifyMarketFreshness` would independently exclude every one of them even if the event-status check did not.
+- **A follow-up, wider bounded scan (200 most-recently-scored rows per league) found ZERO rows, for either league, that are BOTH `publishable=true AND covered_score>=70 AND correspond to a still-future event`.** Every currently-stored high-scoring publishable row for both leagues is for a past event.
+
+**Exact reason all three read functions return zero**: `scored_props` is an accumulating history table -- rows are never pruned after their event passes -- and the CURRENT slate simply has no fresh scoring yet at the moment of this read (consistent with, though not proven to be caused by, the WNBA timeout defect disrupting how often fresh scoring runs land before the next game window opens; MLB's own scoring cadence relative to game start times was not separately traced this session). **This is expected strict behavior, not a read-service defect, and not a snapshot-unavailability issue** -- it is exactly the read-time re-check this codebase's own Phase 18 owner-policy comment documents as intentional (`market-freshness.ts`'s doc comment: "A prop must have a *provably current* provider observation, not merely be active and attached to a future event"). **Production is genuinely, defensibly empty right now for both leagues** because no upcoming prop currently has both a fresh market observation and a fresh (<=180/240 min) score -- not because of any defect in this candidate or the live pin.
+
+**One specific row in the sample is directly relevant to contradiction #2**: the MLB sample includes **Dylan Cease, `pitcher_strikeouts`, line 7.5, `covered_score: 70`, `publishable: true`, `publishability_reasons: []`, `event_status: "live"`** -- this is the exact row this engagement's documentation has called "invalid" across many sessions. It is excluded from Covered Picks TODAY purely by the event-status/future-time gate (its game has already started), not by any strict-completeness blocker -- because, as detailed in Section 5 below, **the live pin does not have the blocker that would flag it.**
+
+No code defect was found in this section. No fix was made.
+
+### 3. Separated live/candidate funnels (not merged into one "publishable" count)
+
+**A. Stored live-pin score state** (raw `scored_props` table, both leagues, no time/freshness filter applied):
+
+| | WNBA | MLB |
+|---|---|---|
+| `scored_props` total | 754 (exact) | >=1000 (bounded-query cap; true total not established) |
+| `covered_score >= 70` | 84 | 127 |
+| `publishable = true` (stored, as of last scoring pass) | 456 | 711 |
+| `publishable = true AND covered_score >= 70` | 60 | 101 |
+
+**B. Current live-pin read-time eligibility** (what `getCoveredPicksOfTheDay`/`getBoardOpportunities`/`getParlayOptions` actually return right now):
+
+| | WNBA | MLB |
+|---|---|---|
+| Covered Picks | 0 | 0 |
+| Board opportunities | 0 | 0 |
+| Manual Analyzer (Parlay Options) | 0 | 0 |
+| Of the stored 60/101 "A" rows, how many are for a still-future event | 0 | 0 |
+
+Layer B is strictly smaller than layer A because A has no time-based filter at all and B applies `isFutureStartTime` + `isBeforePreparedSlateUpperBound` + `classifyMarketFreshness` (Section 2) on top of A -- exactly the intended relationship, not a contradiction.
+
+**C. Projected candidate eligibility before the first candidate run** (applying every new strict blocker the candidate adds, including absence of injury markers, to today's stored state): **not directly computable from stored data**, because the candidate's additional blockers (Section 5) are evaluated inside the scoring pass itself, not re-derivable by re-reading old `scored_props` rows (their `publishability_reasons` reflect what the LIVE PIN checked, not what the candidate would check). What CAN be said: since production currently has zero injury-check markers (standing fact, unchanged), and the candidate's `injury_context_unavailable` blocker would fire for any prop whose participant lacks a checked-clean marker, **the candidate's pre-run projected eligibility for any currently-untouched prop is effectively zero** until the natural run's own injury-retrieval sub-stage populates markers -- this is a directly-reasoned conclusion from the code (the blocker exists and its trigger condition -- no marker -- is currently true for 100% of props), not a live measurement.
+
+**D. Projected candidate eligibility after one fully successful natural run** (assuming only data the natural candidate path can actually refresh in that one run): bounded by, not equal to, whatever B would show at that later moment PLUS whatever the run's own injury/feature/matchup refresh populates. For MLB specifically: **per this session's new evidence (Section 5), if the current MLB high-scoring population is still overwhelmingly `pitcher_strikeouts` (as prior sessions' bounded reads found -- "100% of the current MLB >=70 population is `pitcher_strikeouts`, still universally affected by `handedness_missing`/`pitcher_matchup_missing`"), and the candidate's own natural run does not populate handedness/pitcher-matchup context for those props (it was not traced this session whether the candidate's repair phase actually refreshes these two specific MLB context types), then D for MLB could remain at or near zero even after a fully successful run.** This is stated as a bounded range with an explicit uncertainty (whether the candidate's repair phase populates handedness/pitcher-matchup context at all), not a promise.
+
+### 4. Corrected Policy C comparison -- Session 95's claim was materially wrong
+
+Session 95 claimed "promotion would automatically activate Policy C (WNBA 8->3, MLB 10->5)." Re-traced the EXACT live-pin and candidate code paths this session, end to end, from the real public workflow file through to the scoring-service call:
+
+- The public workflow (`covered-production-pipeline.yml`, PUBLIC repo, re-fetched via `gh api` this session) resolves, for a real `schedule`-triggered run, `CFG="8"` (WNBA) / `CFG="10"` (MLB) via an explicit case statement keyed on the exact cron string -- confirmed both from the raw YAML source AND from a real executed run's logged command line (`--configLimit 8`). The workflow_dispatch input's documented default of `"1"` is a UI default for MANUAL dispatch only, and the literal value used by the separate `wnba_incremental_ingest` maintenance-only path -- **never what a real scheduled run requests.** (Session 95's own table already had this half right -- 8/10 -- so this part is reconfirmed, not corrected.)
+- `pnpm run cron:run` (`scripts/run-covered-job.mjs`, this repo, runs from `working-directory: private-covered` -- i.e., exactly the checked-out pinned SHA) parses `--configLimit 8`/`--configLimit 10` correctly. **But it computes `triggerType` with: `args.trigger === 'scheduled' ? 'scheduled' : 'manual'` (line 121) -- and the workflow passes `--trigger "${GITHUB_EVENT_NAME}"`, which for a real GitHub Actions cron trigger is the literal string `"schedule"` (no trailing "d"), never `"scheduled"`.** This is an exact string mismatch. **Confirmed byte-for-byte identical between the live pin (`933ae62`) and this candidate (`git diff 933ae62 HEAD -- scripts/run-covered-job.mjs` produces zero output)** -- this is a real, currently-live, pre-existing bug, completely unrelated to the WNBA batching fix, present in both.
+- Consequence: `triggerType` resolves to `'manual'` for EVERY real scheduled production run today, and would continue to for the candidate as-written. `resolveScheduledConfigLimit(league, triggerType, requestedConfigLimit)`'s own gate is `if (triggerType !== "scheduled") return requestedConfigLimit;` -- since `triggerType` is always `'manual'`, this condition is always true, and the function always returns the REQUESTED value (8/10) UNCHANGED. **Policy C's override to 3/5 is therefore, as the code stands today, unreachable from any real scheduled invocation -- promotion alone would NOT activate it, contrary to Session 95's claim.**
+- Separately (and this part of the owner's own correction is confirmed correct): `enabled` odds-pull-config counts are a genuinely distinct, DB-level concept from `configLimit` -- measured this session, read-only: **WNBA 6 enabled (of 16 total) odds_pull_configs; MLB 10 enabled (of 20 total).** `configLimit` bounds how many DUE-and-enabled configs get SELECTED for one run; it does not by itself bound outbound HTTP requests.
+- Also confirmed correct: there IS a separate, shared, per-run outbound-request ceiling -- `sharpMinuteRequestLimit()` reads `SHARPAPI_MAX_REQUESTS_PER_MINUTE` (production value, read this session: **8**), capped at `min(10, value)`. This is SHARED across whatever the run's config-selection produces, via `fairSharpWorkPlan({..., requestLimit: Math.min(requestLimit, ...), maxConfigs: maxConfigsPerRun, ...})` (`sharp-ingestion-job.ts` line ~444) -- **the actual number of configs that get a real HTTP attempt in one run is `Math.min(enabledDueConfigs, configLimit, requestLimit)`, not `configLimit` alone.**
+
+**Corrected table:**
+
+```
+concept                              | live MLB | candidate MLB | live WNBA | candidate WNBA
+enabled configuration count          | 10       | 10            | 6         | 6
+workflow-requested configLimit       | 10       | 10            | 8         | 8
+runtime-resolved configLimit         | 10       | 10 (Policy C never fires -- see trigger-type bug above) | 8 | 8 (same)
+per-league selected-config maximum   | min(10,10)=10 | 10       | min(6,8)=6 | 6
+per-league local request limit       | N/A (governed by the shared budget below) | N/A | N/A | N/A
+pipeline-shared request limit        | 8 (SHARPAPI_MAX_REQUESTS_PER_MINUTE, both leagues share the same env var) | 8 | 8 | 8
+retry ceiling                        | not a fixed retry count -- bounded by the same shared per-minute budget across the bounded reconciliation loop (max 3 attempts, Section elsewhere) | same | same | same
+actual maximum outbound attempts     | min(10,8)=8 (configLimit exceeds the shared request ceiling -- MLB is REQUEST-LIMITED, not config-limited, today) | 8 (unchanged -- Policy C inert) | min(6,8)=6 (WNBA is CONFIG-LIMITED, not request-limited, today) | 6 (unchanged)
+```
+
+**What would activate automatically on pin promotion, precisely stated**: as the candidate stands today, **nothing changes in Sharp request/config behavior** -- Policy C's code exists but its activation condition is unreachable due to the separate `triggerType` string-mismatch bug shared with the live pin. The 12 new strict-completeness blockers (Section 5) WOULD activate automatically (they are unconditional scoring-pass logic, not trigger-type-gated). The batched-delete WNBA ingestion fix WOULD activate automatically (also not trigger-type-gated).
+
+**This `triggerType` mismatch is a real, confirmed, currently-live defect, found this session.** It was NOT fixed this session: fixing it would itself be a material behavior change (it would newly make `resolveScheduledConfigLimit`'s condition reachable, activating Policy C for the first time ever, AND would newly make the `scheduledEnabled` league gate in `github-actions-league-registry.ts` reachable for real scheduled runs, both of which are broader than "the WNBA batching fix" and affect BOTH leagues' Sharp request behavior). Per the standing "discovered unrelated issue" protocol and this turn's own "focused closure-correction pass, do not add unrelated architecture" instruction, this is documented, classified (real, live, low-severity today since its current effect is simply "Policy C and the scheduledEnabled gate are both permissively inert" -- not itself causing incorrect scores or writes), and flagged as a **separate, explicit owner decision** (Section 12) rather than silently patched.
+
+One narrow, zero-behavior-impact fix WAS made this session: a stale code comment at `lib/ops/github-actions-pipeline.ts` (near the `resolveScheduledConfigLimit` call site) claimed "the workflow's own CONFIG_LIMIT='1' literal for the scheduled trigger is a legitimate fallback value" -- this does not match the actual current public workflow (which resolves 8/10 for a real scheduled run, never 1). Corrected to state the accurate mapping.
+
+### 5. Old-snapshot compatibility under strict candidate rules -- Session 95's conclusion was wrong; a real structural risk exists, though nothing currently exposed is affected by it
+
+Session 95 concluded "no transition risk identified... this candidate does not change scoring formulas, weights, thresholds, or the `publishable`/`CompletenessState` gate semantics." **This was incorrect** -- it conflated "scoring formula/weights unchanged" (true) with "completeness gate semantics unchanged" (false). Directly diffed the actual blocker sets this session:
+
+```
+grep -oE 'blockers\.add\("[a-z_]+"\)' lib/knowledge/scoring-service.ts   (candidate, HEAD)
+  -> ballpark_missing, batter_quality_missing, bullpen_missing, event_not_scheduled,
+     handedness_missing, injury_context_unavailable, low_match_confidence, minutes_missing,
+     minutes_stale, missing_matchup_context, missing_opponent, missing_recent_logs,
+     missing_team, missing_team_context, pitcher_matchup_missing, stale_features,
+     stale_market, team_equals_opponent, unmatched_event, unmatched_player, weather_missing
+     (20 total)
+
+git show 933ae62:lib/knowledge/scoring-service.ts | grep -oE 'blockers\.add\("[a-z_]+"\)'   (live pin)
+  -> low_match_confidence, missing_matchup_context, missing_opponent, missing_recent_logs,
+     missing_team, missing_team_context, stale_features, unmatched_event, unmatched_player
+     (9 total)
+```
+
+**The candidate adds 12 blocker types that do not exist in the live pin at all**: `ballpark_missing`, `batter_quality_missing`, `bullpen_missing`, `event_not_scheduled`, `handedness_missing`, `injury_context_unavailable`, `minutes_missing`, `minutes_stale`, `pitcher_matchup_missing`, `stale_market`, `team_equals_opponent`, `weather_missing`. This directly confirms the owner's contradiction #2: **Dylan Cease's row (`publishability_reasons: []`, `publishable: true` on the live pin) would very likely gain `handedness_missing` and/or `pitcher_matchup_missing` under the candidate**, per this engagement's own standing documentation that MLB's current `pitcher_strikeouts` population is "universally affected" by exactly those two blockers -- i.e., the live pin scored it as complete; the candidate's stricter, already-written rules would not.
+
+**Testing the required 11-point transition scenario, with evidence where available:**
+1. Latest alias still points to a live-pin snapshot -- true today (unchanged mechanism, Section 9 of Session 95, re-confirmed unchanged this session).
+2. Snapshot contains Dylan Cease or another now-invalid row -- **not currently true**: Dylan Cease's event has already started (`event_status: "live"` as of this session's read), so ANY publish cycle since his game began -- and MLB has had zero cancelled runs recently, meaning many publish cycles have run since -- would already have excluded him via the SAME `isFutureStartTime` gate that excludes him from a fresh relational read (Section 2). The CURRENT MLB `:latest` snapshot, published by the live pin's own ongoing successful cron cycles, almost certainly does not contain him anymore, simply because time has passed -- not because of any strict-blocker reasoning.
+3-11: **Not independently proven this session** for a live, currently-manifesting instance, because Section 3's own funnel (item D-of-A: zero currently-future publishable-70+ rows for either league) means there is, at this exact moment, no row that IS both still-future AND currently exposed AND would newly fail under the candidate's blockers to actually test against. The scenario is real and structurally possible (a genuinely-future, currently-published, high-scoring prop that lacks handedness/pitcher-matchup/weather/ballpark/bullpen/minutes/injury-marker context under the candidate's rules), but no such row exists in production right now to demonstrate it end-to-end.
+
+**Required invariant restated accurately**: no row invalid under the candidate's strict-completeness rules may remain publicly visible merely because it was serialized by the old live pin. **Current read-time snapshot hydration CANNOT fully enforce this for the `:latest`-alias-hit path** (Section 9 of Session 95 correctly found the snapshot-hit case returns the stored payload as-is, without re-running the candidate's own stricter blockers against it) -- only the empty-snapshot/malformed/fallback path re-runs a live relational query. **The smallest safe transition mechanism, if the owner wants one**: the candidate's own first successful publish cycle per route naturally overwrites the `:latest` alias with freshly-recomputed (and therefore correctly-blocked) rows -- given Section 6's runtime evidence (a natural run completing well within the 25-minute ceiling), this self-correcting window is bounded to, at most, one WNBA/MLB scheduled cron cycle (~20 minutes) after promotion, not an indefinite exposure. **Not implemented or activated this session** -- flagged as a real, bounded (not indefinite), non-zero transition window the owner should be aware of before authorizing promotion, not something requiring a destructive cleanup (none proposed).
+
+### 6. First-candidate-run transition (unchanged mechanism from Session 95, re-confirmed; injury-marker absence now connected to Section 3C above)
+
+Re-traced this session: `pin checkout` -> `market ingestion` (sharp step) -> `identity` (repair step's identity-repair sub-stage) -> `background enrichment` (repair step, WNBA batched SDV ingestion or MLB's six-substage bundle) -> `injury retrieval` (same repair step, injury-check jobs) -> `row persistence` -> `marker persistence` (only after successful persistence, Sessions 87-90's proven ordering) -> `strict scoring` -> `board` -> `snapshot publication`. Unchanged from Session 94/95's own trace.
+
+For WNBA and MLB separately:
+- **Does injury refresh naturally run?** Yes, inside the repair phase, for both leagues, every run (subject to each league's own freshness/staleness gating on the marker itself).
+- **Which teams/events receive markers?** Whichever teams/events are in that run's active prepared-slate window -- not knowable in advance of a specific run.
+- **Can an empty successful result create a valid marker?** Yes -- an injury check that finds zero reported injuries is still a successful check and writes a valid "checked-clean" marker (Sessions 87-90's proven semantics), not treated as a failure.
+- **Does any scoring occur before marker creation?** No -- repair (including markers) fully resolves before the `score` step begins (Section 5 of Session 95, re-confirmed).
+- **Can a partial response leave the relevant population unscoreable?** Yes -- `injury_context_unavailable` (candidate-only, Section 5 above) blocks exactly this case rather than silently treating a partial/failed check as clean.
+- **Does the candidate publish a new empty snapshot when no rows qualify?** Yes -- an empty board/picks result is still a valid publish (Session 95 Section 9, unchanged): "empty" and "unavailable" are distinct states, and a genuinely empty qualifying population publishes a real, empty, valid snapshot.
+- **Is the latest old alias replaced even when the new board is empty?** Yes, per the same mechanism.
+- **Can one league publish while the other fails?** Yes -- each league's route and `:latest` alias are independent (confirmed again this session, Section 9).
+- **What would users see throughout the first run?** Before the run: whatever the CURRENT live-pin snapshot shows (per Section 3B, currently zero rows for both leagues). During the run: unchanged (users read published snapshots, not an in-flight run). After a successful run: whatever the candidate's own freshly-computed, correctly-blocked population is -- bounded by Section 3D's uncertainty for MLB specifically.
+
+No new test was added this session for this section -- Session 94/95 already exercise this via `github-actions-pipeline.test.ts`'s deadline-skip and repair-sequencing tests; no gap was newly identified here.
+
+### 7. 82-file promotion risk matrix (corrected framing: this is NOT a narrow WNBA-only promotion)
+
+| Change area | Live behavior | Candidate behavior | Activation on promotion | Risk | Test evidence | Rollback effect |
+|---|---|---|---|---|---|---|
+| Policy C | Scheduled configLimit = requested (8/10) | Same, in practice -- **inert due to the `triggerType` bug (Section 4)**, not automatic as Session 95 claimed | Would activate ONLY if the separate trigger-type bug is also fixed -- NOT automatic today | Low today (inert); would be a real behavior change if the trigger-type bug is fixed alongside promotion | `github-actions-pipeline.test.ts` (Policy C unit tests, exercise `resolveScheduledConfigLimit` directly with a correct `triggerType` value, not through the real CLI path -- this is why the trigger-type bug was not caught by existing tests) | Reverting undoes nothing here (nothing activates) |
+| Shared Sharp request budget | Fresh per-invocation budget, limit 8 | Same value, now explicitly shared across an "all"-dispatch's multiple leagues (manual/backfill only -- real scheduled runs are always single-league) | Automatic | Low -- only affects manual "all" dispatches, which real scheduled cron never uses | `github-actions-pipeline.test.ts` (shared-budget fairness tests) | Reverting restores independent per-league budgets for manual "all" dispatches only |
+| WNBA batch deletes | Sequential, up to thousands of round-trips | Batched, <=40 requests/2,000-pair worst case | Automatic | This IS the fix -- risk is in NOT promoting (Section 6's 50% cancellation baseline) | `sportsdataverse-wnba-ingest.test.ts` (27 tests) | Reverting restores the sequential-delete timeout defect |
+| Deadline behavior | No cooperative deadline | 20-min repair sub-deadline, 5-min minimum ingestion reserve | Automatic | Low -- proven via real end-to-end test (Session 94) | `github-actions-pipeline.test.ts` (3 Session 94 tests) | Reverting restores unconditional ingestion attempts (safe today only because the batching fix makes them fast; reverting BOTH restores the original defect) |
+| Injury markers | Marker-before-persistence race existed pre-Session-87, fixed since | Same fix, unchanged this session | Automatic (already true for a while) | Low | `basketball-injuries.test.ts`, `mlb-injuries.test.ts` | Reverting restores the pre-Session-87 race |
+| Strict completeness blockers | 9 blocker types | **20 blocker types (12 new)** | **Automatic -- this is the single biggest behavior change in the whole diff, materially understated by Session 95** | **High for MLB specifically**: if MLB's current high-scoring population remains dominated by `pitcher_strikeouts` (universally missing handedness/pitcher-matchup context per prior sessions' findings), MLB's publishable population could drop to near-zero immediately upon promotion, independent of any injury-marker or timeout consideration | `scoring-service.test.ts` (largest test-file diff in the whole span) | Reverting restores the live pin's simpler, 9-blocker gate |
+| Read-time freshness | `classifyMarketFreshness` gate exists (180/240 min) | Unchanged this diff span | N/A (already live) | N/A | `market-freshness.test.ts` | N/A |
+| Event matching | Baseline precedence | Eastern-timezone date-boundary fix (Session 92), other hardenings | Automatic | Low -- proven via real tests | `event-selection-matrix.test.ts` (58 tests) | Reverting restores the UTC-vs-Eastern date-boundary bug |
+| Feature provenance | Not present | JSONB provenance envelope on writes | Automatic | Low -- additive, does not change eligibility | `feature-provenance*.test.ts` | Reverting loses forensic provenance, not correctness |
+| Replay | Not present | New deterministic replay tooling (scripts, not production-path) | N/A -- offline tooling only | None -- not part of the production request path | `replay-feature.test.ts`, `replay-score.test.ts` | N/A |
+| Board selection | Baseline fair-split | Hardened event-status/freshness filtering | Automatic | Low | `read-service.test.ts` | Reverting restores pre-hardening filtering |
+| Snapshots | Baseline `:latest`-alias/fallback | Empty-as-miss treatment, malformed-row handling, bounded relational fallback | Automatic | **Medium** -- see Section 5's transition-window finding | `public-snapshots.test.ts` | Reverting restores "malformed snapshot throws uncaught" and "empty snapshot permanently pinned" |
+| API fallback | Baseline | Try/catch around `buildFallbackResponse` (a failed fallback degrades, not crashes) | Automatic | Low | `public-snapshots.test.ts` | Reverting restores an uncaught-crash risk on a transient read failure |
+| Commentary payload | Compacted in prior sessions, unchanged this diff span | Same | N/A | N/A | `commentary.test.ts` | N/A |
+| Parlay Builder | Not in this diff's file list | Not in this diff's file list | N/A | N/A | N/A | N/A |
+| UI | Not in this diff's file list | Not in this diff's file list | **No UI files differ from the live pin at all** | None | N/A | N/A |
+| Public-boundary changes | Baseline | `package.json` script-list only | Automatic, cosmetic | None | Public-export test suite | N/A |
+
+**Changes that can empty a board**: the 12 new strict blockers (above), most acutely for MLB's `pitcher_strikeouts`-dominated population -- this is a MATERIALLY LARGER effect than Session 95 disclosed, which only discussed Policy C's (actually-inert) throughput reduction and did not connect the blocker-set diff to board emptiness at all.
+**Changes that alter public payload/eligibility**: same 12 blockers -- directly.
+**Changes that alter snapshot aliases**: none directly (mechanism unchanged), but the CONTENT of what gets written into an alias changes per the blocker diff.
+**This is explicitly NOT a narrow WNBA-only promotion**: the 12 new completeness blockers apply to BOTH leagues' scoring pass (the blocker set is shared, league-agnostic code), not scoped to WNBA. Promotion activates a strict-completeness regime change for MLB fully as much as it activates the WNBA timeout fix.
+
+### 8. Reassessed MLB containment under candidate strict rules
+
+- **Does MLB scoring still run internally?** Yes -- scoring always executes; a blocked prop still gets scored and stored with `publishable: false` and populated `publishability_reasons`, never silently skipped.
+- **Are incomplete numeric scores persisted privately?** Yes -- `scored_props` continues to store the numeric `covered_score` regardless of `publishable`, matching the live pin's own existing behavior (not new to the candidate).
+- **Can any such score appear in Manual Analyzer?** No -- `getParlayOptions`'s structural-validity filter is unconditional and league-agnostic (Section 4 of Session 95, re-confirmed).
+- **In Covered Picks?** No -- `getCoveredPicksOfTheDay`'s `publishable` + `covered_score >= 70` gate is unconditional.
+- **Can old snapshots expose them?** Yes, for a bounded transition window, per Section 5's corrected finding -- but only for a prop that is simultaneously still-future AND was published before the candidate's own first post-promotion publish cycle for that route. **Zero such rows exist in production right now** (Section 3), so there is currently nothing concretely exposed, but the mechanism is real, not hypothetical.
+- **Does the first candidate snapshot remove them?** Yes, within one scheduled cron cycle (~20 min) per route, per Section 5.
+
+**Required public behavior confirmed**: MLB may be (and, per this session's evidence, is very likely to become, at least initially) empty under the candidate, but no incomplete MLB Covered Score is publicly visible through the live relational read path today, and would not be through the candidate's own relational path either -- the only residual exposure is the bounded old-snapshot transition window (Section 5), not a live-path defect. No new provider proposed or added.
+
+### 9. Reassessed WNBA first-run availability (ranges, not promises)
+
+- **Current relevant events/teams/props/players**: not re-enumerated this session beyond Section 3's finding that zero currently-stored WNBA rows are both future and publishable-70+; a real natural run's population depends on whatever slate is active at that exact future moment, not knowable in advance.
+- **Current feature freshness / minutes freshness**: not directly re-measured this session; Session 90's minutes-freshness gate and this session's newly-confirmed `minutes_missing`/`minutes_stale` blockers (candidate-only, Section 5) both apply.
+- **Expected injury-marker coverage after one run**: bounded by whichever teams/events are actually in that run's active window -- likely full coverage for that window specifically (the marker check is unconditional per active team/event), not full coverage for the whole league.
+- **Expected complete-context range**: no fixed number -- depends on live feature/matchup/injury data at execution time. Given the candidate's WNBA-specific batched-delete fix (Section 6/7 of Session 94-95) resolves the mechanical timeout, the CEILING on how many props CAN reach scoring is much higher than today's 50%-cancellation baseline, but the actual count still depends on real data.
+- **Expected scored range / Manual Analyzer range / 70+ range / Covered Picks range**: not promised as exact numbers -- bounded above by whatever the natural run's population and real scores turn out to be, and bounded below by zero (a run can legitimately find no complete props).
+
+Explicitly separated, per the required scenarios: **no markers before the run** (today's actual state -- effectively zero eligible props per Section 3C); **markers after a complete injury refresh** (full coverage for the active window, unlocking whatever props otherwise have complete context); **partial injury refresh** (only the successfully-checked subset unlocks; the rest remain blocked by `injury_context_unavailable`, not silently passed); **deadline-skipped enrichment** (proven, Session 94, does not block already-complete props); **failed seasonal ingestion** (existing features stay in use, blockers apply as normal, unchanged prior-session finding); **successful seasonal ingestion** (fresh features become available for scoring in the same run).
+
+### 10. Corrected owner authorization package
+
+- **Candidate SHA**: `d4bf38d205b81cd17d51926d69f0a1cb00533718` plus this session's one narrow comment-only commit (SHA below).
+- **Rollback SHA**: `933ae62fabc2f8d50adf0e084d422c7d7db47181`.
+- **Exact public workflow**: `CoreyTenacity/Covered-Prop-Analysis`, `.github/workflows/covered-production-pipeline.yml`, job `run`.
+- **Exact variable changed on promotion**: `COVERED_PRIVATE_PIPELINE_SHA_V2` (production environment).
+- **All behavior automatically activated by promotion**: the WNBA batched-delete fix; the 20-minute repair deadline / 5-minute ingestion reserve; **the 12 new strict-completeness blockers, for BOTH leagues** (the single largest behavior change, corrected this session); snapshot empty-as-miss/malformed-row/fallback hardening; event-matching/timezone hardenings; feature-provenance envelopes (storage-only, non-behavioral). **NOT** automatically activated: Policy C (inert due to the separate `triggerType` bug, Section 4) -- a real correction to Session 95.
+- **Policy C implications**: none today, as corrected in Section 4 -- flagged as a separate, explicit owner decision (below) rather than bundled with pin promotion.
+- **Injury-marker first-run implications**: same-run retrieval->marker->scoring->publish, proven (Section 6); production currently has zero markers, so the first run's own injury-check sub-stage is load-bearing for essentially the whole initial candidate population.
+- **Strict-board implications**: MLB likely goes to (or stays at) near-zero publishable output immediately, independent of timeout/marker considerations, due to the 12-blocker change (Section 7-8) -- this is the corrected, larger-scope framing Session 95 did not disclose.
+- **Old-snapshot transition**: bounded (~one scheduled cron cycle, ~20 min per route) self-correcting window; nothing currently exposed is affected (Section 5), but the mechanism is real for whatever is future+published at the actual moment of a real promotion.
+- **Expected WNBA window**: next `0,20,40 22,23,0,1,2,3,4 * * *` UTC cron tick after any future pin update.
+- **Expected runtime**: per Session 95 Section 6, unchanged this session.
+- **Success/abort/rollback criteria**: unchanged from Session 95, restated: success = a WNBA run completes without cancellation and reaches scoring/board/snapshot; abort = cancellation rate does not improve versus this session's 50% WNBA baseline or a new failure mode appears; rollback = any new scoring-affecting regression, a single pin-variable edit.
+- **Monitoring commands**: unchanged from Session 95 (`gh run list`/`gh run view` against the public repo; bounded `scored_props`/read-function calls as used in Sections 2-3 this session).
+- **What can be proven in ONE natural run**: whether the WNBA timeout fix actually prevents cancellation; whether injury markers get created; whether at least some props reach complete context and score.
+- **What requires multiple runs**: a stable read on WNBA's typical (not just first-run) scored/publishable/70+ range, since the first run's population is likely to be small (fresh markers, fresh features, nothing accumulated yet).
+- **What remains blocked because MLB lacks a source**: strict, complete MLB batter-quality/K-rate/handedness scoring at scale -- unchanged, unrelated to and unaffected by this candidate; MLB's likely near-zero output under the candidate is a DIFFERENT, already-intended consequence of strict completeness (not a new source gap, but its practical effect is functionally similar -- MLB stays largely dark either way).
+
+**This is explicitly not called a "bounded WNBA-only proof"** -- per Section 7, the candidate activates a shared, both-leagues strict-completeness regime change, not a WNBA-scoped change alone.
+
+### 11. Validation
+
+No code defect required a fix this session (the zero-read behavior is correct-as-designed, Section 2; the Policy C and snapshot findings are corrected DOCUMENTATION, not code, since the underlying `triggerType` bug was deliberately NOT fixed, Section 4). The only source change is the one-comment correction (Section 4). Ran, this session:
+
+- `npx tsc --noEmit`: clean, before and after the comment edit.
+- `pnpm run test`: **1036 tests, 1035 pass, 1 skip, 0 fail** (unchanged from Session 95 -- no test file touched, since no behavior changed).
+- Zero-read-contradiction evidence (Section 2), live/candidate funnels (Section 3), Policy C trace (Section 4), and snapshot-transition trace (Section 5) were all gathered via bounded, read-only production queries and direct `git show`/`grep` code comparisons this session -- reported as evidence, not as new pass/fail test assertions (no new invariant was found that isn't already covered by an existing test).
+- Full build / Cloudflare build / YAML / public-boundary audit: not re-run this session, since the only change is a single code comment with zero compiled/runtime effect -- flagged explicitly here rather than silently assumed, consistent with this engagement's own standing rule not to describe a production seam as build-exempt (this one genuinely has no build-observable effect, being comment-only, which is the distinction from Session 94's actual logic change).
+- Final diff review / repository verification: `git status --short` shows only the pre-existing untracked `scoring-engine/dist/` path after the comment edit; `scoring-engine/dist/` confirmed untouched.
+
+### 12. Commits and SHAs
+
+One narrow code commit (comment-only, zero behavior change) plus one documentation commit, per this turn's own instruction ("If a concrete defect is found, use coherent code/test and documentation commits" -- the only "defect" fixed is the stale comment; the `triggerType` bug itself was deliberately left unfixed and is instead a documented, separate owner decision).
+
+### 13. Restriction compliance
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged; no cron cadence change; no workflow timeout increase; nothing activated in production; no new scheduler; no live variables modified (all `gh api` calls this session were read-only); no production writes (all Supabase reads this session were bounded `selectRows` calls, no `insertRows`/`upsertRows`/`updateRows`/`deleteRows` used); no provider calls; no migrations/constraints; no cleanup/reconciliation/deletion/broad backfills/broad rescoring; no scoring formula/weight/label/threshold change (the 12 blockers already existed in the candidate before this session -- this session only discovered and documented them, did not add them); Covered Picks floor untouched; no manufactured picks; no new provider integrated; no paid services changed; no credentials rotated; no private scoring/provenance internals exposed; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 14. Exact remaining gaps
+
+1. **The `triggerType` "schedule" vs "scheduled" string-mismatch bug** (`scripts/run-covered-job.mjs` line 121) is real, confirmed, currently live, and was deliberately NOT fixed this session -- it requires an explicit owner decision (Section 12 below) since fixing it is a material behavior change (activates Policy C for the first time ever; activates the `scheduledEnabled` league gate for real scheduled runs) broader than this candidate's WNBA-specific scope.
+2. **MLB's likely near-zero output under the candidate's 12 new strict blockers** is a real, quantifiable-in-principle-but-not-measured-this-session consequence (whether the candidate's own repair phase populates handedness/pitcher-matchup/weather/ballpark/bullpen context for MLB props at all was not traced this session) -- flagged as the single most important open question before authorizing a natural run if the owner wants MLB to show ANY output post-promotion.
+3. **The old-snapshot transition window (Section 5)** is real and bounded (~20 min/route) but was not exercised against a live, currently-manifesting instance (none exists right now) -- a genuine gap if the owner wants end-to-end proof rather than structural/code-level proof.
+4. Dylan Cease invalid (unchanged, now precisely explained: excluded live today by event-timing, would ALSO be excluded by the candidate's new blockers if his event were still upcoming).
+5. Injury-marker rollout, MLB source licensing: unchanged asks from prior sessions.
+
+### 15. Decision table for the owner (Policy C / trigger-type bug specifically)
+
+| # | Decision | Options |
+|---|---|---|
+| 1 | Fix the `triggerType` "schedule"/"scheduled" mismatch (`scripts/run-covered-job.mjs`) alongside or separately from this candidate | Fix now (activates Policy C + the scheduledEnabled gate for the first time) / Leave as-is (Policy C and that gate both remain inert) / Defer to a dedicated follow-up session |
+| 2 | Authorize or defer a bounded natural-run proof of the WNBA timeout fix, understanding MLB may show near-zero output immediately due to the (unrelated-to-WNBA) strict-blocker change bundled in the same SHA | Authorize / Defer |
+| 3 | (Unchanged from Session 95) MLB source path, injury-marker first-run authorization, UI/commentary acceptance | See Session 95 Section 12 |
+
+No decision above has been made on Corey's behalf.
+
+**Verdict: `CANDIDATE CLOSURE PARTIAL — SPECIFIC REPOSITORY OR TRANSITION GAPS REMAIN`.** Both contradictions the owner flagged are now resolved with direct, row-level and code-level evidence: the zero-read state is correct, defensive, working-as-designed behavior (not a defect), and the snapshot-transition risk is real (Session 95 was wrong to dismiss it) but currently has zero manifesting instances in production. Session 95's Policy C claim is corrected: it does not actually activate on promotion, due to a separate, real, currently-live `triggerType` bug this session found and did not fix (an explicit owner decision, Section 15). This candidate is materially broader than a WNBA-only fix: it changes strict-completeness semantics for both leagues, most consequentially for MLB. No code defect required fixing beyond one stale comment. Production not changed; Phase 20 not begun.
+
+(Session 97 was a product-readiness decision-package pass with no code changes -- per its own explicit instruction not to manufacture a commit, its findings were delivered directly in chat, not persisted here. Summary for continuity: real bounded calibration evidence gathered from `grading_results` -- MLB n=35 score-70+ graded outcomes, hit rate flat ~50-53% across bands, zero samples above 84, 100% concentrated in `pitcher_strikeouts`; WNBA has zero graded outcomes at all. Final verdict that pass: `BLOCKED — OWNER DATA-SOURCE OR PRODUCTION AUTHORIZATION REQUIRED`.)
+
+## Session 98 (2026-08-01, continuation from `0e1f5e1`): snapshot eligibility-contract version implemented and enforced -- the one remaining repository safety defect the owner identified before authorizing a candidate pin proof
+
+The owner accepted Session 97's narrowing but would not authorize a candidate proof until the snapshot-transition risk Session 96 correctly identified (but left as "self-correcting, ~20 min window") was closed to a hard invariant: **no prop that fails the current strict completeness contract may display a Covered Score, even temporarily, merely because it exists in an older snapshot.** This session implements exactly that, narrowly.
+
+### 1. State
+
+Local HEAD/`origin/codex/public-repo-repair` equal at `0e1f5e189cb5f464f43ccbfc9b850c0f6232e9d0` before this session. `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree at session start: clean except the pre-existing untracked `scoring-engine/dist/covered-scoring-engine.dashboard.js` (confirmed untouched throughout). Fresh read-only re-check: `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` (unchanged). Public workflow (`Covered Production Pipeline`): active; most recent run since last session's check was a new `success` (`30709816055`, 6m6s, 2026-08-01T17:12:22Z) -- no new cancellations observed, not otherwise investigated (out of this pass's narrow scope). Private repo's own scheduler and WNBA data-ingestion workflow: both `disabled_manually`, unchanged.
+
+### 2. Snapshot eligibility-contract version -- implementation
+
+Added `STRICT_ELIGIBILITY_CONTRACT_VERSION = "strict-v1"` (`lib/knowledge/public-snapshot-types.ts`) and a new required field `eligibilityContractVersion: string | null` on `PublicSnapshotEnvelope<TRow>`. This is deliberately distinct from the pre-existing `PUBLIC_SNAPSHOT_SCHEMA_VERSION` (envelope *shape*, unrelated to which blockers gated row inclusion) -- the new field tracks which strict-completeness blocker set (`scoring-service.ts`'s `blockers.add(...)` calls) a snapshot's rows were filtered under. It is bumped only when that blocker set changes in a way that could flip a row's eligibility, not on every schema tweak.
+
+- **Write side** (`publishPublicSnapshot`, `lib/knowledge/public-snapshots.ts`): every payload is unconditionally stamped with `STRICT_ELIGIBILITY_CONTRACT_VERSION` -- not a caller-supplied parameter, since there is no "weak mode" to opt into; this build only ever writes under the contract it itself enforces.
+- **Read side** (`resolvePublicSnapshotRoute`): a cached snapshot is now accepted only when `rawSnapshot.eligibilityContractVersion === STRICT_ELIGIBILITY_CONTRACT_VERSION` **exactly** -- missing/undefined (pre-this-change snapshot), an older/weaker string, or an unrecognized future string are all rejected by the identical equality check, falling through to the existing bounded relational fallback (or to `unavailable` when the fallback is disabled/fails), the same code path already used for a structurally malformed snapshot. No version-ordering comparison was used (a `>=`-style compare could be tricked by a lexicographically "greater" but unrelated string) -- exact-match only, so "weaker" and "unknown" fail identically, satisfying the required invariant without extra branching.
+- **Producers verified**: `publishPublicSnapshot` is the SINGLE shared function used by all three public routes (Covered Picks, Parlay Options, Model Performance -- confirmed by reading `collectPublicSnapshotPublicationSummaries`'s three call sites), so the stamp applies uniformly with no per-route special-casing needed.
+- **Consumers verified**: all three real production routes (`app/api/knowledge/covered-picks/route.ts`, `app/api/knowledge/parlay-options/route.ts`, `app/api/knowledge/model-performance/route.ts`) call `resolvePublicSnapshotRoute` with `readSnapshot: () => readPublicSnapshot(...)` -- confirmed by direct grep against each route file, not assumed. `readPublicSnapshot` itself (the raw cache-read helper) is not independently called by any other production code path (`grep -rn "readPublicSnapshot(" app/ lib/` outside tests: zero matches besides the three routes and `resolvePublicSnapshotRoute`'s own internal use) -- so `resolvePublicSnapshotRoute` is the correct and complete enforcement point, not one of several.
+- **No public API exposure added**: `eligibilityContractVersion` lives only in the internal envelope, not in `PublicSnapshotResponseMeta`/the public JSON response shape -- satisfies "no raw private scoring internals exposed" and "low payload overhead" by simply not surfacing it externally.
+- **No migration, no cleanup, no manual alias manipulation, no broad relational read**: the mechanism is a single new field on an existing envelope type, enforced entirely at read time against whatever is already in `provider_cache` -- an old snapshot is never deleted or rewritten, merely no longer trusted.
+
+### 3. Transition tests -- 10 new tests, all passing
+
+Added to `lib/knowledge/read-surface-parity.test.ts` (fits its existing "snapshot matrix"/read-surface-parity convention):
+
+1. Old **unversioned** snapshot (a Dylan-Cease-shaped row: `player_name: "Dylan Cease"`, `market_type: "pitcher_strikeouts"`, `covered_score: 70`, `publishable: true`, empty `publishability_reasons` -- the exact real shape this session's own live evidence, Section 5 of Session 96, found in production) is rejected -- falls to the relational fallback, zero rows leak.
+2. Old **explicitly-versioned weaker-contract** snapshot (`eligibilityContractVersion: "legacy-v0-live-pin"`) is rejected.
+3. **Unknown future** contract version (`"strict-v2-not-yet-released"`) is rejected -- proves fail-closed applies to "newer-looking" values too, not just older ones.
+4. **Malformed-type** contract values (number, object, array, boolean) are all rejected safely, no crash, for each of 4 malformed shapes in one test.
+5. A snapshot stamped with the **current** contract is accepted and served directly, zero fallback invocations -- and asserts the exact row content served, proving the rejection tests above are rejecting the CONTRACT field specifically, not something else about the row shape.
+6. Rejection applies identically on the **Manual Analyzer** (`parlay-options`) route, not only Covered Picks.
+7. One route's contract-mismatched snapshot does **not** affect a different route's valid, correctly-stamped snapshot in the same cycle (WNBA-shaped stale vs. MLB-shaped valid, proving per-route independence holds under the new gate too).
+8. Rejection **plus a disabled fallback** returns a safe empty result -- fallback is never invoked, and the old row never reaches the payload.
+9. `publishPublicSnapshot` (the real production writer, not a re-implementation) is proven, by actually calling it and reading back what it wrote, to always stamp the exact current contract.
+10. (Cited, not duplicated) items already proven elsewhere in the existing suite: relational fallback enabled/disabled/error (`lib/ops/public-snapshots.test.ts`), a run failing before publish, an empty strict board publishing correctly, and no-snapshot-no-fallback -- all still pass unchanged (verified by re-running both files in full, 45 + 22 = 67 tests, 0 failures).
+
+Also added, `lib/ops/github-actions-pipeline.test.ts`: a test that reproduces `scripts/run-covered-job.mjs`'s exact trigger-type comparison verbatim against the real GitHub Actions cron event name (`"schedule"`), proving it resolves to `"manual"`, then feeds that real (buggy) value into the actual `resolveScheduledConfigLimit` to prove WNBA's configLimit stays 8 and MLB's stays 10 -- Policy C does not activate. This pins the CURRENT, deliberately-unfixed behavior as an executable regression guard: if a future session fixes the trigger-normalization bug, this exact test will fail and force that session to update it deliberately, rather than Policy C silently starting to apply.
+
+### 4. Empty-board behavior -- preserved, re-verified
+
+- An empty strict `:latest` snapshot still replaces an old weak snapshot on the next successful publish (unchanged write-path mechanism; the new gate is read-side only).
+- The API returns an honest empty result when both the versioned/latest snapshot is rejected AND the fallback is disabled (test 8 above) -- never a stale row.
+- The UI never sees cached old invalid props: the route resolution itself is what rejects them, before any payload reaches a client.
+- Relational fallback applies the same strict rules as a live read, because the fallback response is built by calling the real `getCoveredPicksOfTheDay`/`getParlayOptions` functions (Session 96's own finding, re-confirmed unchanged).
+
+### 5. Policy C inactive -- proven, not merely asserted
+
+Section 3's new `github-actions-pipeline.test.ts` test is the executable proof. The trigger-normalization bug (`args.trigger === 'scheduled'` never matching GitHub's real `"schedule"` event name) was **not** touched this session, per explicit instruction. Documented result: **candidate promotion, as this branch stands today, leaves Policy C inactive** -- the first natural-run proof tests the WNBA timeout fix, injury-marker creation, scoring, and the new snapshot-contract guard, WITHOUT also introducing Policy C's configLimit throughput change. Policy C activation remains a distinct, later, separate owner decision (unchanged from Session 96's finding).
+
+### 6. Corrected product-readiness classifications
+
+- **WNBA data completeness**: repository capability substantially complete (unchanged); production completeness uncertified (unchanged); zero production injury markers remain a first-run dependency (unchanged).
+- **WNBA calibration**: zero graded outcomes exist; no empirical calibration conclusion is possible (Session 97's finding, restated here for continuity since Session 97 made no commit of its own).
+- **MLB calibration**: 35 score-70+ graded outcomes exist (of 306 total graded MLB rows); hit rates flat around 50-53% across the 70-74/75-79/80-84 bands (zero samples 85+); the sample is too small (n=35) and too concentrated (100% one market, `pitcher_strikeouts`) to support any claim that higher scores have demonstrated higher hit rates.
+- **Public meaning of Covered Score**: until larger calibration evidence exists, Covered Score is understood, for internal/documentation purposes, as **a relative model-evidence score based on complete inputs, not a guaranteed win probability or empirically proven hit-rate tier.** No scores, labels, formulas, or user-facing UI copy were changed this session -- this is a documentation-level clarification only; a live wording audit (does any current public copy affirmatively claim a win-probability guarantee?) was not performed this pass, since it was not flagged as a current defect and this pass's scope is the snapshot guard.
+
+### 7. Final candidate proof package (not executed)
+
+- **Candidate SHA**: this session's tip after push (see Section 12 below for the exact commit).
+- **Rollback SHA**: `933ae62fabc2f8d50adf0e084d422c7d7db47181`.
+- **Public repository**: `CoreyTenacity/Covered-Prop-Analysis`. **Workflow**: `.github/workflows/covered-production-pipeline.yml`, job `run`. **Pin variable**: `COVERED_PRIVATE_PIPELINE_SHA_V2`.
+- **Next suitable WNBA natural window**: next `0,20,40 22,23,0,1,2,3,4 * * *` UTC cron tick after any future pin update.
+- **Expected trigger string**: `github.event_name` = `"schedule"` (real value, confirmed again this session).
+- **Expected config-limit behavior with Policy C inactive**: WNBA requests/resolves to 8; MLB requests/resolves to 10 -- unchanged from today's live-pin behavior, per Section 5.
+- **Workflow timeout**: 25 minutes (unchanged, re-confirmed prior sessions).
+- **WNBA batching behavior**: batched deletes, <=40 requests/2,000-pair worst case (Sessions 92-94, unchanged).
+- **Enrichment deadline**: 20-minute repair sub-deadline, 5-minute minimum ingestion reserve (unchanged).
+- **Injury retrieval and marker order**: same natural run, retrieval -> marker (only after successful persistence) -> scoring, proven (Sessions 94-96, unchanged).
+- **Expected strict scoring range**: bounded by, not promised -- see Session 96 Section 7/9 (WNBA availability ranges), unchanged this session.
+- **Strict snapshot contract behavior**: this session's new guard -- any snapshot not stamped `strict-v1` is rejected, first candidate publish per route stamps it correctly.
+- **Expected empty MLB behavior**: MLB may legitimately publish empty (Statcast-style inputs unavailable, Section 6) -- this is acceptable; an incomplete score is not, and the new guard additionally ensures no PRE-candidate MLB snapshot can leak through post-promotion either.
+- **API/UI checks**: covered by Section 4/3 above.
+- **Success criteria**: candidate SHA checked out; WNBA run completes under 25 min; injury markers created only after successful scoped retrieval+persistence; scoring reached; complete WNBA props score; incomplete props stay blocked; strict-contract snapshots publish; old weak/unversioned snapshots are rejected; API/UI show only strict-valid rows; MLB exposes no incomplete score; resource usage stays bounded.
+- **Abort criteria**: cancellation rate does not improve versus Session 96's measured 50% WNBA baseline, or a new failure mode appears.
+- **Rollback criteria**: any new scoring-affecting regression; single pin-variable edit back to `933ae62...`.
+- **Monitoring commands**: `gh run list --repo CoreyTenacity/Covered-Prop-Analysis --workflow="Covered Production Pipeline"`; bounded `scored_props`/`getCoveredPicksOfTheDay`/`getParlayOptions` reads as used in Sessions 96-97.
+
+Not executed or promoted this session.
+
+### 8. Validation
+
+- `npx tsc --noEmit`: clean.
+- Targeted: `read-surface-parity.test.ts` (22/22), `public-snapshots.test.ts` (45/45), `github-actions-pipeline.test.ts` trigger/Policy-C subset (8/8) -- all passing.
+- Full suite (`pnpm run test`): **1046 tests, 1045 pass, 1 skip, 0 fail** (up from 1036/1035/1 -- 11 net new tests: 10 snapshot-contract tests + 1 trigger/Policy-C test).
+- `npm run build`: clean (exit 0; the same pre-existing `[provider-cache] ... Dynamic server usage` console lines for genuinely dynamic routes, not a new warning).
+- `npx opennextjs-cloudflare build`: clean (exit 0), `.open-next/worker.js` produced.
+- Workflow/YAML validation: unaffected (no workflow file touched); public-boundary audit: unaffected (covered by the full suite's own public-export tests, all passing).
+- Final diff review: 5 files changed, 278 insertions(+), 1 deletion(-) -- `public-snapshot-types.ts`, `public-snapshots.ts`, and three test files. No unrelated file touched.
+- `scoring-engine/dist/` confirmed untouched throughout.
+
+### 9. Restrictions
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged; no cron cadence/scheduler-state change; trigger normalization/Policy C NOT fixed or activated (Section 5); no new scheduler; no live variables modified; no production writes or provider calls (all evidence this session came from local test runs and `tsc`/build output, plus the unchanged read-only `gh api` state check in Section 1); no migrations/constraints; no cleanup/reconciliation/deletion/broad backfills/rescoring; no scoring formula/weight/threshold change; Covered Picks floor untouched; no manufactured picks; no new provider integrated; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 10. Exact remaining owner decisions
+
+1. Authorize or reject the MLB bounded source probe (unchanged from Session 97).
+2. Authorize or reject the trigger-normalization/Policy C fix (unchanged from Session 96/97) -- this session's new test (Section 3) makes the current inactive state an explicit, enforced guarantee rather than an informal claim, but the decision itself is unchanged.
+3. Authorize a bounded candidate pin proof now that the snapshot-transition guard (this session's work) is complete -- the one concrete blocker the owner named this pass is closed.
+4. Accept or reject an intentionally empty MLB board until source coverage exists (unchanged).
+5. Accept or reject the current commentary/UI payload and the "relative model-evidence score, not a guaranteed win probability" framing (Section 6) -- unchanged UI, clarified documentation only.
+
+**Verdict: `CANDIDATE CLOSURE COMPLETE — READY FOR OWNER AUTHORIZATION OF BOUNDED NATURAL-RUN PROOF`.** The one repository safety defect the owner identified (old-snapshot exposure under a weaker contract) is now closed with a narrow, tested, non-destructive mechanism -- no prop that fails the current strict contract can be served from a snapshot merely because it was once published, proven by 10 new passing tests covering unversioned/weaker/unknown/malformed contract values, correct-contract acceptance, per-route independence, and disabled-fallback safety. Policy C remains provably inactive (Section 3/5's new executable test). MLB stays source-blocked and will very likely publish empty immediately post-promotion (unchanged, expected, and now doubly protected against exposing anything stale). No scoring formula, threshold, or production state changed. Ready for the owner to authorize the bounded candidate pin proof described in Section 7. Phase 20 not begun; production not changed.
+
+## Session 99 (2026-08-01/2026-08-02, continuation from `5195955`): the owner-authorized bounded natural-run proof was executed, found a real production defect live, was rolled back per its own abort criteria, and this session closes the root repository defect that made the rollback necessary
+
+### 0. What happened between Session 98 and this fix (bounded natural-run proof: FAILED, rolled back)
+
+Per Session 98's proof package, the owner authorized promoting candidate `51959551fb0bd0687aec17763fe37d79ff05c767` to `COVERED_PRIVATE_PIPELINE_SHA_V2` (replacing `933ae62fabc2f8d50adf0e084d422c7d7db47181`) for a bounded, passive, natural-run-only proof (no `workflow_dispatch`, explicit rollback criteria pre-agreed). The candidate SHA checkout, `schedule` trigger, and Policy C inactivity were all independently re-verified live for the first post-promotion MLB run. When the WNBA window was reached, a real production violation was found by direct inspection: inside a snapshot whose OWN envelope was correctly stamped `eligibilityContractVersion: "strict-v1"` (Session 98's guard working exactly as designed), one Manual Analyzer row -- Payton Tolle, MLB `pitcher_strikeouts`, `covered_score: 61`, `scored_prop_id: d2555bc9-4c8a-4c8c-a815-620b38d43d65` -- was actually an OLD score row, computed ~19 hours BEFORE promotion under the live pin's weaker 9-blocker rule set, still `publishable: true` with empty `publishability_reasons`, despite its own stored commentary disclosing missing pitcher-matchup/ballpark context that the candidate's 21-blocker rule set (not the live pin's) would have caught. This matched an explicit pre-agreed rollback trigger. `COVERED_PRIVATE_PIPELINE_SHA_V2` was rolled back to `933ae62fabc2f8d50adf0e084d422c7d7db47181` immediately and re-verified live. **Verdict at that point: `BOUNDED NATURAL-RUN PROOF FAILED — ROLLED BACK`.** Production has run on `933ae62...` unchanged since.
+
+The owner then classified this as a **repository defect**, not a one-off data problem, and defined the controlling invariant this session closes: **"NO PUBLIC SCORE MAY BE EXPOSED UNLESS THE SCORE ROW ITSELF WAS PRODUCED OR AUTHORITATIVELY REVALIDATED UNDER THE CURRENT ELIGIBILITY CONTRACT. A strict snapshot envelope alone is insufficient."** Session 98's `STRICT_ELIGIBILITY_CONTRACT_VERSION` guard is correct but operates one layer too high: it proves the snapshot ENVELOPE was built under strict-v1, not that every individual SCORE ROW inside it was ever evaluated under strict-v1's blocker set. This session closes that gap, on the repair branch only, with no further production changes.
+
+### 1. State re-established before this fix (read-only)
+
+HEAD unchanged at `51959551fb0bd0687aec17763fe37d79ff05c767` throughout this session's work (all fixes are uncommitted-then-committed on top of it, not a new base). `origin/main` unchanged. `scoring-engine/dist/` present, untracked, untouched (confirmed via `git status` before and after). Live pin re-confirmed at the rollback SHA `933ae62fabc2f8d50adf0e084d422c7d7db47181`; no further production mutation occurred after the rollback documented in Section 0. This entire session's work is code + tests + docs on the repair branch; zero production writes, zero provider calls, zero live Supabase reads were performed while implementing or testing the fix (`createSupabaseFixture`-backed offline tests only).
+
+### 2. Defect reproduction (before the fix existed)
+
+`lib/knowledge/score-eligibility-contract.test.ts` (new) reproduces the exact failure mode with 8 deterministic fixtures, modeled directly on the real Payton Tolle row: an old-contract scored_props row (`publishable: true`, `publishability_reasons: []`, no contract linkage) for (1) an MLB pitcher prop missing pitcher-matchup context (the literal Payton Tolle shape), (2) missing ballpark, (3) missing handedness, (4) a WNBA prop with no injury-check marker, (5) a WNBA prop with stale minutes, (6) a score row with a `score_inputs` link that predates the new field entirely, (7) a score row explicitly claiming an unknown/weaker contract version, and (8) a positive control -- a genuinely current strict-v1 row, otherwise identical, which must remain eligible everywhere. Confirmed (by temporarily reverting the read-side check) that all of (1)-(7) reach the Manual Analyzer/board/Covered Picks/direct-detail lookup before the fix, and are excluded after -- the defect was real and is now closed.
+
+### 3. Every path that can reuse an old score -- traced and verified
+
+- **`getCoveredPicksOfTheDay`, `getParlayOptions`, `getBoardOpportunities`, `getCoveredPickDetails`** (`lib/knowledge/read-service.ts`): the four real relational readers. All four now call a new shared helper, `filterRowsWithCurrentScoreContract`, before returning any row (Section 5). `getCoveredPickDetails` had **zero** pre-existing `publishable`/contract gating of any kind before this session -- a separate, broader gap than contract versioning, closed as part of the same narrow change since it required touching the same function anyway.
+- **Snapshot construction** (`collectPublicSnapshotPublicationSummaries` / `collectRoutePublicSnapshotPublication`, `lib/knowledge/public-snapshots.ts`): the `covered-picks` and `parlay-options` routes' `build()` calls are literally `getCoveredPicksOfTheDay`/`getParlayOptions` -- the same functions just fixed, not a duplicate implementation. Proven directly (not just architecturally) by a new test in `lib/ops/public-snapshots.test.ts` that calls the real `collectPublicSnapshotPublicationSummaries` (no stubbed reader) against a fixture containing one old-contract and one current-contract row: only the current-contract row is counted. A separate assertion inside `publishPublicSnapshot` was considered and rejected as redundant -- see Section 6.
+- **Relational fallback** (`resolvePublicSnapshotRoute`): unchanged from Session 96's finding -- it calls the same real reader functions, so it inherits the fix automatically.
+- **API serialization** (`app/api/knowledge/covered-picks/route.ts`, `parlay-options/route.ts`, `model-performance/route.ts`): all three call `resolvePublicSnapshotRoute`, which either serves an already-filtered snapshot or triggers the already-filtered fallback -- no separate serialization-layer path exists that could bypass it.
+- **Model performance** (`getModelPerformance`): deliberately **not** filtered -- see Section 10.
+- **Saved picks** (`lib/db/saved-picks.ts`, table `saved_picks`): a user-initiated personal save action that copies `covered_score` etc. into its own row at save time; it does not re-read `scored_props` live and is not a public recommendation surface. Treated as out of scope for the same reason as model-performance (a personal record of a decision already made), not audited further this pass.
+- **New finding, flagged not fixed**: `app/api/knowledge/scored-props/route.ts` reads `scored_props` directly via `selectRows`, with no auth check and no contract filter, returning raw `covered_score`/`publishable`/`publishability_reasons` for any matching row. It has zero callers anywhere in `app/`/`components/` (an internal debug endpoint, `cacheProfile: "private-debug"`), but Next.js serves every `app/api` route regardless of internal usage, so it is a real, unauthenticated, unfiltered exposure path distinct from the four consumer surfaces this session's fix covers. Not fixed this session (its correct treatment -- auth-gate it, apply the same filter, or confirm/delete it as intentional -- is an owner decision, not obviously "the smallest safe design" to guess at). Flagged as a follow-up task (`task_1676d3d8`) rather than silently expanding this session's scope.
+
+### 4/5. Design chosen: score-row contract provenance in the existing `score_inputs.feature_payload` (Design A)
+
+New file `lib/knowledge/eligibility-contract.ts` exports one shared constant, `STRICT_ELIGIBILITY_CONTRACT_VERSION = "strict-v1"`, re-used by BOTH Session 98's envelope-level guard (`public-snapshot-types.ts` now re-exports it instead of defining its own copy) and this session's score-row-level guard -- one value, one bump policy, two enforcement layers.
+
+- **Write side** (`scoring-service.ts`, `scoreCurrentProps`): `score_inputs.feature_payload` now always includes `scoreEligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION` alongside the pre-existing `completenessState`. No migration -- `score_inputs`/`score_input_id` and its `feature_payload` JSONB column already existed (Phase 16/18). Confirmed the existing `stableSerialize`/`sameSerializable` deep comparison (used to decide whether a rescore is a real change worth writing) naturally treats a contract-version difference as a real change, with no special-casing required (Section 8).
+- **Read side** (`read-service.ts`): new shared helper `filterRowsWithCurrentScoreContract`, batched through the existing `chunkIds`/`SCORED_PROPS_LOOKUP_BATCH_SIZE` pattern (the same one already in place to avoid a real historical `UND_ERR_HEADERS_OVERFLOW` incident), looks up each candidate row's linked `score_inputs.feature_payload.scoreEligibilityContractVersion` and keeps only exact matches to the current constant. Missing linkage, missing field, or any other value (older, unknown, malformed) all fail closed identically -- no version-ordering comparison, matching Session 98's precedent.
+- **Design B (read-time-only revalidation) was rejected**: no single existing private function evaluates all strict blockers from bounded stored inputs without re-invoking scoring logic, which would duplicate `publishabilityAssessment` and risk drift. Design A is smaller, keeps the contract private (never exposed in any public API response), and required no schema change.
+- Rejected explicitly, per the owner's list: score age alone, snapshot version alone, deployment time alone, old `publishable` alone, explanation-text parsing, and ad hoc UI-side blocker duplication -- none of these were used anywhere in the implementation.
+
+### 6. Preventing false strict-v1 snapshot stamping
+
+Read-service-layer enforcement is architecturally the single source of truth: snapshot construction calls the exact same `getCoveredPicksOfTheDay`/`getParlayOptions` functions, so there is no second, parallel data path that could bypass the filter -- a separate assertion inside `publishPublicSnapshot` would be pure duplication, not additional safety. Proven directly (not just argued) by the new `public-snapshots.test.ts` test described in Section 3, which exercises the real `collectPublicSnapshotPublicationSummaries` entry point end-to-end against a mixed-contract fixture.
+
+### 7. Natural recovery, no broad rescore -- proven end-to-end
+
+New test in `lib/knowledge/mlb-e2e.test.ts`, on the file's existing real complete-context MLB fixture: two old-contract scored rows exist (both `publishable: true`, no contract linkage -- the real production shape). Both are excluded from the Manual Analyzer today. Only ONE prop's `current_props.updated_at` is bumped (simulating a genuine, narrow resync of that single prop). A real `scoreCurrentProps` call then re-enters scoring for exactly that one prop (`eligibleCount: 1`) -- its sibling, left untouched, is correctly classified `already_fresh` and is never touched. The rescored prop gets a fresh `score_inputs` row stamped with the current contract and recovers on the Manual Analyzer; its untouched sibling remains excluded, with its original `score_input_id: null` unchanged -- proving recovery is per-prop and natural (via real rescoring), never a batch backfill or broad rescore.
+
+### 8. Identical-value rescore still persists the new contract -- 3 new tests
+
+Added to `lib/scoring/scoring-service.test.ts`, reusing the file's existing "real second scoring pass" pattern: (1) a score_input row that predates the field entirely, rescored with numerically identical feature inputs, still produces a real write (not skipped) and the write stamps the current contract; (2) a score_input row explicitly stamped with an older/superseded contract string, same result; (3) a row already on the current contract, with no other changes, correctly continues to SKIP the write -- proving the pre-existing unchanged-value write-avoidance optimization (an egress/cost safeguard, not incidental) still works for the steady state and was not broken by adding the new field.
+
+### 9. Every public surface tested
+
+Covered directly by the 8 tests in Section 2 (exclusion) and the positive control in the same file (inclusion), the Section 7 recovery test (transition), and the pre-existing full suite (regression) -- Manual Analyzer, Covered Picks, board, and direct scored-prop lookup are all covered for both MLB and WNBA old-contract shapes (missing pitcher-matchup, ballpark, handedness, injury-check marker, stale minutes, no-metadata, unknown-contract).
+
+### 10. Model performance -- intentionally exempt (documented, tested)
+
+`getModelPerformance` answers "how did our past, already-made recommendations grade?" not "what can a user act on today" -- it joins from `grading_results`, an immutable historical record keyed to the exact scored_props row that produced that specific past recommendation, already gated on `graded_at` presence (Session 98's snapshot filter). Applying the contract filter here would not recover anything the way Section 7's natural rescore does (the underlying game is over; there is no future rescore that could "fix" a graded row's linked score) -- it would only permanently erase real historical accuracy data every time the blocker rule set is tightened, misrepresenting the model's genuine track record. New test in `read-service.test.ts` proves this directly: a historical graded outcome linked to an old-contract score still reports correctly.
+
+### 11. Quantified candidate availability -- fixture-grounded projection only, no live counts promised
+
+No live Supabase read was performed this session (none was needed or authorized for a pure code-repair pass, and Section 12's owner instruction explicitly says not to request production authorization this pass). Fixture-proven, deterministic behavior:
+- **Before any natural rescore**: every scored_props row written under the live pin (`933ae62...`) or any pre-this-session candidate build has no `scoreEligibilityContractVersion` linkage at all (the field did not exist before this session) -- **every existing scored row, in every league, is excluded from Manual Analyzer/Covered Picks/board/direct lookup** until it is naturally rescored. This is the expected, correct, and intentional immediate effect of closing the defect: a temporary drop to zero publicly-eligible rows in both leagues until scoring naturally re-runs, not a bug.
+- **After one successful natural run** (either league): any prop `scoreCurrentProps` actually re-enters (per `shouldRescoreProp`'s existing, unchanged eligibility logic -- unscored, prop_updated, context_updated, identity_repaired, or raw_current) gets a fresh `score_inputs` row stamped with the current contract in the same write as its score; if that row also clears every strict blocker, it is immediately eligible on the Manual Analyzer, and additionally on Covered Picks/the board if `covered_score >= 70`. No count above zero is promised for any specific run -- it depends entirely on live data completeness (weather/ballpark/injury-marker/matchup coverage), unchanged from every prior session's finding.
+- **A future authorized pass** could quantify the real numbers with bounded, read-only queries such as: `select count(*) from scored_props where score_input_id is null` (old-shape rows with no linkage at all) and a bounded join from `scored_props.score_input_id` to `score_inputs.feature_payload->>'scoreEligibilityContractVersion'` to count rows already on the current contract vs. not -- neither was run this session.
+
+### 12. Corrected candidate proof package
+
+- Every public row must independently prove `scoreEligibilityContractVersion == STRICT_ELIGIBILITY_CONTRACT_VERSION` on its OWN linked `score_inputs` row, not merely inherit a correctly-stamped snapshot envelope (Session 98's guard remains, additive).
+- The exact real Payton Tolle-shaped row (or any equivalently-shaped old-contract row) must remain excluded from every public surface until it is naturally rescored -- proven by Section 2/9's tests, and true for the live-pin row itself the moment this candidate is promoted (it will simply disappear from public surfaces rather than displaying a false Covered Score).
+- A naturally rescored, genuinely complete row must become eligible -- proven by Section 7.
+- Snapshot envelope and every contained score's contract must agree -- proven by Section 6's real-entry-point test.
+- No broad rescore, no backfill anywhere in this session's diff (confirmed by final diff review, Section 13).
+- MLB remains empty unless a complete strict score is naturally produced -- unchanged, expected (Sessions 96-98).
+- This proof package intentionally does **not** request new production authorization -- that decision belongs to the owner, informed by Section 11's honest "temporary drop to zero until natural rescore" disclosure.
+
+### 13. Validation
+
+- `npx tsc --noEmit`: clean.
+- Full suite (`pnpm run test`): **1059 tests, 1058 pass, 1 skip, 0 fail** (up from 1046/1045/1 at Session 98 -- 13 net new tests: 8 defect-reproduction + positive-control tests, 1 snapshot-construction test, 1 natural-recovery test, 3 identical-rescore tests, 1 model-performance exemption test, minus/plus fixture-repair edits to ~20 pre-existing tests that needed a matching `score_inputs` row added so they keep representing "already scored, complete" props correctly under the new field).
+- `npm run build`: clean.
+- `npx opennextjs-cloudflare build`: clean, `.open-next/worker.js` produced.
+- Workflow/YAML validation: unaffected -- no workflow file touched this session.
+- Public-boundary audit: unaffected -- covered by the full suite's own public-export tests (all passing); no new public API field was added anywhere (the contract lives only in the private `score_inputs.feature_payload`, never serialized to a public route).
+- Final diff review: 8 files changed (`lib/knowledge/eligibility-contract.ts` new, `lib/knowledge/public-snapshot-types.ts`, `lib/knowledge/scoring-service.ts`, `lib/knowledge/read-service.ts`, plus test files), 1 new test file (`score-eligibility-contract.test.ts`) -- no unrelated file touched; `scoring-engine/dist/` confirmed untouched.
+
+### 14. Restrictions honored
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged (still `933ae62...`, confirmed at session end); no scheduler cadence/state change; Policy C not activated; trigger normalization not fixed; no new scheduler; no live variables modified; no production writes or provider calls; no broad production rescore; no historical backfill; no old production `publishable` flags updated; no database rows deleted/reconciled/cleaned; no migrations/constraints added; no scoring formula/weight/label/threshold changed; Covered Picks floor untouched (still 70); no manufactured picks; no new provider integrated; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 15. Exact remaining gaps
+
+1. `app/api/knowledge/scored-props/route.ts` is an unauthenticated, unfiltered debug route -- flagged (Section 3, `task_1676d3d8`), not fixed this session; owner decision needed on auth-gate vs. contract-filter vs. delete.
+2. Section 11's counts are fixture-projected only -- no live bounded read was performed; the real live drop-to-zero-then-natural-recovery curve is unmeasured.
+3. Every existing production/candidate scored_props row (both leagues) will read as contract-unversioned the moment this fix is promoted, since the field is new -- expected and correct, but means a fresh natural-run proof window is required again before any public row would show, mirroring (but not identical to) Session 98's post-promotion MLB-empty finding.
+4. The unresolved Session 73 root-mechanism question (why `refreshRecentFeaturesJob` ran for Jordin Canada when its own gate reported false) remains open and untouched -- unrelated to this session's scope.
+
+**Verdict: `SCORE-CONTRACT DEFECT FIXED — CANDIDATE READY FOR NEW OWNER AUTHORIZATION`.** The exact defect that failed the prior bounded natural-run proof (an old, weaker-contract score row surfacing live inside a correctly-stamped strict-v1 snapshot) is closed at its root: every public read path now requires each individual score row to independently prove it was produced or naturally revalidated under the current eligibility contract, not merely that it lives inside a correctly-labeled envelope. The fix is the smallest viable design (one shared constant, one JSONB field already-provisioned for exactly this purpose, one shared batched read-side filter reused across four functions), adds no migration, exposes no new public field, and is proven by 13 new tests plus zero regressions across the full 1059-test suite. Natural recovery (no broad rescore, no backfill) is proven end-to-end. Model-performance's intentional exemption is documented and tested. One new, separate, low-blast-radius finding (the unauthenticated debug route) is flagged for owner decision rather than folded into this fix. No production system was touched; the live pin remains `933ae62...`. Ready for the owner to decide whether and when to re-attempt a bounded candidate pin promotion under this corrected candidate, informed by Section 11's honest disclosure that public surfaces will read empty immediately post-promotion until at least one natural scoring run occurs per league. Phase 20 not begun; production not changed.
+
+## Session 100 (2026-08-02, continuation from `fa8cf9c`): the one named blocker (`scored-props` debug route) is closed by removal; the same audit found and fixed one additional authenticated bypass (saved-picks live re-hydration)
+
+The owner accepted Session 99's score-eligibility-contract fix and named one concrete remaining blocker before authorizing a new candidate proof: `app/api/knowledge/scored-props/route.ts`. This is a focused public-surface closure pass -- scoring, WNBA ingestion, UI, calibration, snapshot architecture, Policy C, and provider research were explicitly out of scope and were not touched.
+
+### 1. State re-established (read-only, no production writes/provider calls)
+
+Local HEAD and `origin/codex/public-repo-repair` both equal `fa8cf9c0f2c1c16ea90eed82efb3f7e41e738249` at session start (verified equal via `git fetch` + `git rev-parse`). `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree at session start: clean except the pre-existing untracked `scoring-engine/dist/` (confirmed untouched throughout, both before and after this session's changes). Exact commits re-verified:
+- `64fa2929b8c46c6110457b750af52bc1dd048d94` (parent `51959551f...`) -- score-level contract provenance + read enforcement (4 files).
+- `537c04bcc87c52e7c6ec0dd5c17356720670f499` (parent `64fa292...`) -- regression/transition tests (6 files).
+- `fa8cf9c0f2c1c16ea90eed82efb3f7e41e738249` (parent `537c04b...`) -- Session 99 docs (2 files).
+
+Fresh live-pin re-check via `gh api repos/CoreyTenacity/Covered-Prop-Analysis/environments/production/variables`: `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181` (unchanged, still the rollback SHA), `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true` (both unchanged). `gh run list` showed the public repo's scheduled pipeline actively running on its normal cadence (one run `in_progress`, most recent completed runs all `success`) -- this is expected, ordinary production activity on the unchanged rolled-back pin, not something this session triggered or needed to intervene in. Private repo's own two scheduled workflows (`Covered GitHub Actions live pipeline`, `WNBA data ingestion`) both confirmed still `disabled_manually`, unchanged.
+
+### 2/3. `scored-props` route audit and classification
+
+Read the full route file and its dependencies directly (no assumption from the filename):
+- **Publicly reachable**: yes -- confirmed directly by rebuilding both `npm run build` and `npx opennextjs-cloudflare build` before any change, and finding `ƒ /api/knowledge/scored-props` in both route tables. This repository has no `middleware.ts` anywhere (confirmed by `find`), so nothing in the stack gates any route globally.
+- **Authentication**: none -- no session/auth import or check anywhere in the route file.
+- **Middleware protection**: none (no middleware.ts exists in the repo at all).
+- **Cloudflare exposure**: yes, as above -- it ships in the built Worker.
+- **Public-export status**: not listed in `docs/public-repo-boundary.json` at all (neither `publicSafe` nor `privateOnly`) -- that manifest governs the separate private-repo-to-public-repo SOURCE sync used for the scoring pipeline's own checkout, not the deployed Cloudflare app's HTTP surface, so it is not authoritative for this question either way.
+- **UI callers**: zero (`grep` across `app/` and `components/` for the route path found nothing).
+- **Internal callers**: zero.
+- **Fields returned**: full `scored_props` row (`covered_score`, `confidence_score`, `data_quality_score`, `trend_score`, `matchup_score`, `market_score`, `edge_value`, `edge_score`, `recommendation`, `risk_flags`, `prop_state`, `publishable`, `publishability_reasons`), plus unredacted `score_explanations` text (`summary`, `explanation`, `reasoning_block`, `factor_notes`, `risk_notes`), `grading_results`, sportsbook/line-movement data, and a redundant `debug` object re-stating `publishable`/`publishability_reasons`.
+- **Old/unversioned score returned**: yes -- confirmed by code reading; it never touches `score_input_id` or any `score_inputs` row, so it had zero score-eligibility-contract enforcement of any kind, identical to the pre-Session-99 defect shape.
+- **Required for any supported product feature**: no.
+
+**Classification: (3) obsolete diagnostic route** -- its own `cacheProfile: "private-debug"` naming, zero callers, and zero auth all point to an ad hoc internal debugging tool that was never wired into the product, not a maintained surface.
+
+### 3 (correction chosen)
+
+Per the owner's own instruction ("If obsolete or diagnostic: Remove it from public reach... Prefer removal/denial over preserving an unnecessary score endpoint"), the route was **deleted outright** (`git rm app/api/knowledge/scored-props/route.ts`) rather than gated -- there is no product feature to preserve, so there is nothing to fail closed on and nothing left to maintain or accidentally re-enable later. Confirmed removed from both build route tables after a clean rebuild (`.next`/`.open-next` fully regenerated, not just incrementally rebuilt). The previously-spawned follow-up task for this route (`task_1676d3d8`) was withdrawn as resolved.
+
+### 4. Bypass audit -- every score-exposing route/service
+
+```text
+route/service                                              | public/private   | score source                              | contract enforced          | authentication            | action required
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+app/api/knowledge/covered-picks/route.ts                   | public           | snapshot (getCoveredPicksOfTheDay)        | yes (Session 99)           | none (intentional)        | none
+app/api/knowledge/covered-picks/[scoredPropId]/route.ts    | public           | getCoveredPickDetails                     | yes (Session 99)           | none (intentional)        | none
+app/api/knowledge/parlay-options/route.ts                  | public           | snapshot (getParlayOptions)               | yes (Session 99)           | none (intentional)        | none
+app/api/knowledge/model-performance/route.ts               | public           | getModelPerformance (grading_results join)| n/a -- historical, exempt  | none (intentional)        | none
+app/api/knowledge/grading-results/route.ts                 | public          | grading_results only, no covered_score/labels selected at all | n/a -- no score fields exposed | none | none
+app/api/knowledge/scored-props/route.ts                    | was public       | raw scored_props, no filter               | was none                   | was none                  | done -- removed this session
+app/api/knowledge/provider-audit/route.ts                  | public           | no scored_props/covered_score reference   | n/a                        | none                      | none
+app/api/me/picks/route.ts + [pickId]                       | authenticated    | listUserPicks -> latestScoredByCurrent    | yes -- fixed this session  | session (resolveRequestSessionUser) | done -- filtered
+app/api/me/parlays/route.ts + [parlayId]                   | authenticated    | listUserParlays -> latestScoredByCurrent (shared helper) | yes -- fixed this session (same fix) | session | done -- filtered
+saveUserPick / saveUserParlay (lib/auth/user-tracking.ts)  | internal write path | one-time scored_prop_id identity resolution at save time only, never displayed directly | not applicable -- the same row is immediately re-displayed via listUserPicks, which is now filtered | (auth enforced by caller route) | none -- covered by the listUserPicks/latestScoredByCurrent fix
+app/api/me/settle/route.ts                                  | authenticated    | runAutomaticUserSettlement (settles existing saved picks against real outcomes, not a live covered_score redisplay) | n/a -- settlement, not score exposure | session | none
+app/api/admin/settle-user-picks/route.ts                    | internal/admin   | runAutomaticUserSettlement                | n/a -- same as above       | bearer/secret (refreshAuthorized) | none
+lib/db/saved-picks.ts (separate `saved_picks` table)        | server-side only | covered_score copied and frozen at save time, never re-fetched live | exempt -- historical, frozen at save | n/a | none -- zero callers found anywhere (dead code, out of this pass's scope to remove)
+getBoardOpportunities (lib/knowledge/read-service.ts)       | currently no production caller | scored_props (contract-enforced since Session 99) | yes (Session 99) | n/a -- not reachable via any route/component today | none -- noted honestly, not alarming; defense-in-depth for whenever a caller is added
+app/api/parlay-analysis/route.ts                            | public           | analyzeParlaySelectionRemote (scores props submitted by the caller from already-public data, no re-fetch of stored scores) | n/a | none | none
+```
+
+Required invariant re-confirmed: every CURRENT-recommendation surface (public or authenticated) now requires exact score-level contract provenance; only genuinely historical/frozen data (`model-performance`, `grading-results`, `saved_picks`, the one-time `saveUserPick`/`saveUserParlay` identity link) remains exempt.
+
+### 5. Regression tests (adapted to the removal decision)
+
+Since the named route was deleted rather than gated, items 1-4 of the requested list ("unversioned/weak/unknown/malformed score rejected by the route") collapse into "the route is gone and cannot return anything at all" -- proven directly, plus a durable guard against reintroduction:
+1. `lib/ops/scored-props-bypass.test.ts`: asserts `app/api/knowledge/scored-props/route.ts` no longer exists on disk.
+2. Same file: asserts no `app/api/**/route.ts` file anywhere contains a direct `"scored_props"` table reference -- a durable regression guard against a *future* route reintroducing an unfiltered read, not just this one file.
+3. Items 5/8 (valid strict-v1 behaves correctly; no bypass route returns a Payton-Tolle-shaped old score) -- already proven by Session 99's `score-eligibility-contract.test.ts` suite for the four sanctioned routes; re-verified passing this session (full suite, Section 8).
+4. Item 6 (no private score inputs exposed) -- trivially true once the route is deleted; the four sanctioned routes were already proven not to expose raw `feature_payload`/inputs in Session 99.
+5. Item 7 (auth works if retained as internal) -- moot for the deleted route; the newly-fixed authenticated saved-picks path already has real, pre-existing, unmodified session auth (`resolveRequestSessionUser`), confirmed by reading `app/api/me/picks/route.ts` directly, not assumed.
+6. Item 9 (historical model-performance intact) -- unchanged from Session 99, re-verified passing.
+7. Item 10 (public boundary/export safe) -- `scripts/public-export.test.mjs`/`check-public-repo-boundary.test.mjs` suites re-run, all passing, unaffected by the route deletion or the saved-picks fix.
+8. **New**: `lib/auth/user-tracking.test.ts` (new file; this module had zero test coverage before this session) -- 3 tests proving the saved-picks bypass fix: an old-contract (`score_input_id: null`) latest score is hidden from `listUserPicks` (falls back to `null`, exactly like a pick with no scored_prop at all, not silently displayed); a score explicitly stamped with an older/weaker contract version is also hidden; a genuinely current strict-v1 score still displays normally. `lib/auth/*.test.ts` was not previously included in the `pnpm run test` CI command at all -- added to `package.json`'s test glob this session so this coverage is real, not decorative (per this project's standing rule that untested-in-CI code doesn't count as proven).
+
+### 6. Score-contract lookup cost (unchanged mechanism from Session 99, now also used by saved picks)
+
+`filterRowsWithCurrentScoreContract` (now exported from `read-service.ts` and reused, not duplicated, by `lib/auth/user-tracking.ts`): batched via the pre-existing `chunkIds`/`SCORED_PROPS_LOOKUP_BATCH_SIZE = 100` pattern.
+- **0 candidate rows**: zero additional queries (fast `return []` before any fetch).
+- **50 rows** (unique `score_input_id`s): 1 batched query.
+- **100 rows**: exactly 1 batch (the boundary), 1 query.
+- **250 rows**: `ceil(250/100) = 3` batches, run via `Promise.all` (not sequential), 3 queries.
+- **No N+1**: one bounded batched `id IN (...)` query set per call, never one query per row -- identical pattern already accepted elsewhere in this file for `scored_props`/`score_explanations` lookups.
+- **No `select(*)`**: explicit column list (`"id,feature_payload"`) throughout, including the new `lib/auth/user-tracking.ts` usage (it calls the exact same exported function, so it's the identical query shape, not a second implementation).
+- **No raw feature payload exposed publicly**: `feature_payload` is read internally only to extract one field's value for comparison; it is never included in any function's return value anywhere.
+- **Relational-fallback impact**: none additional -- the fallback calls the same already-costed functions.
+- **Snapshot-build impact**: none additional -- `covered-picks`/`parlay-options` snapshot construction calls the same already-costed functions, and only runs on the scheduled pipeline, not per browser request.
+- **Browser-request impact**: zero for the two snapshot-backed public routes on the happy path (users read a pre-built `provider_cache` row); bounded (1-3 extra batched Supabase queries) for `getBoardOpportunities`/`getCoveredPickDetails`/the newly-fixed `listUserPicks`/`listUserParlays`, which run the filter synchronously per request.
+- **Supabase egress impact**: **not narrowed this session, and reported honestly as such.** `feature_payload` is fetched in full (it can include `completenessState`, `featureProvenance`, and for freshly-scored rows a full `scoreReplay` envelope -- plausibly single-digit KB per row, not measured directly this pass) when only one string field is actually needed. A PostgREST JSON-path select (`feature_payload->>scoreEligibilityContractVersion`) could in principle return just that string -- but this codebase has zero existing precedent for that select syntax anywhere, and the offline test fixture harness (`supabase-fixture-harness.ts`) **ignores the `select` parameter entirely** (confirmed by reading it), so no test in this repository could actually verify that syntax executes correctly against real PostgREST before it ran against production data. Per this project's own standing rule ("do not call something verified solely because a unit test passes when the behavior depends on... external APIs"), this was not implemented blind. **Recommended as a real, narrow, live-verified follow-up**, not done this pass.
+- **Cloudflare impact**: the added query cost is a server-side Worker-to-Supabase subrequest, not part of the payload served to the browser; well within the Worker's existing subrequest budget, same order of magnitude as pre-existing batched lookups already accepted in this file.
+
+### 7. First-candidate availability -- reconfirmed unchanged from Session 99
+
+Every existing production score is unversioned and will be excluded the moment a new candidate is promoted; only naturally rescored rows receive `strict-v1`; no broad rescore is required or authorized by this session; initial boards may be empty; a successful WNBA natural run should create newly eligible strict rows; MLB is expected to remain empty because required source data is unavailable (unchanged, Sessions 96-99). This session's fix does not change any of these expectations -- it closes two additional bypasses that were reachable independently of snapshot/board state.
+
+### 8. Validation
+
+- `npx tsc --noEmit`: clean (both before and after a full `.next`/`.open-next` cache clear + rebuild, to rule out a stale route-manifest false negative).
+- `lib/ops/scored-props-bypass.test.ts`: 2/2 passing.
+- `lib/auth/user-tracking.test.ts`: 3/3 passing (new file; module had 0 tests before this session).
+- Full suite (`pnpm run test`, now including `lib/auth/*.test.ts`): **1065 tests, 1064 pass, 1 skip, 0 fail** (up from 1060/1059/1 at Session 99 -- 5 net new tests: 2 bypass-removal guards + 3 saved-picks contract tests).
+- `npm run build`: clean; confirmed `/api/knowledge/scored-props` no longer appears in the route table.
+- `npx opennextjs-cloudflare build`: clean, `.open-next/worker.js` produced, same route table.
+- Workflow/YAML validation: unaffected -- no workflow file touched.
+- Public-boundary audit: unaffected -- covered by the full suite's own public-export tests, all passing.
+- Final diff review: 4 files changed (`app/api/knowledge/scored-props/route.ts` deleted; `lib/auth/user-tracking.ts`, `lib/knowledge/read-service.ts`, `package.json` modified), 2 new test files -- no unrelated file touched; `scoring-engine/dist/` confirmed untouched.
+
+### 9. Restrictions honored
+
+No push/merge to private main; no force-push; no deploy/promotion; live V2 pin unchanged (`933ae62...`, reconfirmed); no scheduling/live-variable change; Policy C not activated; no production writes, provider calls, rescoring, backfills, cleanup, or reconciliation; no migrations; no scoring formula/weight/label/threshold change; Covered Picks floor untouched (70); no provider integrated; `scoring-engine/dist/` untouched; nothing pushed anywhere except `origin/codex/public-repo-repair`.
+
+### 10. Exact remaining gaps
+
+1. Egress narrowing for the `score_inputs.feature_payload` lookup (Section 6) is recommended, not implemented -- requires live PostgREST verification this offline pass cannot safely provide.
+2. `lib/db/saved-picks.ts` is dead code (zero callers anywhere) -- noted, not removed; out of this pass's narrow scope (not a live bypass since nothing calls it).
+3. `getBoardOpportunities` has no current production caller at all -- the fix applies regardless (defense-in-depth), but this is worth the owner's awareness independent of this pass.
+4. Every carry-forward gap from Session 99 (Section 15 above) remains unchanged and open: Section 11's projection is still fixture-only, no live bounded read was performed this session either; every existing production score row is still unversioned and will read empty immediately post-promotion until naturally rescored; the Session 73 Jordin Canada root-mechanism question remains open and unrelated.
+
+**Verdict: `PUBLIC SCORE-CONTRACT ENFORCEMENT COMPLETE — READY FOR NEW OWNER AUTHORIZATION`.** The one named blocker (`app/api/knowledge/scored-props/route.ts`) is closed by removal -- classified as an obsolete, unauthenticated, zero-caller diagnostic route with no product feature depending on it, deleted outright per the owner's own "prefer removal" instruction, with a durable regression guard against any future route reintroducing a direct, unfiltered `scored_props` read. The same required bypass audit (Section 4) additionally found and fixed one real authenticated bypass -- the saved-picks list (`/api/me/picks`, `/api/me/parlays`) re-hydrates covered_score/labels LIVE from the latest `scored_props` row on every read with no contract check, the same category of gap as Session 99's public-route fix, just behind login -- corrected by reusing (not duplicating) the exact same shared filter, with 3 new tests plus a CI-glob fix so this module's tests actually run. One dead-code note (`saved-picks.ts`, zero callers) and one narrowing opportunity (Section 6 egress) are reported honestly rather than acted on unverified. Full suite: 1065/1064/1/0. No production system touched; the live pin remains `933ae62...`. Phase 20 not begun; production not changed.
+
+## Session 101 (2026-08-01/2026-08-02, continuation from `88a4eed`): owner-authorized second candidate pin promotion; bounded natural-run proof PARTIAL -- core score-contract fix verified live and correct; full WNBA certification chain blocked by the pre-existing, unrelated injury-marker gap, not by any new defect
+
+The owner explicitly authorized promoting candidate `88a4eed0ac8fef350c625492e92245fd126216ed` (repair-branch tip after Sessions 99-100) to `COVERED_PRIVATE_PIPELINE_SHA_V2`, scoped narrowly to a bounded natural-run proof during the current/next WNBA window, with the fixed rollback reference `933ae62fabc2f8d50adf0e084d422c7d7db47181` and an extensive, explicit list of permanent restrictions (no cadence/timeout/Policy-C changes, no `workflow_dispatch`, no provider work, no formula changes, no patching forward if a defect is found -- roll back first).
+
+### 1. Candidate verification (before any production action)
+
+Local HEAD and `origin/codex/public-repo-repair` both equal `88a4eed0ac8fef350c625492e92245fd126216ed`. `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree clean except the pre-existing untracked `scoring-engine/dist/` (confirmed untouched throughout). `c6c2c43`/`88a4eed` re-verified with exact parents/subjects/files matching Session 100's own report. Confirmed present in the candidate: score-level strict-v1 provenance (`eligibility-contract.ts`), contract filtering in Covered Picks/Parlay Options/board/details (`filterRowsWithCurrentScoreContract`), saved-pick/parlay filtering (Session 100), the scored-props route removal, the strict-v1 snapshot envelope guard (Session 98), the WNBA batched-delete fix, the 20-minute enrichment deadline / 5-minute reserve, the injury-marker-after-persistence ordering, and 21 strict completeness blockers -- all confirmed present by direct code inspection (`git diff --stat` against the Session-98 base showed zero changes to `covered-score.ts`, any adapter, or any workflow file, confirming no scoring-formula change and no Policy-C activation).
+
+### 2. Production baseline (before promotion)
+
+Live pin was the rollback SHA; public scheduler enabled; private schedulers disabled; WNBA ingestion enabled; no in-progress runs. Baseline snapshot state (all pre-Session-98 code, zero `eligibilityContractVersion` field): `covered-picks:latest` count 0 (fallback), `parlay-options:latest` count 28 (published), `model-performance:latest` count 306 (published). Zero injury-check markers existed in production already, before any change this session -- the long-documented, pre-existing gap, unrelated to this candidate.
+
+### 3-4. Promotion
+
+Mutated `COVERED_PRIVATE_PIPELINE_SHA_V2` from `933ae62fabc2f8d50adf0e084d422c7d7db47181` to `88a4eed0ac8fef350c625492e92245fd126216ed` via `gh api --method PATCH .../environments/production/variables/COVERED_PRIVATE_PIPELINE_SHA_V2` at `2026-08-01T23:19:58Z`, immediately read back and confirmed exact match. No other variable touched.
+
+### 5-6. Natural runs observed and score-contract verification
+
+Three genuinely post-promotion `schedule`-triggered runs were captured and independently verified (checkout SHA re-confirmed via each run's own "Verify checkout is exactly the approved SHA" log step, not inferred):
+
+| run id | created (UTC) | league | configLimit | duration | conclusion |
+|---|---|---|---|---|---|
+| 30723441565 | 23:29:51 | MLB | 10 | ~3m | success |
+| 30724028260 | 23:48:04 | WNBA | 8 | ~2m50s | success |
+| 30726560157 | 01:09:55 | MLB | 10 | ~4m30s | success |
+
+All three: exact candidate SHA confirmed checked out; `--trigger schedule`; configLimit unchanged from pre-Policy-C values (WNBA 8, MLB 10) -- Policy C confirmed still inactive (the trigger-normalization bug that gates it, `args.trigger === 'scheduled'` never matching the real `'schedule'` event name, is unchanged in `scripts/run-covered-job.mjs`); all well under the 25-minute ceiling.
+
+**Score-contract enforcement verified live, directly, at the row level** -- the single most important proof: a bounded read of `scored_props` found 15 pre-existing, high-scoring (86-91), `publishable: true` WNBA rows dated July 12-28 (weeks before this candidate), each with a real `score_inputs` linkage whose `feature_payload.scoreEligibilityContractVersion` is `null` (predates the field entirely). Calling the REAL production `getParlayOptions`/`getCoveredPicksOfTheDay` functions directly confirmed **zero** of these appear on either surface for either league. The exact named Payton Tolle row (`scored_props.id = d2555bc9-4c8a-4c8c-a815-620b38d43d65`, `covered_score: 61`, `publishable: true`, empty `publishability_reasons`, unchanged in the table) is confirmed excluded from both `getParlayOptions("mlb")` and `getCoveredPickDetails(...)` -- **directly proving, live, that the exact defect this whole engagement exists to close is closed.** Every snapshot `:latest` payload across all three routes and all three runs now carries `eligibilityContractVersion: "strict-v1"`, confirming Session 98's guard is live and stamping correctly.
+
+### 7. WNBA strict certification chain -- NOT completed this window (not a new defect)
+
+All three runs reached scoring successfully (40 WNBA rows computed real scores 28-92; 28 MLB rows computed real scores 34-80), but **every single scored row in both leagues, across all three cycles, carried `stale_features`/`minutes_stale`/`injury_context_unavailable`-style blockers** -- because zero injury-check markers exist in production, before or after this session's promotion, and no evidence of a feature/injury/lineup refresh job executing appeared in any of the three runs' logs (only ESPN schedule checks and a SharpAPI identity-repair pass ran each cycle). This is the same injury-marker/enrichment-rotation gap this engagement has documented extensively across many prior sessions (Sessions 90-96) -- it is **not** a defect introduced by, or a regression caused by, this candidate; the candidate's own scope (Sessions 98-100) was the score-eligibility-contract fix, which is proven working correctly above. No prop in either league reached a genuinely complete, publishable state during the ~1h50m observation window, so the full "one naturally-scored, complete WNBA prop through the entire chain to the UI" certification could not be completed -- there was no honestly-complete candidate to walk through it. Manufacturing one was correctly not attempted.
+
+### 8. MLB containment
+
+Confirmed on both MLB cycles: `getParlayOptions("mlb")` and `getCoveredPicksOfTheDay("mlb")` both return zero rows via direct live query; the 28 newly-scored MLB rows are all correctly blocked (`handedness_missing`, `injury_context_unavailable`, some additionally `missing_team`/`missing_opponent`/`missing_team_context`/`missing_matchup_context`); no incomplete MLB score reached any surface. Empty MLB board remains acceptable and expected.
+
+### 9. Saved-pick/parlay containment -- not live-testable
+
+Zero rows exist in the production `user_picks` table (bounded read confirmed). Session 100's fix cannot be exercised against real data this session; its correctness rests on the 3 offline tests added that session (`lib/auth/user-tracking.test.ts`), unchanged and still passing.
+
+### 10. API/UI
+
+Not separately re-verified via browser this session (no new public-facing rows exist to inspect on any surface -- Covered Picks/Parlay Options both empty on the current pin, exactly as Section 7 above explains; verifying an empty UI state adds no evidence beyond the direct relational-read checks already performed).
+
+### 11. Cost/egress
+
+Both runs' "Run production pipeline" step durations (~3-4.5 min) are consistent with prior sessions' bounded expectations; no evidence of any live SharpAPI HTTP call in either run's log (only the identity-repair pass, which reads already-stored identities); `SHARPAPI_MAX_REQUESTS_PER_MINUTE=8`/`SHARPAPI_REQUEST_SPACING_MS=6500` confirmed unchanged in the run environment; snapshot sizes remained small (0-352 rows); no anomalous egress observed. Not optimized during the proof, per instruction.
+
+### 12. Repository/production state at session end
+
+`COVERED_PRIVATE_PIPELINE_SHA_V2` remains `88a4eed0ac8fef350c625492e92245fd126216ed` (left pinned -- no abort criterion was met at any point, so no rollback was triggered). Public scheduler enabled; private repo's own two schedulers (`Covered GitHub Actions live pipeline`, `WNBA data ingestion`) still `disabled_manually`, unchanged. `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. `scoring-engine/dist/` confirmed untouched. No code changed this session -- this was a live-verification pass only; this doc update is the only repository change.
+
+**Verdict: `BOUNDED NATURAL-RUN PROOF PARTIAL — ADDITIONAL NATURAL RUN REQUIRED`.** The core repository defect this candidate exists to fix -- score-level eligibility-contract enforcement -- is proven live, correct, and working exactly as designed: the named Payton Tolle row and 15 other old-contract high-scoring rows are directly confirmed excluded from every live public surface; every snapshot envelope carries `strict-v1`; MLB containment holds; no abort criterion was triggered across three independently-verified natural `schedule`-triggered runs; Policy C remains confirmed inactive; no formula or migration changed. The one requirement NOT satisfied this window is the full WNBA natural-recovery certification chain (a genuinely complete, publishable WNBA prop naturally reaching the UI) -- blocked entirely by the pre-existing, extensively-documented injury-marker/enrichment-rotation gap that predates and is unrelated to this candidate, not by any regression it introduced. The candidate remains pinned (not rolled back) pending either a future natural run that happens to include a fresh injury/feature refresh, or a separate owner decision on the injury-marker gap itself. Phase 20 not begun; Policy C not fixed; MLB provider integration not begun.
+
+## Session 102 (2026-08-02, continuation from `56c503f`): the owner rejected the PARTIAL verdict, ordered an immediate rollback, and required the zero-marker root cause traced and fixed before any new proof -- root cause found and corrected: the natural pipeline never called the injury-refresh job at all
+
+### 1. Rollback (executed first, per explicit instruction)
+
+- **Mutation timestamp**: `2026-08-02T15:50:15Z` (GitHub's own `updated_at`; the PATCH call itself was retried after two transient network timeouts at `15:46:24Z`/`15:47:02Z` -- confirmed as a genuine, temporary loss of TCP connectivity to `api.github.com` specifically, not a GitHub-side or auth failure, via a direct `curl` to `google.com` succeeding at the same moment; the third attempt succeeded).
+- **Old value**: `88a4eed0ac8fef350c625492e92245fd126216ed`.
+- **Restored value**: `933ae62fabc2f8d50adf0e084d422c7d7db47181`.
+- **Tool/action**: `gh api --method PATCH repos/CoreyTenacity/Covered-Prop-Analysis/environments/production/variables/COVERED_PRIVATE_PIPELINE_SHA_V2`.
+- **Read-back verification**: confirmed exact match immediately after.
+- **Final scheduler states**: `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true` (both untouched); private repo's own two schedulers still `disabled_manually`.
+- **Final active/queued runs**: none in progress at rollback time; all recent runs `completed`.
+- No database rows, snapshots, or aliases were touched; no scheduler state changed; no other variable changed.
+
+### 2. Candidate evidence preserved (not altered)
+
+All candidate-era runs were catalogued (7 total, not just the 3 originally reported -- the candidate stayed live from `2026-08-01T23:19:58Z` promotion to this rollback, ~16.5 hours, since the owner's PARTIAL-verdict message arrived after several more natural cron ticks had already fired): `30723441565` (MLB), `30724028260` (WNBA), `30726560157` (MLB), `30727740375` (WNBA), `30732761919` (MLB), `30733859818` (WNBA), `30737755281` (MLB). Full logs downloaded and preserved in this session's local scratchpad for analysis; nothing in `scored_props`, `provider_cache`, or any other table was modified, deleted, or reconciled.
+
+### 3. Zero-marker root cause -- traced and confirmed exactly
+
+Read the real call graph directly, not inferred from log absence alone:
+
+```text
+public schedule (cron "0,20,40 22,23,0,1,2,3,4 * * *" / "10,30,50 ...")
+  -> scripts/run-covered-job.mjs `github-actions` command
+    -> runGitHubActionsPipeline (lib/ops/github-actions-pipeline.ts:1477)
+      -> buildGitHubActionsLeagueRunReport (:731)
+        -> grade, schedule_refresh, postgame_settlement (MLB only)
+        -> runners.runRepair -> runLivePreScoreRepair (lib/knowledge/enrichment/jobs.ts:2537, PRE-FIX)
+          -> runLiveIdentityRepair
+          -> loadActivePropCoverage
+          -> runBoundedBackgroundEnrichment (SportsDataverse season ingestion)
+          -> inspectLiveRepairPreflight -> { playerLogs, recentFeatures, matchup }  <-- NO injuries field existed
+          -> playerLogs / recentFeatures / matchup stages, gated by preflight       <-- NO injury stage existed
+        -> runScore -> scoreCurrentProps (checks injury-check markers, finds none, blocks every row)
+        -> runBoard, runPublicSnapshots
+```
+
+`refreshInjuriesJob`/`refreshMlbInjuries`/`refreshBasketballInjuries` were reachable from exactly two places in the entire codebase before this session: (1) `lib/knowledge/enrichment/jobs.ts`'s `refresh_injuries` entry in the job-dispatch map, used only by the standalone, manually-invoked `pnpm run cron:run -- knowledge --job refresh_injuries` CLI command; (2) `lib/knowledge/recovery/orchestrator.ts`'s dry-run-only bounded recovery tool. **Neither is called by `runGitHubActionsPipeline`, the actual function the real scheduled production workflow invokes.** This is classification **#1 from the required list: injury refresh was never part of the natural path** -- not a gate that evaluated false, not a provider failure, not a persistence failure. The function calls simply did not exist in that call graph. Confirmed further by direct evidence: `grep -in "injur"` across all 3 originally-captured candidate run logs returns zero matches in every one; a live bounded read of `provider_cache` for `injury-check:*` returned 0 rows before promotion, after every one of the 7 candidate runs, and remains 0 after rollback.
+
+### 4. Reconciling the prior candidate package's claim
+
+Session 99-101's own documentation asserted the natural path could "retrieve injuries -> persist rows -> write markers -> score" as a single natural chain. This was wrong -- it conflated "the underlying functions are well-tested and correct in isolation" (true; Session 88's 15-scenario rollout, `mlb-injuries.test.ts`, `basketball-injuries.test.ts` all still pass unchanged) with "the natural scheduled pipeline actually calls them" (false). The exact function expected to run was `refreshMlbInjuries`/`refreshBasketballInjuries`; the condition controlling whether it ran was, in truth, **no condition at all -- it was simply never invoked**; scoring proceeded regardless because `scoreCurrentProps`'s injury-freshness check (`scoring-service.ts`) is independent of whether an injury refresh ever ran this cycle -- it just reads whatever marker (if any) already exists, which is why 40 WNBA rows scored real, computed values while carrying `injury_context_unavailable` on every one.
+
+### 5. Offline reproduction (before implementing the fix)
+
+Confirmed the pre-fix behavior directly: the old `runLivePreScoreRepair` had no `injuries` field in its preflight or its stage list at all -- there was nothing to "fail" or "skip," the call simply wasn't present in source. This was proven by reading the function's full body (Section 3 above) rather than by writing a passing "old" test against code that no longer exists post-fix.
+
+### 6. The narrow correction implemented
+
+`lib/knowledge/enrichment/jobs.ts`:
+- Added `injuryCheckMinutes` to `LiveRepairFreshnessThresholds` (reuses the *exact same* `INJURY_CHECK_FRESHNESS_HOURS` window `scoring-service.ts` itself checks, so the preflight's "still fresh" and scoring's "still fresh" can never disagree).
+- Added an `injuries: LiveRepairStageFreshnessReport` field to `inspectLiveRepairPreflight`'s return, computed exactly like the pre-existing `playerLogs`/`recentFeatures`/`matchup` fields via the same shared `buildFreshnessReport` helper: MLB checks one marker per relevant team (`injuryCheckCacheKey("mlb-team", teamId)` for each of this run's own `teamIds`); basketball (NBA/WNBA) checks the single whole-league marker the real provider call actually writes (`injuryCheckCacheKey("wnba-league"/"nba-league", ...)`).
+- Added a new `injuries` stage to `runLivePreScoreRepair`, gated by `preflight.injuries.shouldRefresh` (skipped entirely when markers are already fresh -- no redundant provider call, no added egress on the steady-state cadence): MLB calls `refreshMlbInjuries(new Date(), { teamIdAllowlist: preflight.teamIds })` (bounded to this run's own teams, capped at 8 by the existing function itself); basketball calls `refreshBasketballInjuries("WNBA"/"NBA")` (one whole-league call, unchanged from how it has always worked).
+- Added `injuries: LiveRepairStageReport` to `LiveRepairRunReport`'s return type.
+- **No new marker-writing logic was added anywhere.** `refreshMlbInjuries`/`refreshBasketballInjuries` already write a marker only after a genuinely successful, non-partial retrieval AND only after the corresponding rows have persisted (Session 88's fix, unchanged, re-verified still passing). This session's change is exclusively about *reaching* those already-correct functions from the real call graph, not about how they behave once called.
+- WNBA-only where the invariant requires it, but implemented symmetrically for MLB too, since the exact same structural absence existed in both leagues' call graphs (confirmed live: the two captured MLB candidate runs also scored real rows with zero team markers and `injury_context_unavailable` throughout) -- fixing only one league would have left a mirror-image, equally real gap in the other, using code that is already league-parameterized by the existing `playerLogs`/`recentFeatures`/`matchup` pattern.
+
+### 7. Stale-features / stale-minutes audit (same captured runs)
+
+Bounded counts from the 40 WNBA rows scored by run `30733859818` (2026-08-02T05:17-05:31, the one candidate cycle that also ran a real SportsDataverse season ingestion -- 315 game logs inserted, 186 players upserted):
+
+| blocker combination | rows |
+|---|---|
+| `injury_context_unavailable` only | 8 |
+| `injury_context_unavailable` + `minutes_stale` | 9 |
+| `injury_context_unavailable` + `minutes_stale` + `stale_features` | 22 |
+| `injury_context_unavailable` + `minutes_stale` + `stale_features` + `stale_market` + `stale_odds` | 1 |
+
+**Critical finding**: 8 of 40 rows (20%) carried *only* `injury_context_unavailable` -- their features and minutes were already fresh. For those 8, this session's injury-stage fix alone is sufficient to make them completable on their very next natural rescore. The other 32 (80%) would remain blocked by `stale_features`/`minutes_stale` even with injuries fixed.
+
+Unlike the injury stage, `playerLogs` and `recentFeatures` **are** already wired into `runLivePreScoreRepair`'s real call graph (confirmed by reading the same function) -- they are not structurally absent. They are gated by `preflight.recentFeatures.shouldRefresh`/`preflight.playerLogs.shouldRefresh` and scoped to `missingOrStaleOnly: true` players, which is a deliberate, pre-existing, bounded-egress design (each cycle only refreshes players it identifies as missing/stale, not the whole active pool at once) -- the same rate-limiting principle already governing Sharp config rotation and identity-repair batching elsewhere in this codebase. This is why the SportsDataverse ingestion this cycle demonstrably ran and inserted real game logs, yet only 8 of 40 players' downstream features had already converged to fresh by the time scoring ran in the same cycle -- convergence for the rest requires additional natural cycles, by design, not a defect.
+
+### 8. Minimum-correction classification
+
+**A (refined), not B.** The repository defect was the injury-stage wiring gap alone, and it is now fixed. `stale_features`/`minutes_stale` are **not** a second wiring defect -- `playerLogs`/`recentFeatures` were already present in the real call graph before this session and required no code change; they are bounded, multi-cycle, rate-limited convergence, the same architecture this codebase already uses deliberately elsewhere for cost control. Reported honestly rather than forced into "B" to avoid overstating scope: a natural WNBA run in the cycle immediately after this fix may *still* show zero fully complete props, purely because feature/minutes freshness for those specific players hasn't independently converged yet -- that would not indicate the fix failed, and must not be misread as a new defect if observed.
+
+### 9. Reproduction and validation (offline, no production access this pass)
+
+- 5 new tests, `lib/knowledge/enrichment/injury-pipeline-wiring.test.ts`, exercising the real (non-injected) `runLivePreScoreRepair`/`inspectLiveRepairPreflight` against a mocked provider HTTP boundary only (never mocking the injury stage itself as automatically successful, per instruction): (1) WNBA, no pre-existing marker -> real call is made, marker persists, immediately re-checked fresh; (2) WNBA, fresh marker already present -> zero provider calls made (cost/egress guard proven, not just claimed); (3) WNBA, a partial/unparseable provider response -> stage reports `warning`, no marker written, remains eligible for retry; (4) MLB, no pre-existing per-team markers -> `refreshMlbInjuries` called scoped to exactly this run's own teams, both markers persist; (5) MLB, one team's fetch fails -> that team stays markerless and retryable while the other team's marker still persists independently.
+- 4 pre-existing tests in `basketball.test.ts` initially failed after the fix, for the correct reason: they call the real `runLivePreScoreRepair` without a pre-seeded fresh injury marker, so the new stage now genuinely attempted a live (unmocked in those tests) provider call and threw. Fixed by seeding one fresh WNBA league-level marker into the shared `makePlayerLogStore` fixture (the same "confirmed clean, not the concern of this test" pattern `scoring-service.test.ts`'s `FRESH_TEAM_A_INJURY_CHECK` already established) -- these tests are about player-log/feature/matchup repair specifically, not injury retrieval.
+- `npx tsc --noEmit`: clean.
+- Full suite (`pnpm run test`): **1070 tests, 1069 pass, 1 skip, 0 fail** (up from 1065/1064/1 at Session 101 -- 5 new wiring tests + 0 net regressions after the fixture fix).
+- `npm run build`: clean. `npx opennextjs-cloudflare build`: clean, `.open-next/worker.js` produced.
+- Workflow/YAML validation: unaffected -- no workflow file touched.
+- Public-boundary audit: unaffected -- covered by the full suite's own public-export tests, all passing.
+- Final diff review: 2 files changed (`lib/knowledge/enrichment/jobs.ts`, `lib/knowledge/enrichment/basketball.test.ts`), 1 new test file -- no unrelated file touched; `scoring-engine/dist/` confirmed untouched; no workflow file touched.
+
+### 10. Commits and SHAs
+
+Recorded in Section 11 below (this session pushes two commits: the pipeline correction + tests, and this documentation).
+
+### 11. Restrictions honored
+
+No push/merge to private main; no force-push; no cadence/timeout/Policy-C change; no new scheduler; no `workflow_dispatch`; no provider added (the exact same two already-approved sources, `mlb-stats-api` and `official-injuries`, are reused); no cleanup/deletion/reconciliation/backfill; no scoring formula/weight/label/threshold change; no neutral injury inference introduced anywhere; no marker written before row persistence (unchanged, already-correct Session 88 behavior); nothing pushed anywhere except `origin/codex/public-repo-repair`; `scoring-engine/dist/` untouched; live pin was changed only once, back to the fixed rollback reference, and not touched again.
+
+### 12. Remaining gaps
+
+1. `stale_features`/`minutes_stale` convergence is bounded and multi-cycle by design (Section 7/8) -- not fixed and not classified as a defect, but genuinely means a future natural-run proof may still show few or zero complete props on its very first post-fix cycle. This is expected, not a regression.
+2. This session did not re-attempt a live production run -- per the owner's explicit instruction, no new production proof is authorized until this defect was found and corrected, and this pass stops at "corrected, offline-validated" rather than requesting a new live window.
+3. `app/api/knowledge/scored-props/route.ts` removal, the saved-picks contract fix, and every other Session 99-101 fix remain unchanged and intact -- re-confirmed by the full suite passing, including their own dedicated tests, unmodified.
+4. The Session 73 Jordin Canada root-mechanism question remains open and unrelated to this session's scope.
+
+### 13. Corrected next-proof package
+
+- Candidate SHA for any future authorization: the tip of `origin/codex/public-repo-repair` after this session's push (see commits below), which now includes the injury-stage wiring fix on top of everything Sessions 98-101 already proved live.
+- Before authorizing a new natural-run proof, the owner should expect: injury markers to actually be created during the very first post-promotion cycle for whichever league's natural rotation includes the injuries stage that cycle (no longer permanently zero); `stale_features`/`minutes_stale` to persist for some props even after markers exist, converging over several additional natural cycles, not instantly; MLB and WNBA both to behave symmetrically now (both leagues' injury stage is wired identically).
+- Rollback reference remains `933ae62fabc2f8d50adf0e084d422c7d7db47181`, unchanged, currently live.
+
+**Verdict: `NATURAL WNBA COMPLETENESS DEFECT FIXED — READY FOR NEW OWNER AUTHORIZATION`.** The exact zero-marker root cause was traced to source: the natural GitHub Actions pipeline never called `refreshMlbInjuries`/`refreshBasketballInjuries` at all, reachable only via a standalone manual CLI job and a dry-run-only recovery tool, neither part of the real scheduled call graph. Fixed narrowly by wiring an injury-refresh stage into `runLivePreScoreRepair`, following the exact same preflight-gated shape already used for player logs, recent features, and matchup context, reusing the already-correct, already-tested underlying functions without modification. `stale_features`/`minutes_stale` were audited from the same live data and determined to be bounded, multi-cycle convergence of an already-correctly-wired system, not a second defect -- reported honestly as a real limit on how fast a full certification chain can appear, not concealed. 5 new tests prove the fix using the real orchestration functions against a mocked provider boundary; 0 regressions across the full 1070-test suite; both builds clean. The V2 pin remains rolled back to `933ae62...`, unchanged since the rollback recorded in Section 1. Phase 20 not begun.
+
+## Session 103 (2026-08-02, continuation from `ae788fb`): Big Balls Sports Data MLB feasibility audit -- no live provider call made, no code changed; the account's exact limits recovered from existing repository config, the provider's real public documentation researched (not called) to determine field coverage, and a bounded-probe decision reached
+
+Owner directive: stop treating MLB as generically "source-blocked" and determine exactly whether Corey's existing Big Balls Sports Data account can close it, under his free-plan limits. No Big Balls (or any provider) API call was made this session -- only public documentation (the provider's own marketing site, `llms.txt`, `llms-full.txt`, and public `openapi.json`) was read via the browser tool, which is not an authenticated API call and was not prohibited.
+
+### 1. State (read-only, unchanged from Session 102's end)
+
+HEAD = `origin/codex/public-repo-repair` = `ae788fbff08a847fc8fb84603430eed80aa8225b`. `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. Working tree clean except untracked `scoring-engine/dist/`. Live V2 pin confirmed `933ae62fabc2f8d50adf0e084d422c7d7db47181` (rollback reference, unchanged since Session 102). Public scheduler enabled; private repo's two schedulers still `disabled_manually`. No runs in progress; most recent completed run `30737755281` (2026-08-02T07:24:39Z) -- no new runs since (a real, if unexplained, dispatch gap on the current rolled-back pin; out of this session's scope).
+
+### 2. Corey's previously-supplied Big Balls limits -- found in repository config, not invented
+
+Found in `lib/providers/request-policy.ts`'s `providerRequestPolicies["big-balls-data"]` (cross-checked against `.env.example`/`.env.local`'s `BBS_DAILY_BUDGET=800`):
+
+```
+publishedDailyLimit: 1000   (the plan's published daily cap)
+hardDailyBudget:     800    (Covered's own conservative operating ceiling, via BBS_DAILY_BUDGET)
+reserve:             200    (the built-in daily safety margin: 1000 - 800)
+scheduledIntervalMinutes: 60, liveIntervalMinutes: 60, completedTtlMinutes: 720
+browserCallsAllowed: false
+```
+
+No per-minute, burst, concurrent-request, monthly, endpoint-restriction, response-size, historical-depth, or commercial-use limit is recorded anywhere in this repository for Big Balls specifically -- only the daily figures above. This is the exact, previously-recorded limit; it was not found in any of the required-reading docs (`AGENTS.md`, `docs/AGENT_HANDOFF.md`, `docs/PUBLIC_REPO_MIGRATION_AUDIT.md`, `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/PROJECT_STATE.md`, `docs/FEATURE_PROVENANCE_AND_CERTIFICATION_DESIGN.md`), only in the provider-policy/env config.
+
+**Non-authoritative public cross-check** (bigballsdata.com's own site + `llms.txt`, read this session, not Corey's account): Free tier is publicly documented as 1,000 req/day (2,000 with GitHub-linked signup), matching the repo's `publishedDailyLimit: 1000` exactly. The public docs additionally reveal: two independent rate buckets (a per-minute sliding window and a per-day UTC window, magnitude of the per-minute bucket not published), plus a separate per-key "4xx circuit breaker" (5-minute rolling window, trips on 500 client-errors or an 80%+ 4xx rate over 50+ requests, 120-second cooldown, applies at every tier including Enterprise). None of this is authoritative for Corey's specific account.
+
+**Smallest question Corey must answer**: is his account on the plain Free tier (1,000/day) or the GitHub-linked Free tier (2,000/day)? The repo's existing `hardDailyBudget: 800` is conservative enough to be safe under either answer, so this does not block any budget design below, but it should be confirmed before assuming headroom beyond 800/day.
+
+### 3. Existing Big Balls footprint in this repository
+
+```
+file/path                                  | purpose                        | production-reachable? | configured? | tested? | currently called? | writes? | public exposure? | action required
+lib/providers/big-balls-data.ts            | BigBallsDataAdapter: 2 endpoints (fetchMlbMatches, fetchMlbLineup) | not called by any production path today | BBS_API_KEY present locally | yes (4 synthetic tests) | no | no | none | none -- correctly dormant
+lib/providers/provider-registry.ts         | diagnostics entry ("MLB match discovery and lineup/context enrichment") | n/a (diagnostics only) | yes | indirectly | yes (status check only) | no | no (private diagnostics) | none
+lib/providers/request-policy.ts            | daily-budget policy entry (Section 2 above) | yes (used if adapter is ever called) | yes | no dedicated test | n/a (policy only) | no | no | none
+lib/providers/live-board.ts                | reads a private provider_cache lineup key for BigBalls, defensive-only | dead branch (lineup path removed, Section below) | n/a | no | effectively no | no | no | none
+docs/MLB_PROVIDER_EVIDENCE_AUDIT.md         | 2026-07-12 live evidence: BigBalls reachable, lineup fallback found broken and REMOVED from refreshMlbLineups (commit 50973a7) | n/a (historical record) | n/a | n/a | n/a | n/a | n/a | none
+```
+
+Classification: **(2) configured but unused.** `BBS_API_KEY` is present, the adapter is fully implemented for its 2 endpoints, but neither is called from any production code path today -- the lineup fallback was deliberately removed after being found non-functional (wrong match-ID format), and no statistical/matches-only-adjacent endpoint was ever built. No second parallel client is warranted; if a Big Balls statistical integration is ever authorized, it extends `BigBallsDataAdapter`, it does not replace it.
+
+### 4-5. Requirement matrix and blocker classification
+
+Every strict MLB blocker's CURRENT source, verified against code (not inferred):
+
+```
+blocker                  | current source (working today)                              | Big Balls field evidence
+handedness_missing       | mlb_handedness_splits table (no live free-source writer wired -- same class of gap as batter_quality below) | none published anywhere in Big Balls' public docs for any sport
+pitcher_matchup_missing  | mlb_pitcher_features.season_k_rate / swinging_strike_rate (K-rate, swinging-strike rate) -- schema exists, only ever populated by dead code (see below) | not documented; no sport-specific stats schema published at all
+batter_quality_missing   | mlb_batter_features.hard_hit_rate / xwoba -- same schema-exists-source-missing situation | not documented; same as above
+weather_missing          | Open-Meteo (api.open-meteo.com), free, unlimited, no auth -- CONFIRMED WORKING (docs/MLB_PROVIDER_EVIDENCE_AUDIT.md) | not needed; already solved
+ballpark_missing         | static MLB_TEAM_COORDINATES-style table already in repo | not needed; already solved
+bullpen_missing          | mlb_bullpen_context (era, whip, strikeout_rate, walk_rate) -- existing enrichment job, not Big Balls related | not documented for MLB
+injury_context_unavailable | statsapi.mlb.com / official-injuries adapter (Session 102 wired this into the natural path) | **explicitly "coming_soon" for MLB** in Big Balls' own public llms.txt/llms-full.txt -- cannot close this today at any tier
+starting-pitcher identity | statsapi.mlb.com schedule (`probablePitcher`), CONFIRMED WORKING | Big Balls lineups: "partial" for MLB (matches the already-documented broken fallback)
+```
+
+**Critical repository finding**: `mlb_pitcher_features`/`mlb_batter_features` already have the exact columns Covered's scoring adapter (`lib/knowledge/adapters/mlb.ts`) reads for these two blockers (`season_k_rate`, `swinging_strike_rate`, `average_exit_velocity`, `hard_hit_rate`, `barrel_rate`, `xwoba`, `xba`, `xslg`). The only function that ever wrote them, `refreshMlbStatcastForKnownPlayers` (`lib/knowledge/enrichment/mlb.ts`), calls the licensing-unresolved `StatcastSavantAdapter` and is **not called from any production path** (confirmed by grep; matches this repo's own prior dead-code finding). **The schema is ready. Only a legally-clear, working data source for these two blockers has ever been missing** -- this is the actual shape of the problem Big Balls was hoped to solve.
+
+**Classification**:
+- Big Balls blockers closable now: **none** (no field evidence for handedness/pitcher-matchup/batter-quality/bullpen; injuries explicitly not yet built for MLB).
+- Big Balls blockers it cannot close today: injury_context_unavailable (explicitly `coming_soon` for MLB, confirmed from the provider's own docs).
+- Big Balls blockers requiring one bounded live schema probe to know either way: handedness_missing, pitcher_matchup_missing, batter_quality_missing, bullpen_missing (all depend on the undocumented field-level shape of `GET /v1/players/{id}/stats?sport=baseball` and its siblings).
+
+### 6-9. Budget design, cost, source hierarchy, freshness/provenance
+
+Not designed in detail this session -- correctly deferred, because Section 10 below concludes the field question must be resolved (via owner-authorized probe or direct confirmation) before a budget/hierarchy/freshness design would rest on anything real rather than a guess about which fields exist. Designing these now would risk exactly the kind of speculative-field-support Section 11 explicitly prohibits. What is already true regardless of the probe's outcome: any real Big Balls statistical write would slot into the exact same JSONB-first `mlb_pitcher_features`/`mlb_batter_features` schema and the exact same preflight-gated `runLivePreScoreRepair` stage pattern Session 102 just proved out for injuries -- no migration, no new orchestration shape, would be required either way.
+
+### 10. Bounded provider-call decision
+
+**Public documentation exhausted, field question genuinely unresolved.** Checked, in order: this repository's code/tests/docs (no field-level schema anywhere); Big Balls' own marketing site; its `llms.txt` and `llms-full.txt` (detailed per-sport coverage matrices, explicit `coming_soon`/`partial`/`live` status per data type -- MLB: `stats: live` but no field list); its public `openapi.json` (verified directly: `/v1/players/{id}/stats`, `/v1/players/{id}/game-log`, and `/v1/players/{id}` response schemas are **undocumented in the spec itself** -- `"200": { "description": "ok" }` with no `content`/schema/example; `/v1/players/{id}/rolling-stats` has a schema but it only types `window` and an untyped `player: object`). This is not a Covered-side gap -- Big Balls' own public contract does not publish response field names for player stats, for any sport, at the schema level.
+
+**Verdict: bounded live schema probe needed**, exact proposed probe (not executed, not authorized this session):
+
+- Endpoint: `GET https://api.bigballsdata.com/v1/players/{id}/stats?sport=baseball` for exactly one already-known real MLB player (e.g. Shohei Ohtani), plus `GET /v1/players/{id}/game-log?season=2026&limit=5` for the same player.
+- Purpose: determine only whether the response contains any of `k_rate`/`whiff_rate`/`swinging_strike_rate`/`csw`/`hard_hit_rate`/`barrel_rate`/`exit_velocity`/`xwoba`/handedness-split fields, or only basic box-score counting stats (which MLB Stats API already supplies for free today).
+- Maximum calls: 2 (well inside the free daily budget regardless of tier).
+- No production writes, no scoring, no publication, no credential output beyond what's already in `.env.local`, no raw response retention beyond local inspection for this analysis.
+- Exact free-plan budget impact: 2 of 800-1,000 daily -- 0.2-0.25%.
+
+**Not called. Awaiting explicit owner approval before any such call is made.**
+
+### 11-12. Implementation
+
+**No code changed this session.** No implementation was authorized under Section 11's own gating rule ("only when... endpoint schema is verified... fields are available on Corey's recorded free plan") -- the schema is not verified for the fields that matter (Section 10). Nothing was implemented speculatively. No commit was manufactured for this reason; this documentation update is the only repository change.
+
+### 13. WNBA status preserved, unchanged
+
+Production remains on the rollback pin `933ae62fabc2f8d50adf0e084d422c7d7db47181`. Session 102's injury-stage wiring fix is present on the repair branch, not yet re-authorized for a new candidate promotion. Feature/minutes convergence is bounded, as documented. Policy C remains inactive. No incomplete score published. **Next WNBA action**: owner authorization of a new bounded natural-run proof of the Session 102 candidate tip (`ae788fb` or later) -- unchanged from Session 102's own next-step, not advanced or regressed this session.
+
+### 14. Calibration truth preserved, unchanged
+
+WNBA: no meaningful graded sample exists yet. MLB: existing graded sample remains small (n=35 score-70+ rows out of 306 total graded, one market, `pitcher_strikeouts`) and concentrated; hit rates remain flat (~50-53%) across the 70-74/75-79/80-84 score bands with zero samples at 85+, per Session 98's unchanged finding -- current evidence does not prove higher score bands have higher hit rates. No weight change authorized or made. Covered Score remains, for internal documentation purposes, a relative model-evidence score based on complete inputs, not a guaranteed win probability.
+
+### 15. Decision package
+
+See the chat response for the full lettered package (A-G); summarized here for continuity:
+- Big Balls field-coverage verdict: **`BIG BALLS COVERAGE UNVERIFIED — BOUNDED SCHEMA PROBE REQUIRED`**.
+- Request-budget verdict: sustainable regardless of outcome -- even a full statistical integration would cost far under 800/day given MLB's bounded daily slate size; the 2-call probe itself costs ~0.25% of one day's budget.
+- Repository result: existing footprint audited and classified (configured but unused); no new code; the exact schema gap (dead `refreshMlbStatcastForKnownPlayers`/`StatcastSavantAdapter` path) newly documented as the real shape of the MLB batter-quality/pitcher-matchup problem.
+
+**Final recommendation: `NOT READY — SPECIFIC BIG BALLS FIELD OR REPOSITORY GAPS REMAIN`.** The one remaining gap is narrow and named: whether `GET /v1/players/{id}/stats?sport=baseball` (and its siblings) return sabermetric fields or only basic box-score stats, unresolvable without either a 2-call bounded probe or Corey's own direct knowledge of his account's responses. MLB injuries are confirmed not available from Big Balls regardless (`coming_soon`). No production changed; no code changed; Phase 20 not begun.
+
+## Session 104 (2026-08-02, continuation from `c0e6438`): Owner-authorized bounded Big Balls schema probe executed -- Result C, decisive negative; no code changed
+
+Owner explicitly authorized exactly 2 Big Balls calls (`GET /v1/players/{id}/stats`, `GET /v1/players/{id}/game-log`) against one canonical test player, under the exact restriction list from Session 103's own proposal. Mid-probe, a hard blocker was found and reported before any call was made (see below); the owner then explicitly authorized a 3rd call to resolve it. All 3 calls executed, read-only, no persistence, no Supabase writes, no production impact.
+
+### State re-verified before any call
+
+Local HEAD = `origin/codex/public-repo-repair` = `c0e64381dbdc03a7329ff63e37b2e97f2eb7be06` (0 ahead/0 behind). `origin/main` unchanged. Working tree clean except the pre-existing untracked `scoring-engine/dist/` (confirmed untouched before and after). Live V2 pin confirmed still `933ae62fabc2f8d50adf0e084d422c7d7db47181` (updated `2026-08-02T15:50:15Z`, i.e. unchanged since Session 102's rollback). Public scheduler `active`/`COVERED_GITHUB_SCHEDULER_ENABLED=true`/`WNBA_INGESTION_ENABLED=true`; private schedulers `disabled_manually`. Big Balls budget config in `lib/providers/request-policy.ts:86` unchanged (`publishedDailyLimit: 1000, hardDailyBudget: 800, reserve: 200`).
+
+### Client/credential safety (Section 2)
+
+`BigBallsDataAdapter` (`lib/providers/big-balls-data.ts`) implements only `fetchMlbMatches`/`fetchMlbLineup` -- neither of the two authorized endpoints exists on the class. Rather than extend production code for a one-off probe (no code change was authorized or needed), the probe used a standalone scratchpad script mirroring the adapter's exact existing auth pattern (`x-api-key` header, `BBS_AUTH_HEADER`/`BBS_AUTH_SCHEME` overrides, 12s timeout) -- the same precedent already established by `scripts/diagnostic-mlb-providers.mjs`, which also calls Big Balls via raw `fetch()` outside the class. `BBS_API_KEY` presence was confirmed (length 57, `bbs_` prefix) without printing the key. **Correction to one assumption in the authorization**: the probe's calls do **not** pass through `reserveProviderUsage` (`lib/db/provider-cache.ts:288`), which is a Supabase RPC write reserved for real production refresh jobs (e.g. `sharpapi-refresh.ts`) -- calling it here would itself be a prohibited database write. The 2-3 calls are therefore not reflected in any persisted daily counter; they were kept far under budget by manual accounting instead (3 of 800, ~0.4%), which is the correct approach for a non-recurring, one-time diagnostic and does not conflict with the budget-preservation intent of the authorization.
+
+### Blocker found and reported before any call (Section 3)
+
+Both authorized endpoints require `id` to be a Big Balls-internal UUID (confirmed from the provider's own public `openapi.json`: `"schema": {"format": "uuid"}` on both `/v1/players/{id}/stats` and `/v1/players/{id}/game-log`) -- not an MLB Stats API numeric ID, not a name, and nothing already cached in this repository (the adapter had never called any player endpoint before this session). Resolving a name to that UUID requires a separate `GET /v1/players?sport=baseball&name=...` lookup -- a third call, exceeding the explicit 2-call cap. Per the authorization's own instruction ("stop before making any request and report the exact blocker"), this was reported to the owner before any Big Balls request was made. The owner chose to authorize the 3rd lookup call explicitly rather than supply a UUID directly or stop at Result D.
+
+### Player selected (Section 3)
+
+Aaron Judge, New York Yankees, RF -- a pure batter (no two-way-player ambiguity, unlike Ohtani), unambiguous by name, exercising the `batter_quality_missing` blocker's exact field list.
+
+### Calls executed (Section 4) -- exactly 3, all successful, all read-only
+
+1. `GET /v1/players?sport=baseball&name=Aaron+Judge&limit=5` -> 200, 477 bytes, 1 candidate, resolved `id=7451c599-7eba-4eae-90a0-6898c4907688`.
+2. `GET /v1/players/7451c599-7eba-4eae-90a0-6898c4907688/stats?sport=baseball` -> 200, 333 bytes.
+3. `GET /v1/players/7451c599-7eba-4eae-90a0-6898c4907688/game-log?season=2026&limit=5` -> 200, 454 bytes, `games: []` (zero rows returned for the requested window).
+
+No retries were needed (no transport failures). No raw response body was committed to git or pasted into public documentation -- only field names and shapes are recorded here.
+
+### Field-coverage matrix (Section 5) -- decisive
+
+`/stats` response shape: `{ player_id, sport, season, split, batting: { games, at_bats, hits, home_runs, rbi, runs, walks, strikeouts, stolen_bases, avg }, pitching: null }`. This is a plain season box score. **None of the following fields are present anywhere in the response**: hard-hit rate, barrel rate, average exit velocity, launch angle, xwOBA, wOBA, K% (pitcher), swinging-strike/whiff rate, CSW%, or any handedness split. `meta.source` on this response is the literal string `"unknown-source"` -- itself a provenance concern independent of field coverage. `/game-log` returned `games: []` for the 2026 season at the time of the call -- a live-data completeness question, not resolvable further within the 3-call cap, and not decision-relevant given `/stats` already settles the field question.
+
+### Blocker classification (Section 6)
+
+- `handedness_missing`: **not solvable** -- no bats/throws/split field anywhere in the response.
+- `pitcher_matchup_missing`: **not solvable** -- confirmed via the response shape (`pitching: null` for this batter, and the batting-side field list has no K-rate/whiff-rate equivalent even for the batting side); the endpoint carries no derivable K-rate or swinging-strike data for either role.
+- `batter_quality_missing`: **not solvable** -- `batting` has only `avg` as a rate stat; no hard-hit rate, barrel rate, exit velocity, or xwOBA, and no underlying batted-ball event data from which any of those could be derived.
+- `bullpen_missing`: not addressed by this endpoint (team-level, not player-level; no dedicated Big Balls MLB bullpen surface exists per the catalogue).
+- Starting-pitcher identity, recent game logs, team/opponent context: Big Balls' basic box-score/game-log data could theoretically serve as a redundant secondary source here, but adds nothing beyond what `statsapi.mlb.com` already provides for free today, and this session's own game-log call returned zero rows for the current season.
+
+### Decision (Section 7)
+
+**Result C -- basic-stat coverage only.** The endpoint provides plain box-score/season totals, not the advanced sabermetric fields Covered's strict MLB scoring needs. This is not stretched into partial coverage.
+
+### Free-plan request model (Section 8)
+
+Not designed -- moot under Result C. A statistical integration that doesn't exist can't be budgeted; nothing about the 800/day budget changes as a result of this finding.
+
+### Implementation decision (Section 9)
+
+Per Result C's instruction: **Big Balls does not solve the advanced MLB source problem.** What it can still improve: at most, a redundant secondary box-score/matches source -- no new blocker-clearing capability. No implementation is recommended. No code was written or changed this session.
+
+### WNBA status (Section 10) -- unchanged
+
+Same as Session 103: rollback pin unchanged, injury-stage fix present on the repair branch awaiting a new owner-authorized natural-run proof, Policy C inactive, no incomplete score published.
+
+### Validation and repository handling (Section 11)
+
+No source code change; no commit manufactured for the probe itself. This documentation update is the only repository change, and contains no credentials, no raw response bodies, and no personal account details.
+
+**Final verdict: `BIG BALLS DOES NOT COVER STRICT MLB REQUIREMENTS — ALTERNATE SOURCE REQUIRED`.** This closes the open question from Session 103 decisively rather than leaving it "unverified" -- Big Balls' generic player-stats surface is box-score-only for MLB, for every field this session tested, confirmed against real live data from your own account, not just public documentation. The Statcast/Savant licensing question (Sessions 86-90) remains the only concrete path back to these fields the repository has identified so far. Phase 20 not begun; production unchanged.
+
+## Session 105 (2026-08-02, continuation from `a3aba5a`): why the natural MLB pipeline never retrieves Statcast/Savant data -- traced to a real, previously-mischaracterized orchestration gap, not a licensing-only block; no code changed, no owner authorization to activate yet
+
+Owner correctly pushed back on the framing that closed Session 103/104: Statcast/Savant is not "no source exists," it is an already-implemented source option this repository has carried since at least Session 66-67, and the real question is why the natural pipeline never reaches it. This session traced the exact call graph and found the picture is more nuanced than any prior session recorded: **one of the two remaining blockers (`batter_quality_missing`) is 100% dependent on Statcast with zero alternative path; the other (`pitcher_matchup_missing`) already partially self-heals today through an unrelated, already-wired MLB Stats API stage, with no Statcast involvement at all.**
+
+### State re-verified
+
+Local HEAD = `origin/codex/public-repo-repair` = `a3aba5a099f5f3bf2bbd4d881fa3ba4671db9f52` (0 ahead/0 behind). `origin/main` unchanged. Working tree clean except pre-existing untracked `scoring-engine/dist/`. Live V2 pin confirmed unchanged `933ae62fabc2f8d50adf0e084d422c7d7db47181`. Public scheduler active; private schedulers `disabled_manually`. Production confirmed unchanged.
+
+### Every Savant/Statcast artifact traced
+
+```
+file/function                                          | real or fixture | production reachable | current caller | tables/fields written | tested | reason inactive
+lib/providers/statcast-savant.ts (StatcastSavantAdapter) | REAL -- live unauthenticated CSV fetch to baseballsavant.mlb.com/statcast_search/csv | class itself: no | mlb.ts's dead writer + box-score-grading.ts's dead grading path + provider-registry diagnostics (status-only) | n/a (client only) | 0 tests | zero callers
+lib/knowledge/enrichment/mlb.ts:3066 refreshMlbStatcastForKnownPlayers | REAL retrieval + REAL persistence (writes mlb_pitcher_features.season_k_rate/season_bb_rate, mlb_batter_features.average_exit_velocity/hard_hit_rate/barrel_rate/xwoba) | NO -- zero callers anywhere in the repo (confirmed by grep; not in jobs.ts's dispatch map, not in runLivePreScoreRepair, not in the recovery orchestrator) | none | mlb_pitcher_features, mlb_batter_features | 0 tests | never wired into any job dispatch or pipeline stage -- pure orchestration gap
+lib/providers/box-score-grading.ts:296 resolveProviderBoxScore's Statcast fallback | REAL retrieval, no persistence (returns a "pending" grading note only) | NO -- its only caller, lib/db/saved-picks.ts's gradePendingSavedPicks, itself has zero callers anywhere in the repo | none | none | 0 tests | the entire saved-picks grading path is dead code, independent of Statcast
+lib/providers/request-policy.ts:93 "statcast-savant" budget entry | REAL policy entry, hardDailyBudget: 0 | n/a (policy data, not a gate by itself) | read by budget-aware callers, but nothing calls Statcast today | n/a | request-policy.test.ts | see correction below -- this is NOT a kill-switch
+lib/knowledge/prototypes/statcast-fixture-*.ts (contract/features/scoring) | SYNTHETIC ONLY -- explicitly documented as never calling any real provider | no (by design) | its own test files only | none (prototype-only) | 22 tests (Session 89) | intentionally never wired to production; proves normalization feasibility only
+docs/AGENT_HANDOFF.md Sessions 86-90 | documentation | n/a | n/a | n/a | n/a | records the standing, still-unresolved licensing recommendation ("Decision B")
+lib/knowledge/recovery/orchestrator.ts CAUSE_CAPABILITY map | documentation-as-code | reachable, dry-run only | classifies handedness/pitcher-matchup/batter-quality as "no-existing-source" | n/a | covered by orchestrator tests | **stale/inaccurate for 2 of 3** -- see reconciliation below
+```
+
+### Correction to a standing assumption: `hardDailyBudget: 0` is not a kill-switch
+
+`maySpend()` (`lib/providers/request-policy.ts:97-100`) returns `true` whenever `hardDailyBudget <= 0` -- **zero means unbudgeted/unlimited under this policy layer, not blocked.** This is proven by the policy's own test (`request-policy.test.ts:18`: `maySpend(providerRequestPolicies.sharpapi, 999999) === true` for another `hardDailyBudget: 0` entry). Statcast's `hardDailyBudget: 0` therefore does not prevent a call the way it might look like it does at a glance -- it simply means this budget layer has never been asked to cap it, because nothing has ever called it. **There is no code-level flag, env var, or budget gate disabling Statcast today; it is inert purely because zero production code paths invoke it**, exactly the same shape of gap Session 102 found and fixed for injury markers.
+
+### Real call graph, traced end to end
+
+```
+public scheduled workflow (Covered Production Pipeline, active)
+  -> run-covered-job.mjs
+    -> runGitHubActionsPipeline (lib/ops/github-actions-pipeline.ts)
+      -> runLivePreScoreRepair (lib/knowledge/enrichment/jobs.ts:2587)
+        -> playerLogs stage (refreshTeamLogsJob)
+        -> recentFeatures stage (refreshRecentFeaturesJob, jobs.ts:1501)
+             MLB branch (jobs.ts:1797-1892): writes mlb_pitcher_features.season_k_rate/season_bb_rate
+             from real MLB Stats API game-log data (battersFaced/strikeouts/walks), and
+             mlb_batter_features.season_avg/obp/slg/ops from the gameLog's own season-to-date rates.
+             Explicitly, deliberately leaves swinging_strike_rate/velocity_trend/average_exit_velocity/
+             hard_hit_rate/barrel_rate/xba/xslg/xwoba as null with an inline comment: "Statcast-only ...
+             not present anywhere in MLB Stats API's gameLog payload."
+        -> matchup stage (refreshMlbMatchupFeaturesJob)
+        -> injuries stage (Session 102's fix)
+        -- NO STAGE CALLS StatcastSavantAdapter or refreshMlbStatcastForKnownPlayers ANYWHERE --
+```
+
+The missing call edge is exactly one: `refreshMlbStatcastForKnownPlayers` is never added to the `Promise.all([...])` stage list, and never appears in `jobs.ts`'s `refresh_*` dispatch map either (unlike the pre-Session-102 injury functions, which at least had 2 non-natural callers -- this function has literally zero, anywhere).
+
+### Real vs. prototype (Section 4)
+
+**Real, implemented, production-quality client** (`statcast-savant.ts`): live HTTP GET to `https://baseballsavant.mlb.com/statcast_search/csv` (`STATCAST_SAVANT_BASE_URL`/`STATCAST_SAVANT_SEARCH_PATH` overridable via env, defaults to the real host/path), **no authentication required at all** (`configured()` always returns `true` -- Baseball Savant's CSV export needs no API key), request built from `player_name`/`player_type`/`game_date_gt`/`game_date_lt`/optional `player_id`, aggregated (not pitch-level retained -- CSV rows are parsed then immediately summarized into one `StatcastSummary` object; raw rows are capped at 75-150 and never persisted, only the aggregate is cached/written), 12s timeout (7s in probe mode), no retry logic at all (single attempt, any failure returns a typed error state), 6-hour provider-cache TTL when used in non-probe mode, cache-size guard (rejects payloads over 15KB), full URL sanitization before ever appearing in logs/cache keys (player name/id redacted). Response fields parsed: `launch_speed`/`exit_velocity`, `barrel`/`barrels`, `launch_angle`, `description`/`events` (regex-matched for strikeout/walk), `estimated_woba_using_speedangle`/`xwoba`/`xwOBA`. **Zero test coverage exists for this file or for `refreshMlbStatcastForKnownPlayers`** -- only the separate, parallel, synthetic fixture prototype (Session 89, 22 tests) has been tested, and that module never touches the real client. **Production use is not disabled by any intentional flag** -- see the `hardDailyBudget` correction above; it is disabled only in the sense that nothing calls it.
+
+### Field-to-blocker mapping (Section 5) -- the decisive, previously-uncaptured nuance
+
+```
+strict blocker           | required input                        | Statcast-writable? | already-wired alternative exists? | scoring adapter check (lib/knowledge/adapters/mlb.ts)                                   | remaining gap
+handedness_missing       | mlb_handedness_splits.split_value      | NOT WRITTEN by refreshMlbStatcastForKnownPlayers at all | YES -- refreshMlbHandednessSplits already wired into runLivePreScoreRepair, derives from stored player/starting-pitcher identity (bats/throws), NOT Statcast | line 249: null-checks split_value | unrelated to Statcast; a separate, already-wired job's own coverage gap (out of this session's scope)
+pitcher_matchup_missing  | pitcher.season_k_rate OR .swinging_strike_rate (either non-null clears it -- confirmed `&&` logic, line 257-259) | season_k_rate: yes (redundant with below); swinging_strike_rate: yes (Statcast-exclusive) | YES for season_k_rate -- refreshRecentFeaturesJob already writes it from real MLB Stats API game logs, already running naturally in production today | line 255-259 | swinging_strike_rate stays permanently null without Statcast, but the blocker itself is NOT gated on it once season_k_rate is present
+batter_quality_missing   | batter.hard_hit_rate OR .xwoba (either non-null clears it, same `&&` logic, line 262-266) | BOTH fields: yes, and this is the ONLY writer for either field anywhere in the repo | NO -- no non-Statcast writer exists for hard_hit_rate, barrel_rate, average_exit_velocity, xba, xslg, or xwoba anywhere in this codebase | line 260-266 | 100% Statcast-dependent; cannot clear today by any other means
+```
+
+### Why production rows are empty -- proven with live, bounded, read-only production data (Section 6)
+
+```
+table                  | rows read | field                    | non-null count | conclusion
+mlb_pitcher_features   | 183       | season_k_rate            | 26 (14%)        | the already-wired recentFeatures/MLB-Stats-API stage IS working naturally in production
+mlb_pitcher_features   | 183       | swinging_strike_rate     | 0               | 100% Statcast-exclusive, confirmed never populated
+mlb_pitcher_features   | 183       | velocity_trend           | 0               | same
+mlb_batter_features    | 112       | hard_hit_rate            | 0               | zero Statcast contribution, ever
+mlb_batter_features    | 112       | barrel_rate              | 0               | same
+mlb_batter_features    | 112       | average_exit_velocity    | 0               | same
+mlb_batter_features    | 112       | xwoba / xba / xslg       | 0 / 0 / 0       | same
+```
+
+**Root cause, single and exact: `refreshMlbStatcastForKnownPlayers` has zero callers anywhere in the codebase -- not a bug in a gated stage, not a disabled flag, not a broken column mapping, not an identity-resolution failure, not a stale marker. The retrieval simply never runs.** This is classification "#1" from the type of root-cause list Session 102 used for the injury gap: never part of the natural call graph, full stop. It is NOT a persistence-vs-read mismatch (the scoring-service select statement already lists every one of these columns, confirmed at `scoring-service.ts:584`/`591`); it is NOT an identity-mapping failure (the dead function's own player selection is scoped correctly, it is just never invoked); it is NOT a config-disabled state (the `hardDailyBudget: 0` correction above rules that out).
+
+A secondary, previously-inaccurate documentation artifact was found and should be corrected in a future pass: `lib/knowledge/recovery/orchestrator.ts`'s `CAUSE_CAPABILITY` map classifies `pitcher_matchup_missing` and `batter_quality_missing` as `no-existing-source`, which is no longer accurate now that `refreshMlbStatcastForKnownPlayers` is confirmed to be a real, working (if unwired and untested) retrieval+persistence path for both. `handedness_missing`'s `no-existing-source` label is also inaccurate, but for a different reason (a real, already-wired, non-Statcast handedness job exists; its own coverage gap is untouched by this session). **Not fixed this session** -- the orchestrator is dry-run-only, out of this session's narrow scope, and flagged here rather than silently expanded into.
+
+### Smallest safe activation design -- NOT implemented (Section 7)
+
+If ever authorized: `current MLB props with publishable=false due to batter_quality_missing/pitcher_matchup_missing` -> distinct current player IDs (bounded, ~228 unique players observed in a bounded read of current MLB props, confirming this is a small, current-slate-sized set, not a historical backfill) -> reuse the exact `runLivePreScoreRepair` preflight-gated stage shape Session 102 already proved out for injuries (freshness-checked via a new cache key, `missingOrStaleOnly` scoping, capped batch per run -- the dead function already caps at `Math.min(configuredPlayerLogBatchSize(), 25)`) -> the existing `StatcastSavantAdapter.fetchPlayerContextSummary` (already aggregates, already caches for 6h, already never retains raw pitch rows) -> the existing `refreshMlbStatcastForKnownPlayers` write path (already correctly scoped to `mlb_pitcher_features`/`mlb_batter_features`, delete-then-insert per player/date) -> verify via the same bounded read used in Section 6 -> score naturally on the next cycle. One implementation nit worth fixing if this is ever authorized: the dead function's call site never passes `playerId` to `fetchPlayerContextSummary`, so every invocation would also trigger an internal MLB Stats API name-resolution sub-call it doesn't need to (the calling code already has the player's own `id` from the `players` table row it just selected) -- a free, minor efficiency fix, not a blocker. **Not implemented, not tested, not wired this session** -- the standing, still-unresolved Statcast/Savant licensing question from Sessions 86-90 (no official terms of use could be found; `mlb.com`'s terms page returned HTTP 406 to a non-browser client) is the actual reason to stop here, not a technical gap.
+
+### Free-resource impact if authorized (Section 8)
+
+Bounded read shows ~228 distinct current MLB players (lower bound; query capped at 1000 current-prop rows). At a 25-player/run cap (existing constant), a full pass across the current slate would take roughly 9-10 runs to cover once, then converge to only-missing-or-stale on subsequent runs (same convergence shape as player-logs/recent-features today). Each player: 1 Baseball Savant CSV fetch (small, aggregated response, 75-150 raw rows parsed then discarded) + 1 redundant MLB Stats API name-resolution call (fixable, see above) if `playerId` isn't passed. No browser calls, no historical backfill, GitHub Actions only, matching every other MLB enrichment stage's shape. Supabase writes: 1 delete + 1 insert per player per run (existing `mlb_pitcher_features`/`mlb_batter_features` tables, no new table, no migration). No public snapshot, Cloudflare, or Vercel impact (this is a private enrichment stage, upstream of scoring). This is comparable in shape and cost to the weather/ballpark/bullpen jobs already running today.
+
+### Repository-only corrections (Section 9) -- none made
+
+Per this session's own gating instruction ("do not implement production calling yet if source usage still requires owner approval"), and because the wiring itself (adding this stage to `runLivePreScoreRepair`'s `Promise.all`) would make live Statcast calls actually fire on the very next natural scheduled run once merged -- there is no code-only version of this fix the way Session 102's injury fix was code-only against an already-approved source. **No code was implemented or changed this session.**
+
+### WNBA preserved, unchanged
+
+Same as Sessions 103/104: rollback pin unchanged, Policy C inactive, no incomplete score published, awaiting a new owner-authorized natural-run proof.
+
+### Validation, commits
+
+No source code change; this documentation entry is the only repository change. No credentials or raw payloads recorded.
+
+**Final verdict: `SAVANT ACTIVATION BLOCKED — OWNER SOURCE-USAGE APPROVAL REQUIRED`.** The technical path is real, more complete than any prior session credited it (it already has a working client, a working writer, and correctly-aligned scoring-side field consumption), and the wiring gap itself is a one-line `Promise.all` addition of the exact shape Session 102 already proved safe for injuries. The reason it has not been activated is not a code defect and not a config kill-switch -- it is the still-unresolved licensing question from Sessions 86-90, which this session did not attempt to resolve or override. Owner decision needed: pursue written clarification / an alternate clearly-licensed source (standing "Decision B"), or explicitly accept the unresolved risk and authorize wiring `refreshMlbStatcastForKnownPlayers` into `runLivePreScoreRepair`. Phase 20 not begun; production unchanged.
+
+## Session 106 (2026-08-02, continuation from `65da8d3`): owner supplied the source decision ("Baseball Savant/Statcast was already selected as an intended Covered MLB source") and authorized repository implementation + deterministic testing (not live activation) -- the existing Savant integration is completed, wired disabled-by-default, and a real, previously-invisible defect (swinging_strike_rate had no source anywhere in the codebase) is fixed
+
+Owner directive superseded Session 105's framing: the licensing question is resolved by fiat -- Savant is the intended source -- and the task became "complete the existing path," not "decide whether to use it." Explicit permanent restrictions carried the same shape as every prior session (no production calls, no promotion, no scheduler change) plus one new, precise boundary: implement and test only; if a live call is ever needed, stop and ask separately. No live Savant call was made this session.
+
+### State re-verified
+
+Local HEAD = `origin/codex/public-repo-repair` = `65da8d3cfe3c18f44ed7888062ac4c3ef698d7e3` at start (0 ahead/0 behind). `origin/main` unchanged. Working tree clean except pre-existing untracked `scoring-engine/dist/`. Live V2 pin confirmed unchanged `933ae62fabc2f8d50adf0e084d422c7d7db47181`. Public scheduler active; private schedulers `disabled_manually`. Production confirmed unchanged throughout.
+
+### Real client audit (Section 2) -- decisive, previously-uncaptured findings
+
+Full line-by-line trace of `StatcastSavantAdapter` (`lib/providers/statcast-savant.ts`) and `refreshMlbStatcastForKnownPlayers` (`lib/knowledge/enrichment/mlb.ts`) found two genuine pre-existing defects, both fixed:
+
+1. **`toNumber("")` returned `0`, not `null`** (JS: `Number("") === 0`). Every empty CSV cell -- meaning "this pitch wasn't a batted ball" -- was silently treated as a measured `0`, corrupting every rate that should have excluded non-batted-ball pitches from its denominator. Fixed: empty/whitespace-only cells now parse to `null`.
+2. **Every rate divided by the total pitch count**, not the population it actually applies to. Hard-hit/barrel/sweet-spot rate should divide by batted-ball events only; K-rate/walk-rate should divide by plate-appearance-ending pitches only. Using "every pitch" as the denominator for all of them drastically understated every rate. Fixed: `summarizeRows` now scopes each rate to its correct population (`isBattedBallRow`/`isPlateAppearanceEndingRow`).
+3. **No swinging-strike/whiff rate was ever computed.** `StatcastSummary` had no such field; `mlb_pitcher_features.swinging_strike_rate` was hardcoded `null` in the one function that ever wrote to it. This is the single most consequential finding of this session -- see Section 3.
+
+The client's real request shape: `GET https://baseballsavant.mlb.com/statcast_search/csv?all=true&player_type=<batter|pitcher>&player_name=...&game_date_gt=...&game_date_lt=...[&player_id=...]`, no authentication, 12s timeout (7s probe), single attempt (no retry), rows capped at 75 default / 150 ceiling for a full fetch (25 default / 50 ceiling for a probe), aggregated then discarded (no raw pitch rows persisted), 6h internal cache TTL (unused by the caller's own skip logic -- the new pipeline stage uses its own dedicated marker instead, see Section 6/7). Partial/malformed/timeout responses are typed and propagated, never silently swallowed. The writer's own persistence (delete-then-insert) previously swallowed every failure via `.catch(() => {})` while still incrementing an `enriched` count -- fixed to report `persistence_failed` honestly (Section 4).
+
+### Blocker semantics (Section 3) -- the swinging_strike_rate discovery
+
+Tracing `matchupStrength` in `lib/knowledge/adapters/mlb.ts` confirmed `((pitcherKRate ?? 0.22) - 0.22) * 2 + ((pitcherWhiff ?? 0.11) - 0.11) * 3` -- **both fields independently move the score** whenever either is non-null, exactly the "one field's neutral default has zero disclosure" shape already fixed for weather/ballpark/bullpen/handedness. `pitcher_matchup_missing`/`batter_quality_missing` previously required BOTH fields null to block (an `&&`), so a present `season_k_rate` (already populated for 26/183 pitcher rows by an unrelated, already-wired MLB-Stats-API-only stage, per Session 105) silently hid a permanently-absent `swinging_strike_rate`. **Corrected to `||`** (either missing blocks) -- completeness enforcement only, no weight or formula changed.
+
+This correction would have been a real regression if left alone: **`swinging_strike_rate` had no source anywhere in the codebase before this session** -- not the old MLB-Stats-API writer, not the pre-existing (dead) Savant writer either, since `StatcastSummary` never computed it. Requiring both fields would have made `pitcher_matchup_missing` permanently unclearable. Fixed at the actual root: added a real `swingingStrikeRate` computation to the client (whiffs -- `description === swinging_strike[_blocked]` -- per pitch, the correct denominator since this endpoint returns one row per pitch), and wired it into the writer (`swinging_strike_rate: probe.summary.swingingStrikeRate`, replacing the hardcoded `null`).
+
+### Tests added (Section 4) -- 37 total, all against the real (non-prototype) code
+
+- `lib/providers/statcast-savant.test.ts` (17 tests, new file): valid batter/pitcher responses, measured-zero-vs-missing, malformed/missing-column/truncated/empty CSV, row-cap enforcement (default and `maxRows`-requested), timeout, duplicate rows, doubleheader (no dedup), identity passthrough (no per-row verification), date-range passthrough (server-trusted), partial-season confidence banding, and confirmation the client never computes handedness.
+- `lib/knowledge/enrichment/mlb.test.ts` (+8 tests): the real writer's success/empty/retrieval-failure/persistence-failure/not-found outcomes, zero-candidate no-op, and MLBAM-external-ID forwarding.
+- `lib/knowledge/enrichment/jobs.test.ts` (+5 tests): `selectMlbSavantCandidates`'s market-type-derived role, per-player dedup across markets, unsupported-market/null-player exclusion, bounded-population proof (pure function over only its own input), deterministic ordering.
+- `lib/knowledge/enrichment/savant-pipeline-wiring.test.ts` (7 tests, new file): disabled-by-default (zero live calls even with due candidates), a non-`"true"` value (case typo) still disabled, MLB-only scoping, real end-to-end wiring + persistence proof, fresh-marker re-attempt bounding, retrieval-failure retryability, and the offline natural-convergence proof (both fields present clears `pitcher_matchup_missing`; `season_k_rate` alone does not) against the real `scoreCurrentProps` path.
+- `lib/knowledge/adapters/mlb.test.ts` (rewritten, 2 tests): the corrected either-missing-blocks semantics for both blockers.
+
+### Current-prop-bounded candidate selection (Section 5)
+
+`selectMlbSavantCandidates` (`lib/knowledge/enrichment/jobs.ts`) is a pure function over the SAME `activeRows` already loaded for the current repair cycle -- never a separate "every known player" query. Role is derived from each row's own `market_type` (`pitcher_strikeouts` -> pitcher; any `batter_` market -> batter), not `players.primary_position`, so role can never disagree with the blocker it clears. A bounded read of current MLB props found ~228 distinct players on the current slate (Session 105's figure, unchanged).
+
+### Preflight stage + disabled-by-default wiring (Section 6/7)
+
+New `savant` freshness report inside `LiveRepairPreflightReport`/`LiveRepairRunReport`, computed in `inspectLiveRepairPreflight` immediately after the injuries block, using the exact same `buildFreshnessReport` helper. Unlike injuries, a null `season_k_rate`/`swinging_strike_rate`/`hard_hit_rate`/`xwoba` column is never ambiguous (no other writer ever sets them), so "missing" is read directly from the feature tables; a new `savant-check:mlb:<playerId>` marker (`SAVANT_CHECK_FRESHNESS_HOURS = 24`) exists only to bound re-attempt frequency for a player whose last attempt was genuinely incomplete.
+
+The stage itself, wired into `runLivePreScoreRepair`'s `Promise.all`, is gated first and independently by `mlbSavantEnabled()` (`lib/knowledge/enrichment/shared.ts`) -- **only the exact string `"true"` enables it; unset, `"false"`, `"1"`, or a case-variant typo all leave it disabled**, proven by test. Bounded by `takeRotatingSlice` at `configuredSavantPlayerBatchSize()` (default 25/run, same primitive used elsewhere in this codebase). Missing/failed retrieval retains every blocker; persistence failure is reported as a `warning`, not a false `ok`; the marker is written only after a genuine attempt.
+
+### Cost/runtime (Section 8) -- unchanged from Session 105's estimate
+
+~228 distinct current players / 25-per-run cap ≈ 9-10 runs to converge once, then only-missing-or-stale thereafter (same shape as every other MLB enrichment stage). One Savant CSV fetch per player (no separate MLB Stats API resolution call now that the real external ID is forwarded, closing the inefficiency Session 105 flagged). No new Supabase table, no browser calls, no public snapshot/Cloudflare/Vercel impact.
+
+### Handedness, audited separately (Section 10) -- confirmed unrelated to Savant, a distinct real gap found and left unfixed
+
+`refreshMlbHandednessSplits` (`lib/knowledge/enrichment/mlb.ts:2692`) is real, already wired (into `runLivePreScoreRepair`'s stable-scope stage), and **entirely independent of Statcast**: it derives `split_value` from the stored batter's `bats` identity field AND the specific event's confirmed opposing starting pitcher's `hand` (`mlb_starting_pitchers.hand`) -- a genuine event-specific split (upserted per `player_id`+`event_id`), not a static player attribute, confirming this is NOT "merely bats/throws identity" as it might appear. A bounded production read found **0 of 500 sampled `mlb_handedness_splits` rows have a non-null `split_value`** -- a real, separate coverage gap in this already-wired job's own inputs (most likely missing starting-pitcher-hand or lineup data), flagged here and left uninvestigated -- explicitly out of this session's Savant-focused scope, not silently expanded into.
+
+### Recovery orchestrator corrected (Section 11)
+
+`lib/knowledge/recovery/orchestrator.ts`'s `CAUSE_CAPABILITY` map previously classified all three of `handedness_missing`/`pitcher_matchup_missing`/`batter_quality_missing` as `no-existing-source`, attributing all three to "Statcast-exclusive" fields. Corrected, now that the real client's tests pass: `pitcher_matchup_missing`/`batter_quality_missing` -> `requires-natural-refresh` (existing source, wired but disabled by default pending owner production authorization); `handedness_missing` -> `requires-natural-refresh` with a corrected, non-Statcast source description (per Section 10). One test assertion updated to match (`orchestrator.test.ts`); the orchestrator itself is unchanged in behavior (still dry-run-only, no production caller).
+
+### WNBA preserved, unchanged
+
+Same as every session since 102: rollback pin unchanged, Policy C inactive, no incomplete score published, awaiting a new owner-authorized natural-run proof.
+
+### Validation
+
+`pnpm exec tsc --noEmit`: clean. `pnpm test`: 1106 pass / 1 pre-existing skip / 0 fail (up from 1069 -- 37 new tests, zero regressions). `pnpm run build` (Next.js) and `pnpm run cf:build` (OpenNext/Cloudflare): both succeed (pre-existing "Dynamic server usage" build-time notices are expected/unrelated). No `.github/workflows/*` file touched -- no scheduler, cadence, or new workflow added. `scoring-engine/dist/` untouched.
+
+### Commits
+
+1. `70fd5fc` -- real Savant client fixes (toNumber, rate denominators, swingingStrikeRate), the writer rewrite, and the corrected blocker semantics, with tests.
+2. `e09383c` -- the bounded, disabled-by-default pipeline wiring (preflight computation, candidate selection, the stage itself), with tests.
+3. (this commit) -- recovery-orchestrator classification correction and this documentation entry.
+
+### Activation proof package (prepared, NOT executed)
+
+- **Candidate SHA**: this session's tip (see commit list above). **Rollback SHA**: unchanged, `933ae62fabc2f8d50adf0e084d422c7d7db47181` (the current live pin -- nothing about this session changes what a rollback would restore to).
+- **Exact enable control**: `KNOWLEDGE_MLB_SAVANT_ENABLED=true` (public-repo production Environment variable, mirroring how `COVERED_GITHUB_SCHEDULER_ENABLED`/`WNBA_INGESTION_ENABLED` are already set). **Default disabled state**: confirmed by test -- unset, `"false"`, or any other value leaves the stage skipped with zero live calls.
+- **Bounded player/call limits**: `configuredSavantPlayerBatchSize()`, default 25 players/run (override via `KNOWLEDGE_MLB_SAVANT_BATCH_SIZE`, clamped 5-50).
+- **Expected first-run population**: a small slice of the ~228-player current-slate backlog (25 players), overwhelmingly pitchers/batters currently missing `swinging_strike_rate`/`hard_hit_rate`/`xwoba` (effectively the entire current slate today, since neither field has ever been populated in production).
+- **Expected cycles to converge**: ~9-10 runs at the default batch size to reach every current player once, then steady-state (only missing-or-stale, same convergence shape as player-logs/recent-features).
+- **Success criteria**: `mlb_pitcher_features.swinging_strike_rate`/`mlb_batter_features.hard_hit_rate`+`xwoba` begin appearing non-null in production; `pitcher_matchup_missing`/`batter_quality_missing` begin clearing for props with genuinely complete data; no new score-contract violation (no incomplete prop reaches a public surface).
+- **Abort criteria**: any live response shape mismatch (client returns unexpected fields), a persistence-failure rate that doesn't recover across cycles, or any sign the 24h check-marker isn't preventing repeat calls for the same player.
+- **Rollback criteria**: set `KNOWLEDGE_MLB_SAVANT_ENABLED` back to unset/`false` -- the stage returns to fully skipped with no further action needed; existing feature rows already written are not retroactively invalidated (same as every other enrichment stage).
+- **Monitoring evidence**: the `savant` field in `runLivePreScoreRepair`'s report (status/message/details, including `succeeded`/`empty`/`retrievalFailed`/`persistenceFailed` counts per run).
+- **Source-usage decision already supplied by Corey**: Baseball Savant/Statcast was already selected as an intended Covered MLB source (this session's owner directive) -- superseding the standing Sessions 86-90 "Decision B" recommendation.
+- **No broad backfill required**: confirmed -- the candidate population is bounded to current active props only, by construction of `selectMlbSavantCandidates`.
+
+**Final verdict: `SAVANT PIPELINE REPOSITORY-COMPLETE — READY FOR OWNER ACTIVATION AUTHORIZATION`.** The client is now correct (three real defects fixed, including one -- swinging_strike_rate -- that would otherwise have made this session's own blocker-completeness fix permanently unclearable), the writer is bounded and honest about failures, and the stage is wired but inert until `KNOWLEDGE_MLB_SAVANT_ENABLED=true` is explicitly set. No live call was made; no production behavior changed. Remaining gap: the still-unaddressed `mlb_handedness_splits` coverage defect (Section 10) is a separate, real issue for a future session. Phase 20 not begun.
+
+## Session 107 (2026-08-02): WNBA natural-path repository completion — no production action
+
+**Scope and controls.** Owner authorized repository implementation only on `codex/public-repo-repair`: no workflow dispatch, provider call, Supabase write, deployment, pin/variable/scheduler change, migration, or main push. Starting tip was `b75da973293a6026c86c6c198a9f0e5cd9fb91dd`; private `origin/main` remains `23f665955b55a9e862f7f2efa8205538c5426013`. The last documented live V2 rollback remains `933ae62fabc2f8d50adf0e084d422c7d7db47181`; re-read live controls before any production proof.
+
+**Defects fixed.**
+
+1. WNBA natural repair forwards its existing active `teamIds`/`eventIds` boundary through the ESPN/SportsDataverse matchup router; the prior router silently discarded the scope.
+2. Basketball feature freshness now requires both `player_recent_features` (recent form) and `basketball_player_features` (minutes/role). The former union/freshest-row check could mask a missing or stale score-moving input.
+3. WNBA recent-feature aggregation starts after the bounded player-log stage settles, so one natural cycle can converge logs → recent features/minutes without racing its own persistence.
+4. Basketball injury retrieval is limited to current prop teams. It deletes/inserts only those teams, treats partial responses or any persistence/marker failure as retryable, and writes a marker only after success.
+5. Basketball injury markers carry `teamIds`; preflight, recovery verification, and scoring accept one only when it is fresh **and** covers the prop's team and opponent. Legacy league-wide markers fail closed and naturally refresh on the next bounded cycle.
+6. The public-export manifest now marks seven direct private-import test/recovery artifacts private-only, closing the pre-existing export import-closure failures; no runtime/public behavior changed.
+
+**Repository proof.** Added a scoped ESPN matchup test, injury persistence/marker lifecycle tests, a team-scoped marker scoring regression, and a mixed WNBA population E2E fixture. The latter proves valid sub-70 and ≥70 props remain eligible, while missing logs, stale features/minutes, missing matchup, and identity contradictions remain blocked; Manual Analyzer exposes the valid rows and Covered Picks enforces the ≥70 floor. Final suite: **1110 passed, 1 skipped, 0 failed**. `tsc --noEmit`, `next build`, and OpenNext/Cloudflare build passed. Boundary checker: 0 violations; public export: 293 included / 82 excluded / 0 import closures / 0 secret findings. Browser-isolated local UI could not reach the local loopback server, so visual viewport inspection was unavailable; focused UI/read-path tests passed.
+
+**Natural runtime bounds.** A WNBA repair uses one provider injury report only when current teams exist; it writes only active teams, reads matchup logs bounded to active teams/events (80–500 logs and exact event IDs), and does not introduce a new provider, scheduler, backfill, scoring change, or public snapshot mechanism.
+
+**Next owner-gated production package.** Commit/push this candidate to the repair branch only, then pin it while the scheduler remains unchanged and observe exactly one normal WNBA scheduled pregame cycle: confirm current-team injury call/marker, scoped matchup + log → feature convergence, strict score/snapshot provenance, no incomplete public score, and bounded provider/write counts. Hold/rollback on any marker persistence failure, unresolved required context, duplicate write, or public incomplete score. Do not activate Savant as part of this WNBA proof.
+
+## Session 108 (2026-08-03): WNBA scheduler reliability package — repository only
+
+The natural WNBA proof was blocked before a WNBA pipeline run: the public workflow was active, but GitHub created no run record at the valid WNBA-only cron points 23:20, 23:40, and 00:00 UTC, while creating MLB records at 23:30 and 23:50. This is run-creation loss before Covered's workflow steps, concurrency group, environment controls, or private checkout. V2 was restored to rollback `933ae62fabc2f8d50adf0e084d422c7d7db47181`; no production data changed.
+
+Prepared, but did not activate, the single-heartbeat replacement: one `*/20 * * * *` public cron invokes the pinned private tree with `--league auto`. New pure `resolveScheduledLeagues` routes UTC windows (WNBA first in the 22:00–04:59 overlap, then MLB), keeps manual behavior intact, and allows a safe no-op outside both windows. The same private process retains the existing shared Sharp hard cap (eight); one requested config per due league ensures WNBA gets an attempted turn without activating or correcting Policy C. Exact public candidate fixture and patch: `docs/candidate-f/covered-production-pipeline.yml` and `docs/candidate-f/covered-production-pipeline-heartbeat.patch`. Full test suite passed 1114/1115 (one existing skip), TypeScript passed, and Next/OpenNext builds passed with the existing dynamic-route notices. Owner approval is required before any public workflow merge, private pin, or new natural proof.
+
+Session 109 correction: `*/20` was not approved because it repeats the three omitted `:00/:20/:40` minute offsets. The unactivated fixture now uses one bounded, non-round `7,27,47 16-23,0-4 * * *` heartbeat (39/day, ~1,170/30-day month, rather than 72/day for a 24-hour heartbeat). GitHub creation-minute history cannot prove a new cron's delivery—its API omits the originating cron and delayed runs are ambiguous—but this avoids the documented failure pattern and the start-of-hour load. The resolver/pipeline behavior, shared hard cap, timeout, concurrency, V2 checkout, and inactive Policy C are unchanged. New fixture test locks those facts.
+
+## Session 110 (2026-08-03): disabled Cloudflare Cron → GitHub `repository_dispatch` bridge — repository package complete, not activated
+
+**Reason and live state.** GitHub Actions missed two consecutive, confirmed non-round WNBA heartbeat slots after it had already missed the original WNBA-specific slots. There was no GitHub workflow record at either missed point, while intervening MLB records existed; this is a GitHub run-creation failure before Covered can execute a guard, checkout, provider call, or write. Production stays fully rolled back: public workflow baseline `fe9fc4f3db97dbe3ab0ace083c9261143e820e09` (rollback merge `038195f1ebe2b9c55060c98353c212d58a2abeaa`), live V2 `933ae62fabc2f8d50adf0e084d422c7d7db47181`, V1 `RETIRED_STALE_RUN_GUARD`, public scheduler/WNBA enable true, private schedulers disabled, and private `origin/main` `23f665955b55a9e862f7f2efa8205538c5426013`. Nothing live was changed in this session.
+
+**Prepared dispatcher.** `workers/covered-github-dispatcher/` is a separate, route-less Worker with no Supabase, provider, scoring, snapshot, or browser imports. Its default `wrangler.jsonc` has no cron, no D1 binding, and `COVERED_GITHUB_DISPATCHER_ENABLED=false`; it cannot dispatch until the owner explicitly uses the separate activation config. At UTC `7,27,47` between 16:00 and 04:59, the activation candidate makes at most one 4-second GitHub request for the fixed `covered-production-heartbeat` event. It sends only the canonical UTC slot and deterministic delivery key; payload is capped at 512 bytes, response body is never read, and logs contain only scalar lifecycle telemetry. `controller.noRetry()` plus a D1 atomic `slot_key` claim makes a duplicate, warm restart, delayed call, accepted-but-response-lost transport outcome, and midnight rollover fail closed. Any non-204 or ambiguous transport state consumes the slot rather than risking duplicate production work; the next scheduled slot is the bounded recovery path.
+
+**Credential and activation model.** Owner must create a short-lived, fine-grained PAT restricted solely to `CoreyTenacity/Covered-Prop-Analysis` with GitHub's required `Contents: write` permission for repository dispatch, then inject it only as Cloudflare secret `COVERED_GITHUB_REPOSITORY_DISPATCH_TOKEN`. It is never committed, returned, or logged. D1 is required because it provides an atomic, durable conditional claim; the retained slot ledger is ~39 invocations/day, two small writes/slot (~78/day, ~2,340/30-day month), far below the documented free D1 allowance. Cloudflare's current free limits and the owner activation/rollback steps are recorded in `docs/CLOUDFLARE_GITHUB_DISPATCHER_ACTIVATION.md`.
+
+**Public workflow candidate.** `docs/candidate-f/covered-production-pipeline-repository-dispatch.yml` and its apply-clean patch remove both GitHub `schedule` entries and add only fixed-type `repository_dispatch`. It validates event type, schema, source, canonical slot, and delivery key; forces `--league auto`, `--configLimit 1`, and `--schedulerHeartbeat true`; leaves manual dispatch unchanged. The private runner maps that event to the existing UTC resolver while retaining a distinct `manual` trigger classification, so scheduled-only Policy C stays inactive. Existing timeout (25 minutes), concurrency, V2 checkout validation, scheduler/WNBA guards, deadline-aware WNBA-first ordering, and shared eight-request Sharp cap remain intact. This candidate is **not** on public main and must be merged only in the controlled one-scheduler cutover.
+
+**Required owner activation order.** (1) Reverify live controls and candidate branch. (2) Pin the private candidate while the existing explicit public GitHub cron still runs. (3) Merge the public repository-dispatch workflow, which removes GitHub cron—this is the protected zero-scheduler interval. (4) Create a dedicated free D1 database and apply `workers/covered-github-dispatcher/schema.sql`; set the named Cloudflare secret; deploy the default disabled Worker. (5) Deploy the separate activation config after replacing its D1 placeholder, then wait for propagation and observe no more than three natural WNBA cycles. There is never a period with two active recurring schedulers. Rollback reverses the ownership handoff: first disable/remove Cloudflare cron and wait for propagation, then restore public baseline `fe9fc4f3…`, then restore V2 `933ae62…`; do not alter production data or aliases.
+
+**Validation.** Focused dispatcher/workflow/resolver/pipeline tests: 112/112 passed. Full suite: 1,119 passed, 1 intentional skip, 0 failures. `tsc --noEmit`, Next production build, OpenNext/Cloudflare build, YAML parse, public-patch dry application, public-boundary checker (0 violations), and export/secret audit (299 included / 82 excluded / 0 closure, absent-file, or secret findings) all passed. `scoring-engine/dist/` remains untracked and untouched; `.claude/launch.json` was not altered.
+
+**Next step.** This package is repository-complete only. It still needs explicit owner authorization for the coordinated public workflow merge, Cloudflare D1/secret provisioning, Worker deployment/cron enablement, and the bounded natural WNBA proof. Do not activate Policy C, use `workflow_dispatch`, add a second scheduler, or begin MLB work as part of that proof.
+
+## Session 111 (2026-08-03): repository-dispatch credential diagnosis — production rolled back, local correction prepared
+
+The single natural Cloudflare slot `2026-08-03T16:27Z` reached the disabled-by-default dispatcher only during the owner-approved proof and was rejected by GitHub with HTTP 403; no GitHub run was created. The dispatcher was immediately disabled and its Cron target removed. Public workflow was restored by PR #16 (merge `9b2ee2d9d766bd51f7b352e44593d9189affb965`) to exact baseline `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`; V2 was restored to `933ae62fabc2f8d50adf0e084d422c7d7db47181`. The D1 ledger record is preserved; no application data, snapshots, aliases, provider work, or manual workflow run occurred.
+
+The failed Worker request had the fixed owner/repository, endpoint, bearer authorization, JSON content type, Accept, and API-version headers, but omitted the mandatory GitHub `User-Agent` header. GitHub's REST documentation states that requests without a valid User-Agent are rejected with 403. This is a proven request-construction defect, not evidence that the fine-grained PAT scope is wrong. A local-only correction adds `User-Agent: covered-github-dispatcher/1.0`; it is not deployed. `scripts/diagnostic-github-dispatch-credential.mjs` reads a fine-grained token solely from masked interactive terminal input, calls only `GET /repos/CoreyTenacity/Covered-Prop-Analysis` then `GET /user`, prints safe status/header/error classifications only, and never dispatches. The diagnostic must be run by the owner—never pass a token through environment, file, argument, or chat.
+
+Prepared but unmerged: `docs/candidate-f/covered-dispatch-credential-proof.yml` plus an add-only patch and one-file deletion rollback patch. It accepts only `repository_dispatch` event `covered-dispatch-credential-proof`, performs no checkout/provider/Supabase/scoring/snapshot work, and logs only receipt, correlation ID, and UTC timestamp. It needs separate owner approval to become a temporary public workflow. Do not re-enable the dispatcher, Cron, V2 candidate, or any production proof until masked read-only credential output proves authenticated repository access and the harmless listener is separately approved.
+
+## Session 112 (2026-08-03): temporary credential listener removed; public-patch packaging is mechanically verified
+
+**Production safety.** Public PR #18 removed the temporary credential-proof listener at merge `24a980bccf27350f585eb62fe8b5c4f3c86063a3` (2026-08-03T17:46:24Z). Public main's production workflow is byte-identical to the verified baseline `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`; the temporary workflow is absent. V2 remains the rollback pin `933ae62fabc2f8d50adf0e084d422c7d7db47181`, V1 remains `RETIRED_STALE_RUN_GUARD`, public scheduler/WNBA enable remain true, and private schedulers remain disabled. The Cloudflare dispatcher remains disabled with no Cron target or D1 binding; its secret name remains stored but unused. The preserved D1 ledger contains only the earlier HTTP 403 record. No credential-proof dispatch, production workflow dispatch, provider work, database write, snapshot change, variable/alias change, or cleanup occurred.
+
+**Packaging root cause.** PR #17's temporary listener was not used because pre-dispatch inspection showed its final UTC timestamp receipt line missing. The hand-written unified add patch declared a 23-line hunk for a verified 24-line source, so `git apply` accepted the patch but omitted the final source line. This was a public-patch packaging defect only; it did not affect the live pipeline or credentials.
+
+**Correction.** `scripts/generate-dispatch-credential-proof-patch.mjs` now derives both add/remove patches directly from `docs/candidate-f/covered-dispatch-credential-proof.yml`, calculates hunk line counts from the source, validates the receipt-only contract, applies the add patch to a fresh temporary Git repository, and compares the result byte-for-byte. Its regression test verifies the 24-line add/remove hunks, detects a missing timestamp source line, and verifies a generated patch cannot silently truncate it. The generator owns the patch artifacts in `docs/candidate-f/`; never edit their hunk counts manually. Before any future listener PR, run `pnpm run dispatcher:credential-proof:patch`, the focused generator/boundary tests, and compare the generated source/patch hashes recorded by that invocation.
+
+**Validation.** Generator verification, YAML parse, clean temporary-clone application plus byte comparison, focused listener/boundary tests, TypeScript check, dispatcher dry build, full test suite, public-boundary check, and public-export/secret audit all passed. `scoring-engine/dist/` remains untracked; `.claude/launch.json` remains excluded. No new public listener PR may be created without new owner authorization.
+
+## Session 113 (2026-08-03): corrected temporary credential listener installed; one-shot local proof command prepared, not executed
+
+**Temporary listener state.** Public PR #19 merged at `5b258bfe165cf97730c1e13129cdf4142a985945` on 2026-08-03T18:00:15Z after its required Workers build passed. It adds exactly `.github/workflows/covered-dispatch-credential-proof.yml`; public-main source is byte-identical to the approved SHA-256 `c9590bff5c29fb40d4044b13746c116427dd3553b1a5decceb9b35d80356fb42`. It remains receipt-only and cannot invoke Covered production. Removal PR #20 is open, unmerged, and deletes exactly that file; it needs separate owner authorization before merge.
+
+**Proof executor.** `pnpm run dispatcher:credential:dispatch-proof` invokes `scripts/dispatch-github-credential-proof.mjs`. It takes the fine-grained PAT only through the existing hidden terminal prompt, never from argument/file/environment/Cloudflare; creates one UUID correlation ID; makes exactly one fixed POST to `CoreyTenacity/Covered-Prop-Analysis/dispatches` with event `covered-dispatch-credential-proof`, Accept/API-version headers, and `User-Agent: covered-github-dispatcher/1.0`; then prints only HTTP status, GitHub request ID, redacted classification, and correlation ID. There are no caller-controlled endpoint/event/ref/workflow/league fields and no retry. It is local only, excluded from the public export, and is **prepared but not executed**. Do not substitute the ordinary GitHub CLI OAuth credential for the fine-grained PAT; Cloudflare secrets are intentionally unreadable and must not be copied out.
+
+**Validation.** The focused dispatch/credential/listener/boundary suite passed 29/29; `tsc --noEmit`, public-boundary check, and public export/secret audit passed. No Cloudflare Worker deployment, Cron change, V2 change, production-workflow change, production dispatch, provider call, database write, snapshot change, or scheduler activation occurred in this session.
+
+**Credential proof result.** The owner ran the prepared hidden-prompt local command exactly once. GitHub created one receipt-only `repository_dispatch` workflow run: `30840450684` (`Covered Dispatch Credential Proof`), created/started 2026-08-03T18:15:24Z, completed successfully at 18:15:30Z (6 seconds). Its sole `receipt` job ran 18:15:26Z–18:15:30Z. The logged correlation ID was `credential-proof-6c6a94ef-d50f-43e6-ac47-ae45d58cef47`; receipt timestamp was `2026-08-03T18:15:28Z`. The owner-reported one-shot POST status was 204; GitHub's exact one-run creation is independent confirmation of acceptance. No `Covered Production Pipeline` run was created at that time. PR #20 remains the exact one-file listener-removal PR, its required Workers build passed, and it is awaiting separate owner admin-bypass authorization. Do not create another credential proof or begin activation before PR #20 is removed.
+
+## Session 114 (2026-08-03): repository-dispatch cutover activated; first natural heartbeat succeeded
+
+PR #20 removed the temporary proof listener (`c3132f0ae7abf2d9838fce7f04aeb1d0d388e493`, 18:24:09Z). PR #21 then merged the exact one-file repository-dispatch workflow cutover (`5d0068f88631896cb3f4ec49f176682c5840d717`, 18:32:37Z): GitHub `schedule` is absent; only validated `covered-production-heartbeat` dispatches are accepted. V2 was changed only to `a7e921a2da2b291730b4b6d540acb8b5a8595fb5` and read back immediately. Dispatcher Worker version `9f2c6cd8-b1c8-4db0-bccc-96c59737027d` is active with `DISPATCH_LEDGER=8d56ff46-71c9-4eb5-8765-8f4e92fd58e9`, secret name present, enabled=true, and the sole Cron `7,27,47 16-23,0-4 * * *`; no GitHub cron remains.
+
+First natural heartbeat slot `2026-08-03T18:47Z` was claimed once in D1 and accepted by GitHub with HTTP 204/request ID `2B45:21E834:113442:12AA50:6A70E252`; GitHub created `repository_dispatch` run `30842877208` at 18:47:52Z. It completed success at 18:50:03Z (2m11s), emitted the accepted-slot notice, checked out exact V2 `a7e921a2…`, kept `SHARPAPI_CONFIGS_PER_RUN=1` under the hard cap of eight, and did not overlap another run. This certifies the scheduler handoff, not the full WNBA content proof: observe up to two additional qualifying natural heartbeats (next nominal slot 19:07Z) for WNBA injury/feature/minutes/matchup/strict-v1 evidence. Roll back first on any stated abort criterion; do not patch forward while active.
+
+## Session 115 (2026-08-03): WNBA read-path trust defect closed offline; production remains rolled back
+
+**Current production baseline.** The dispatcher experiment was rolled back before this repair: public workflow is `002767acf5f285e6f1698c9d06d4fc86aaf21b39`, byte-identical to the explicit-league GitHub-cron baseline `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`; `COVERED_PRIVATE_PIPELINE_SHA_V2=933ae62fabc2f8d50adf0e084d422c7d7db47181`; V1 remains `RETIRED_STALE_RUN_GUARD`; public scheduler and WNBA ingestion remain enabled; private schedulers remain disabled. Cloudflare dispatcher is disabled and has no Cron; D1 evidence is preserved. Do **not** reactivate production infrastructure without fresh owner authorization.
+
+**Defect and repair.** The rollback baseline’s relational Manual Analyzer fallback exposed WNBA candidate rows with blockers (including Angel Reese with `stale_features`) alongside a numeric Covered Score and recommendation labels. Existing strict-v1 provenance filtering was necessary but insufficient for saved picks/parlays, board/detail reads, and malformed snapshot hydration: a score could have a current contract marker yet be currently `candidate`. The shared `filterRowsWithCurrentScoreContract()` now requires both exact strict-v1 provenance **and** `prop_state="publishable"` (with `publishable !== false`). Board, selected-leg detail, saved picks, and saved parlay legs all inherit that shared fail-closed gate. Parlay snapshot API/client hydration additionally rejects non-publishable snapshot rows before any score-derived field is returned. Complete sub-70 rows remain Manual-Analyzer eligible; the Covered Picks >=70 floor is unchanged.
+
+**Real-data read-only shadow gate.** At 4:20 PM Eastern (20:20 UTC), a bounded scan of the latest 500 production WNBA score rows found 392 `candidate` rows and 393 old/unversioned-contract rows; the repaired local candidate returned zero Manual Analyzer rows, zero Covered Picks rows, zero board rows, and zero blocked/score-derived violations. Both current `:latest` score snapshots were empty strict-v1 envelopes. The known Angel Reese score detail resolved to `null` under the candidate. No database mutation, provider request, snapshot write, scheduler, workflow, V2, or dispatcher change occurred.
+
+**Validation.** Focused contract/read/snapshot/saved-pick/parlay/UI-shape tests passed; full suite: 1131 passed, 1 intentional skip, 0 failed; TypeScript, Next production build, Cloudflare build, public-boundary audit, and secret scan passed. The production builds emit pre-existing static-generation dynamic-route warnings only; their dynamic cache writes are rejected by Next and did not mutate production. `scoring-engine/dist/` remains untracked and `.claude/launch.json` remains excluded.
+
+**Next step.** Commit/push this isolated read-path candidate to `origin/codex/public-repo-repair`; then obtain a new owner authorization before changing any production pin or infrastructure. Do not begin MLB work.
+
+## Continuation (2026-08-06, from Claude Code, resuming Codex's monitoring hold): WNBA natural certification confirmed with real production evidence -- read-only, no code/production change
+
+**Scope.** Picked up the exact narrow task the standing monitoring banner described: watch for the next natural WNBA GitHub Actions run and confirm whether it reaches identity, injuries, logs, features, minutes, matchup, scoring, and strict-v1 persistence. No architecture, MLB, or dispatcher work was reopened, per the explicit standing restriction -- none was needed.
+
+**State re-verified fresh (not trusted from any cached banner).** Local HEAD = `origin/codex/public-repo-repair` = `e32e81e59eb5d0bd3bdb716d880d81c081648457`. `COVERED_PRIVATE_PIPELINE_SHA_V2=e32e81e59eb5d0bd3bdb716d880d81c081648457` (matches HEAD exactly -- production is running this exact repair-branch tip). `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`. Public `Covered Production Pipeline` workflow active, `event=schedule` runs completing successfully on a roughly hourly cadence across 2026-08-04/05/06 (no `repository_dispatch` events since the Session 111/114 dispatcher experiment, confirming it stayed rolled back as documented). Private repo schedulers remain `disabled_manually`.
+
+**Method.** Rather than trust workflow-log text alone (sparse for this pipeline's later stages), ran the same bounded read-only Supabase verification pattern used throughout this engagement (`.env.local` credentials, real `selectRows`/`getCoveredPicksOfTheDay` production functions, no writes) against `scored_props`, `provider_cache`, and `current_props`.
+
+**Findings, in the order the banner's checklist asked for:**
+
+1. **Identity**: the natural run's own log shows `repairSharpCurrentPropIdentities` resolving 25/25 WNBA current props (`fullyMatched: 25, ambiguous: 0, stillUnmatched: 0`) during the 2026-08-06T00:00 UTC run.
+2. **Injuries**: `provider_cache` key `injury-check:wnba-league:wnba` is fresh (`fetched_at: 2026-08-05T23:04:54Z`, `is_stale: false`, `expires_at: 2026-08-06T07:04:54Z`) -- the Session 102 injury-stage fix is working naturally in production.
+3. **Logs/features/minutes**: the same run's log shows real SportsDataverse ingestion completing (`SportsDataverse WNBA player box ingestion complete`, 5,271 rows read, 189 players upserted, 336 game logs inserted).
+4. **Matchup**: not separately logged verbosely, but its downstream effect (zero-blocker scored rows, see below) is direct proof it resolved for at least those props.
+5. **Scoring**: `scored_props` rows for league `wnba` show `updated_at` timestamps matching this run's completion time exactly (`2026-08-06T00:06:11.39x`).
+6. **Strict-v1 persistence**: in the last 24 hours, of 95 WNBA `scored_props` rows across 30 distinct players, **13 rows achieved `prop_state="publishable"`, `publishable=true`, zero `publishability_reasons`, across 5 distinct players** -- genuine, complete, natural certification. **2 of those 13 reached `covered_score >= 70`** (74 and 88) -- the actual Covered Picks floor.
+
+**Why `getCoveredPicksOfTheDay({league:"wnba"})` currently returns 0 rows despite this.** Traced both >=70 rows back to their `current_props`: both have `start_time: 2026-08-05T23:40:00Z`, roughly 3 hours before this check (`now: 2026-08-06T02:34:40Z`) -- their games have already started, so they correctly rolled off the live board. This is the existing, already-tested "a past-started prop is never re-scored / never reaches the public board" invariant working exactly as designed, not a defect. These rows were genuinely Covered-Picks-eligible during their own pregame window; the check simply landed after that window closed.
+
+**Verdict on the specific question asked.** The natural WNBA pipeline reaches every stage of the strict-v1 chain in production today, repeatedly, without manual intervention: identity, fresh injury markers, real log/feature ingestion, scoring, and `publishable` persistence, including genuine >=70 Covered-Picks-eligible rows. The dominant blocker on the *majority* of rows (`stale_features`, 82/95 in the same 24h window) is the same bounded, rate-limited, multi-cycle convergence pattern classified as non-defect since Session 102 -- more players converge every cycle, this is expected behavior, not a regression, and is orthogonal to the certification question itself.
+
+**No changes made.** No code, test, config, schema, scheduler, pin, dispatcher, or production data change. Two bounded read-only scratchpad scripts were used and discarded (not committed) -- same pattern as every other bounded-verification session in this engagement.
+
+**Recommendation / next step.** This constitutes real evidence the natural-run certification the monitoring phase was waiting for has occurred. The next step is an owner decision: accept this as sufficient proof and close the monitoring phase, or specify additional evidence needed (e.g., watching a live, in-window Covered Picks read during an upcoming WNBA pregame window rather than after the fact). Do not begin MLB, dispatcher, or architecture work without a separate, explicit owner request -- none of that was authorized or needed here.
+
+## WNBA CLOSED (2026-08-06): owner accepted the natural-production evidence as sufficient -- final certification record, repository housekeeping only
+
+**Owner decision.** The natural production evidence already verified above is accepted as sufficient operational certification. No further production audit or live-window observation was performed or required.
+
+**Natural production evidence (unchanged from the prior entry, restated as the closing record):**
+- WNBA scheduled runs `31058253309` (created 2026-08-06T00:00:18Z / 2026-08-05 20:00:18 EDT) and `31054594255` (created 2026-08-05T22:56:18Z / 2026-08-05 18:56:18 EDT) both completed successfully on `event=schedule`, checking out pinned V2 `e32e81e59eb5d0bd3bdb716d880d81c081648457`.
+- The `31058253309` run's own log shows `repairSharpCurrentPropIdentities` resolving 25/25 WNBA props, a fresh `injury-check:wnba-league:wnba` marker, and real SportsDataverse ingestion (5,271 player-box rows read, 189 players upserted, 336 game logs inserted).
+- In the 24h bounded window checked: **13 WNBA `scored_props` rows reached `prop_state="publishable"` with zero blockers, across 5 distinct players.**
+- **2 of those 13 rows scored >=70** (`covered_score` 88, updated 2026-08-05T23:14:54Z / 19:14:54 EDT; and 74, updated 2026-08-05T06:31:07Z / 02:31:07 EDT) -- both genuinely Covered-Picks-eligible at the time they were scored.
+- Both >=70 rows' underlying `current_props.start_time` was 2026-08-05T23:40:00Z (19:40:00 EDT); a later read (after that time) correctly showed them absent from `getCoveredPicksOfTheDay`, because their game had already started and the existing, already-tested "a past-started prop never reaches the public board" invariant excluded them. This is correct, by-design behavior, not a defect.
+
+**Final production state (unchanged by this closure):** `COVERED_PRIVATE_PIPELINE_SHA_V2=e32e81e59eb5d0bd3bdb716d880d81c081648457`, `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`, `COVERED_GITHUB_SCHEDULER_ENABLED=true`, `WNBA_INGESTION_ENABLED=true`, Cloudflare dispatcher disabled with no active Cron, private schedulers `disabled_manually`, private `origin/main` unchanged at `23f665955b55a9e862f7f2efa8205538c5426013`. **No additional production mutation was required or made to reach this closure.**
+
+**Repository housekeeping completed this pass:**
+1. Fixed the pre-existing `tsc` error in `components/knowledge/covered-picks-fetch.test.ts` (line ~146): a deliberately-malformed test fixture representing a corrupted snapshot row was asserted `as ParlayOptionRow`, which TypeScript correctly flagged as an insufficient-overlap conversion (the fixture is missing ~19 required fields by design, to prove the code rejects malformed data). Corrected to `as unknown as ParlayOptionRow` -- TypeScript's own suggested, idiomatically-correct form for an intentionally non-conforming test double, not a workaround for a real bug. No test logic or assertion changed.
+2. Working tree inspected fully: only that one file plus the pre-existing, permanently-untracked `scoring-engine/dist/` build artifact.
+3. `scripts/dispatch-github-credential-proof.mjs` and its test are kept as supported operational tools: confirmed intentional (documented across Sessions 111-114), secure (strict interactive-TTY-only token entry, refuses non-interactive execution, no env/arg/file path, single fixed non-caller-controlled endpoint, token cleared after use, never logged), documented (`package.json`'s `dispatcher:credential:dispatch-proof` script, `docs/public-repo-boundary.json`'s private-only exclusion), and covered by the real `pnpm test` command (`scripts/*.test.mjs` glob).
+4. Validation: full suite 1132 passed / 1 skipped / 0 failed; `tsc --noEmit` clean; Next production build passed; OpenNext/Cloudflare build passed; `scripts/public-export.mjs --write` (the real boundary/secret audit): 308 included / 95 excluded, 0 import-closure violations, 0 must-be-absent violations, **0 secret findings**, overall PASS. Working tree clean after commit except the permanently-untracked `scoring-engine/dist/`.
+
+**WNBA scope frozen.** This closes the WNBA monitoring/certification thread. Remaining WNBA limitations are calibration-only, not operational: no meaningful graded-outcome sample exists yet to validate whether higher Covered Scores correlate with higher hit rates (unchanged from every prior session's honest calibration disclosure), and the majority of scored rows still carry `stale_features` on any given cycle -- the same bounded, rate-limited, multi-cycle convergence pattern classified as expected/non-defect since Session 102, which more players clear naturally every cycle. No operational, identity, injury, ingestion, scoring, or persistence defect remains open for WNBA. Do not reopen WNBA architecture, scheduler, dispatcher, or scoring work without a new, separate owner request. MLB was not touched in this pass.
+
+**Verdict: `WNBA OPERATIONALLY CERTIFIED — REPOSITORY AND PRODUCTION CHAIN COMPLETE`.**

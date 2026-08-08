@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
+import { EvidencePanel } from "@/components/knowledge/evidence-panel";
 import { KnowledgeAvatar } from "@/components/knowledge/knowledge-avatar";
 import { LegWarningList } from "@/components/knowledge/leg-warning-list";
 import { ParlayLegSelector } from "@/components/knowledge/parlay-leg-selector";
@@ -56,6 +57,16 @@ export function ParlayBuilderShell() {
   const [singlePickMessages, setSinglePickMessages] = useState<Record<string, string>>({});
   const [savingParlay, setSavingParlay] = useState(false);
   const [parlayMessage, setParlayMessage] = useState("");
+  const [expandedLegIds, setExpandedLegIds] = useState<Set<string>>(new Set());
+
+  function toggleLegEvidence(currentPropId: string) {
+    setExpandedLegIds((current) => {
+      const next = new Set(current);
+      if (next.has(currentPropId)) next.delete(currentPropId);
+      else next.add(currentPropId);
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -382,45 +393,88 @@ export function ParlayBuilderShell() {
               <ParlaySummary summary={analysis.summary} />
               <ParlayWarningList warnings={analysis.parlayWarnings} />
               <ul className="knowledge-selection-list">
-                {analysis.legs.map((leg) => (
-                  <li key={leg.option.current_prop_id}>
-                    <div className="knowledge-selection-list__identity">
-                      <KnowledgeAvatar
-                        name={leg.option.participant_display_name}
-                        imageUrl={leg.option.participant_image_url ?? leg.option.player_headshot_url}
-                        teamLogoUrl={leg.option.team_logo_url}
-                        size="sm"
-                      />
-                      <div className="knowledge-selection-list__copy">
-                        <strong>{leg.option.participant_display_name}</strong>
-                        <small>{leg.option.event_display_name}</small>
-                        <small>{leg.option.side ?? "Side TBD"} {leg.option.line} · {leg.option.market_type.replace(/_/g, " ")} · {sportsbookSummary(leg.option)}</small>
-                        <small>Covered Score {leg.option.covered_score ?? "—"} · {leg.option.score_label ?? "No score label"} · {leg.option.confidence_label ?? "No confidence label"} · {leg.option.risk_label ?? "No risk label"}</small>
-                        <small>Match status {leg.option.match_status} · match confidence {leg.option.match_confidence ?? "—"}</small>
-                      </div>
-                    </div>
-                    <LegWarningList warnings={leg.warnings} />
-                    <div className="knowledge-card__actions">
-                      {authUser ? (
+                {analysis.legs.map((leg) => {
+                  const commentary = leg.option.commentary;
+                  const notableMatchStatus = !["matched", "strongly_resolved"].includes(leg.option.match_status)
+                    ? leg.option.match_status.replace(/_/g, " ")
+                    : null;
+                  return (
+                    <li key={leg.option.current_prop_id} className="knowledge-selection-list__leg">
+                      <div className="knowledge-selection-list__row knowledge-selection-list__identity">
+                        <KnowledgeAvatar
+                          name={leg.option.participant_display_name}
+                          imageUrl={leg.option.participant_image_url ?? leg.option.player_headshot_url}
+                          teamLogoUrl={leg.option.team_logo_url}
+                          size="sm"
+                        />
+                        <div className="knowledge-selection-list__copy">
+                          <strong>{leg.option.participant_display_name}</strong>
+                          <small>{leg.option.league.toUpperCase()} · {leg.option.event_display_name ?? "Event TBD"}</small>
+                        </div>
                         <button
                           type="button"
-                          className={savedSinglePickIds[leg.option.current_prop_id] ? "save-button save-button--saved" : "save-button"}
-                          disabled={savingSinglePickId === leg.option.current_prop_id || Boolean(savedSinglePickIds[leg.option.current_prop_id])}
-                          onClick={() => saveSinglePick(leg.option)}
+                          className="knowledge-selection-list__remove"
+                          onClick={() => toggleOption(leg.option)}
+                          aria-label={`Remove ${leg.option.participant_display_name} from selection`}
+                          title="Remove this leg"
                         >
-                          {savingSinglePickId === leg.option.current_prop_id ? "Saving…" : savedSinglePickIds[leg.option.current_prop_id] ? "Saved" : "Save leg"}
+                          Remove
                         </button>
-                      ) : (
-                        <Link href="/login?next=%2Fslip-analyzer" className="save-button save-button--link">
-                          Log in to save
-                        </Link>
-                      )}
-                    </div>
-                    {singlePickMessages[leg.option.current_prop_id] ? (
-                      <p className="knowledge-selection-warning">{singlePickMessages[leg.option.current_prop_id]}</p>
-                    ) : null}
-                  </li>
-                ))}
+                      </div>
+                      <div className="knowledge-selection-list__row knowledge-selection-list__market">
+                        <span>{leg.option.side ?? "Side TBD"} {leg.option.line} · {leg.option.market_type.replace(/_/g, " ")}</span>
+                        <span>{sportsbookSummary(leg.option)}</span>
+                      </div>
+                      <div className="knowledge-selection-list__row knowledge-selection-list__badges">
+                        <span className="knowledge-badge knowledge-badge--score">Covered {leg.option.covered_score ?? "—"}</span>
+                        <ScoreBadge label={leg.option.score_label} tone="score" />
+                        <ScoreBadge label={leg.option.confidence_label} tone="confidence" />
+                        <RiskBadge label={leg.option.risk_label} />
+                        {notableMatchStatus ? <span className="knowledge-badge">{notableMatchStatus}</span> : null}
+                      </div>
+                      {commentary?.summary ? (
+                        <div className="knowledge-selection-list__commentary">
+                          <p>{commentary.summary}</p>
+                          <p className="knowledge-selection-list__eligibility">{commentary.status}</p>
+                        </div>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="details-button details-button--compact"
+                        onClick={() => toggleLegEvidence(leg.option.current_prop_id)}
+                        aria-expanded={expandedLegIds.has(leg.option.current_prop_id)}
+                      >
+                        {expandedLegIds.has(leg.option.current_prop_id) ? "Hide why this score?" : "Why this score?"}
+                        <span>{expandedLegIds.has(leg.option.current_prop_id) ? "↑" : "↓"}</span>
+                      </button>
+                      {expandedLegIds.has(leg.option.current_prop_id) ? (
+                        <div className="knowledge-selection-list__evidence">
+                          <EvidencePanel evidence={leg.option.evidence} commentary={commentary} line={leg.option.line} side={leg.option.side} />
+                        </div>
+                      ) : null}
+                      <LegWarningList warnings={leg.warnings} />
+                      <div className="knowledge-card__actions">
+                        {authUser ? (
+                          <button
+                            type="button"
+                            className={savedSinglePickIds[leg.option.current_prop_id] ? "save-button save-button--saved" : "save-button"}
+                            disabled={savingSinglePickId === leg.option.current_prop_id || Boolean(savedSinglePickIds[leg.option.current_prop_id])}
+                            onClick={() => saveSinglePick(leg.option)}
+                          >
+                            {savingSinglePickId === leg.option.current_prop_id ? "Saving…" : savedSinglePickIds[leg.option.current_prop_id] ? "Saved" : "Save leg"}
+                          </button>
+                        ) : (
+                          <Link href="/login?next=%2Fslip-analyzer" className="save-button save-button--link">
+                            Log in to save
+                          </Link>
+                        )}
+                      </div>
+                      {singlePickMessages[leg.option.current_prop_id] ? (
+                        <p className="knowledge-selection-warning">{singlePickMessages[leg.option.current_prop_id]}</p>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
               <div className="knowledge-builder-metrics">
                 <div><span>Strongest leg</span><strong>{analysis.summary.strongest_leg?.participant_display_name ?? "—"}</strong></div>

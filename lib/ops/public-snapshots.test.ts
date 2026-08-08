@@ -11,6 +11,7 @@ import {
   filterCoveredPicksSnapshotRows,
   filterModelPerformanceFacts,
   filterParlayOptionsSnapshotRows,
+  hydrateCoveredPickSnapshotRow,
   parlayOptionsSnapshotHasLeagueRows,
   publicSnapshotCacheProfile,
   publicSnapshotFallbackEnabled,
@@ -24,6 +25,7 @@ import type {
   PublicParlayOptionSnapshotRow,
   PublicSnapshotEnvelope,
 } from "@/lib/knowledge/public-snapshot-types";
+import { STRICT_ELIGIBILITY_CONTRACT_VERSION } from "@/lib/knowledge/public-snapshot-types";
 
 test("public snapshot cache profile distinguishes latest, versioned, and fallback", () => {
   assert.equal(publicSnapshotCacheProfile({ snapshotVersion: null }), "public-snapshot-latest");
@@ -135,6 +137,7 @@ test("snapshot hit reads only the published snapshot and skips fallback", async 
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-1",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
 
   const result = await resolvePublicSnapshotRoute<{ snapshotVersion: string; snapshot_source: string }>({
@@ -173,6 +176,7 @@ test("an explicitly versioned snapshot uses the immutable cache profile", async 
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-v1",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
   const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
     route: "covered-picks",
@@ -228,6 +232,7 @@ test("a published `:latest` snapshot with zero rows is treated as a miss and fal
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "30180156105.1",
     status: "fallback",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
 
   const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
@@ -267,6 +272,7 @@ test("a published `:latest` snapshot with rows is served as-is and never trigger
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-1",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
 
   const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
@@ -303,6 +309,7 @@ test("a zero-row `:latest` snapshot with fallback disabled returns unavailable a
       effectiveFilterScope: { route: "parlay-options", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
       pipelineRunId: "run-empty",
       status: "fallback",
+      eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
     };
 
     const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
@@ -341,6 +348,7 @@ test("an explicitly pinned/versioned empty snapshot is served as-is (immutable h
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-v1",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
   const result = await resolvePublicSnapshotRoute<{ snapshot_source: string }>({
     route: "covered-picks",
@@ -378,6 +386,7 @@ test("a pinned/versioned snapshot containing a day-after-tomorrow-or-later row i
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-old",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
   const result = await resolvePublicSnapshotRoute<{ rows: unknown[] }>({
     route: "covered-picks",
@@ -908,6 +917,93 @@ test("collectPublicSnapshotPublicationSummaries without publish preserves the in
   assert.equal(result["covered-picks"].dryRun, undefined);
 });
 
+// Session 99 (owner-directed score-eligibility-contract fix), Section 6: proves
+// the guarantee holds at the REAL snapshot-construction entry point, not just
+// inside read-service.ts's individual functions in isolation. Unlike every
+// other test in this file, this one does NOT inject `dependencies.coveredPicks`/
+// `parlayOptions` -- it lets collectPublicSnapshotPublicationSummaries call the
+// real getCoveredPicksOfTheDay/getParlayOptions against a real (fixture-backed)
+// Supabase read, so a false strict-v1 stamping could only be prevented here if
+// the actual production code path enforces it, not merely a test double.
+//
+// A separate assertion inside publishPublicSnapshot itself was considered and
+// rejected as unnecessary duplication: collectRoutePublicSnapshotPublication's
+// `build()` for both routes calls these exact same read-service functions
+// (see public-snapshots.ts), so the score-row contract filter added there is
+// architecturally a single source of truth -- there is no second, parallel
+// data-fetching path for snapshot construction that could bypass it.
+test("snapshot construction (Section 6): the real collectPublicSnapshotPublicationSummaries entry point, using the real getCoveredPicksOfTheDay/getParlayOptions (no stubbed reader), never counts an old-contract score row toward either route -- only a genuinely current-contract row is", async () => {
+  const originalUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "eyJtest";
+  try {
+    const { createSupabaseFixture } = await import("@/lib/knowledge/supabase-fixture-harness");
+    const start = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+    const mlbProp = (id: string) => ({
+      id, latest_snapshot_id: `snapshot-${id}`, sport_id: "baseball", league_id: "mlb", sportsbook_id: "sportsbook-1",
+      market_id: "market-1", market_instance_key: null, participant_id: `participant-${id}`, participant_type: "pitcher",
+      player_id: `player-${id}`, team_id: "team-1", opponent_id: `participant-opp-${id}`, opponent_team_id: "team-2",
+      event_id: "event-1", market_type: "pitcher_strikeouts", player_name: `Pitcher ${id}`, team_name: "Boston Red Sox",
+      opponent_name: "Los Angeles Dodgers", line: 5.5, direction: "More", side: "over", over_price: 122, under_price: -156,
+      match_confidence: 0.78, match_status: "matched", match_quality_flags: [], start_time: start, updated_at: start, active: true,
+    });
+    createSupabaseFixture({
+      current_props: [mlbProp("prop-snap-old"), mlbProp("prop-snap-current")],
+      participants: [
+        { id: "participant-prop-snap-old", display_name: "Pitcher Old", participant_type: "pitcher", player_id: "player-prop-snap-old", team_id: "team-1", image_url: null, external_ids: {} },
+        { id: "participant-prop-snap-current", display_name: "Pitcher Current", participant_type: "pitcher", player_id: "player-prop-snap-current", team_id: "team-1", image_url: null, external_ids: {} },
+      ],
+      players: [
+        { id: "player-prop-snap-old", display_name: "Pitcher Old", canonical_name: "Pitcher Old", headshot_url: null, external_ids: {} },
+        { id: "player-prop-snap-current", display_name: "Pitcher Current", canonical_name: "Pitcher Current", headshot_url: null, external_ids: {} },
+      ],
+      events: [{ id: "event-1", display_name: "Boston Red Sox at Los Angeles Dodgers", scheduled_date: null, start_time: null, status: "scheduled", home_team_id: "team-2", away_team_id: "team-1" }],
+      teams: [
+        { id: "team-1", name: "Boston Red Sox", abbreviation: "BOS", logo_url: null, external_ids: {} },
+        { id: "team-2", name: "Los Angeles Dodgers", abbreviation: "LAD", logo_url: null, external_ids: {} },
+      ],
+      markets: [{ id: "market-1", market_type: "pitcher_strikeouts", display_name: "Pitcher Strikeouts" }],
+      sportsbooks: [{ id: "sportsbook-1", code: "fanduel", display_name: "FanDuel" }],
+      // Same real production shape as the Payton Tolle defect: publishable=true,
+      // empty reasons, but the linked score_inputs row (if any) predates or
+      // mismatches the current contract entirely.
+      scored_props: [
+        {
+          id: "scored-snap-old", current_prop_id: "prop-snap-old", score_input_id: "input-snap-old", sport_id: "baseball", league_id: "mlb",
+          covered_score: 82, confidence_score: 80, data_quality_score: 85, recommendation: "Elite", risk_flags: [],
+          prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: start,
+        },
+        {
+          id: "scored-snap-current", current_prop_id: "prop-snap-current", score_input_id: "input-snap-current", sport_id: "baseball", league_id: "mlb",
+          covered_score: 84, confidence_score: 82, data_quality_score: 88, recommendation: "Elite", risk_flags: [],
+          prop_state: "publishable", publishable: true, publishability_reasons: [], updated_at: start,
+        },
+      ],
+      score_inputs: [
+        { id: "input-snap-old", feature_payload: { completenessState: "complete" } },
+        { id: "input-snap-current", feature_payload: { scoreEligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION } },
+      ],
+    });
+
+    const result = await collectPublicSnapshotPublicationSummaries({
+      publish: false,
+      dependencies: {
+        // Only model-performance is stubbed -- it is out of scope for this
+        // section (see Section 10) and shares no tables with this fixture.
+        modelPerformance: async () => ({ rows: [], count: 0 } as any),
+      },
+    });
+
+    assert.equal(result["covered-picks"].rowCount, 1, "the covered-picks snapshot build must count only the current-contract row, never the old-contract one");
+    assert.equal(result["parlay-options"].rowCount, 1, "the parlay-options (Manual Analyzer) snapshot build must count only the current-contract row, never the old-contract one");
+  } finally {
+    mock.restoreAll();
+    if (originalUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL; else process.env.NEXT_PUBLIC_SUPABASE_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+  }
+});
+
 test("the latest snapshot remains readable even when its publication is older than six hours", async () => {
   // This test is about AGE tolerance (a scheduler outage should not expire a
   // still-good latest alias), not about row count -- it must use a populated
@@ -924,6 +1020,7 @@ test("the latest snapshot remains readable even when its publication is older th
     effectiveFilterScope: { route: "covered-picks", boundedVariant: "latest", supportedFilters: [], fallbackOnlyFilters: [] },
     pipelineRunId: "run-old",
     status: "published",
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
   const result = await resolvePublicSnapshotRoute<{ source: string; snapshot_source: string }>({
     route: "covered-picks",
@@ -1123,7 +1220,7 @@ test("covered picks, parlay options, and model performance filters can be applie
     match_status: "matched",
     match_confidence: 0.91,
     match_quality_flags: [],
-    publishability_status: "candidate",
+    publishability_status: "publishable",
     publishability_reasons: [],
     covered_score: 72,
     score_label: "Elite",
@@ -1202,4 +1299,26 @@ test("covered picks, parlay options, and model performance filters can be applie
   }));
   assert.equal(modelResponse.count, 1);
   assert.equal(modelResponse.rows.length, 1);
+});
+
+// Phase 18 continuation (owner-directed) item 8: extracted from
+// app/api/knowledge/covered-picks/route.ts (the route itself cannot be
+// imported directly under this repo's node:test harness -- see the
+// next/server Node ESM limitation documented in read-surface-parity.test.ts)
+// so this response-shape behavior is directly testable. Every snapshot-served
+// Covered Picks row must always carry an empty factor_breakdown and a null
+// grading_result, matching the fact that coveredPicksSourceRow strips both
+// fields before a row is ever written into a published snapshot.
+test("hydrateCoveredPickSnapshotRow always normalizes factor_breakdown to [] and grading_result to null on a snapshot-served row", () => {
+  const row = {
+    scored_prop_id: "scored-1",
+    current_prop_id: "prop-1",
+    covered_score: 82,
+    league: "wnba",
+  } as unknown as PublicCoveredPickSnapshotRow;
+  const hydrated = hydrateCoveredPickSnapshotRow(row);
+  assert.deepEqual(hydrated.factor_breakdown, []);
+  assert.equal(hydrated.grading_result, null);
+  assert.equal(hydrated.current_prop_id, "prop-1", "every other field is preserved as-is");
+  assert.equal(hydrated.covered_score, 82);
 });

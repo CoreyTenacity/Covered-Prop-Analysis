@@ -119,6 +119,7 @@ test("Parlay Options remains broader and preserves legitimate sub-70 scored rows
     latest_scored_prop_id: "parlay-scored-1",
     start_time: "2026-07-20T23:40:00.000Z",
     covered_score: 69,
+    publishability_status: "publishable",
     league: "mlb",
     sport: "baseball",
   } as ParlayOptionRow;
@@ -139,4 +140,32 @@ test("Parlay Options remains broader and preserves legitimate sub-70 scored rows
   });
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0]?.covered_score, 69);
+});
+
+test("Parlay snapshot hydration refuses a blocked strict score even if a malformed snapshot carries its labels", () => {
+  const blocked = {
+    current_prop_id: "angel-reese-blocked",
+    latest_scored_prop_id: "score-blocked",
+    start_time: "2026-08-03T23:10:00.000Z",
+    covered_score: 84,
+    score_label: "Strong",
+    confidence_label: "Medium Confidence",
+    risk_label: "Moderate Risk",
+    commentary: { headline: "Must not be exposed" },
+    publishability_status: "candidate",
+    publishability_reasons: ["stale_features"],
+    league: "wnba",
+    sport: "basketball",
+    // Deliberately missing most required ParlayOptionRow fields -- this
+    // object represents a malformed/corrupted snapshot row (per the test
+    // name), not a genuine conforming row, so it cannot structurally satisfy
+    // ParlayOptionRow. `unknown` is the correct, honest intermediate here,
+    // not a workaround for an accidental type mismatch.
+  } as unknown as ParlayOptionRow;
+  const filtered = filterParlayOptionsSnapshotRows([blocked], {
+    date: null, sport: null, league: null, eventId: null, marketType: null,
+    sportsbook: null, participantSearch: null, onlyScored: true, onlyMatched: false,
+    excludeStaleOdds: false, excludeLowConfidenceMatches: false, limit: 100, includeVariantBooks: false,
+  });
+  assert.deepEqual(filtered, []);
 });

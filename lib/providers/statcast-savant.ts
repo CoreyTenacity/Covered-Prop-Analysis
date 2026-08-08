@@ -17,6 +17,12 @@ export type StatcastSummary = {
   sweetSpotRate: number | null;
   strikeoutRate: number | null;
   walkRate: number | null;
+  /** Session 106: whiffs (description === swinging_strike[_blocked]) per pitch
+   * -- a genuinely distinct metric from strikeoutRate (which is per plate
+   * appearance). Was entirely absent before this session; without it,
+   * mlb_pitcher_features.swinging_strike_rate had no real source anywhere in
+   * the codebase, making pitcher_matchup_missing permanently unclearable. */
+  swingingStrikeRate: number | null;
   contextConfidence: "low" | "medium" | "high";
   lastUpdated: string;
   sourceUrl: string;
@@ -117,7 +123,14 @@ function splitCsvLine(line: string) {
   return values.map((value) => value.trim());
 }
 
+// Session 106: a bare `Number(value)` treats an empty/whitespace-only CSV
+// cell as 0 (JS: `Number("") === 0`), which would silently conflate "this
+// pitch has no launch_speed because it wasn't a batted ball" with "a
+// genuinely measured 0 mph" -- exactly the missing-vs-measured-zero
+// distinction the rest of this module (and its adapters) work hard to
+// preserve. An empty/whitespace-only cell must stay null.
 function toNumber(value: unknown) {
+  if (typeof value === "string" && value.trim() === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -128,9 +141,32 @@ function average(values: Array<number | null>) {
   return Math.round((filtered.reduce((sum, value) => sum + value, 0) / filtered.length) * 10) / 10;
 }
 
-function countRate(rows: StatcastRow[], predicate: (row: StatcastRow) => boolean) {
-  if (!rows.length) return null;
-  return Math.round((rows.filter(predicate).length / rows.length) * 1000) / 10;
+// Session 106: `countRate` originally divided by `rows.length` (every
+// retrieved pitch) for EVERY rate, including hard-hit/barrel/sweet-spot
+// (which should divide by batted-ball events only) and strikeout/walk (which
+// should divide by plate-appearance-ending events, not every pitch). Using
+// the wrong, much larger denominator understated every one of these rates.
+// `population` now scopes the denominator to the rows the metric actually
+// applies to; `null` (not 0) when that population is empty, so a genuine
+// zero-in-population stays distinguishable from no-data-at-all.
+function countRate(population: StatcastRow[], predicate: (row: StatcastRow) => boolean) {
+  if (!population.length) return null;
+  return Math.round((population.filter(predicate).length / population.length) * 1000) / 10;
+}
+
+function isBattedBallRow(row: StatcastRow) {
+  const velo = typeof row.launch_speed === "number" ? row.launch_speed : typeof row.exit_velocity === "number" ? row.exit_velocity : null;
+  return typeof velo === "number";
+}
+
+function isPlateAppearanceEndingRow(row: StatcastRow) {
+  const events = row.events;
+  return typeof events === "string" && events.trim().length > 0;
+}
+
+function isSwingingStrikeRow(row: StatcastRow) {
+  const description = typeof row.description === "string" ? row.description.toLowerCase() : "";
+  return description === "swinging_strike" || description === "swinging_strike_blocked";
 }
 
 function mapRow(row: Record<string, string>): StatcastRow {
@@ -143,19 +179,27 @@ function mapRow(row: Record<string, string>): StatcastRow {
 }
 
 function summarizeRows(input: { playerName: string; playerId?: string; rows: StatcastRow[]; sourceUrl: string; from: string; to: string }): StatcastSummary {
-  const exitVelos = input.rows.map((row) => typeof row.launch_speed === "number" ? row.launch_speed : typeof row.exit_velocity === "number" ? row.exit_velocity : null);
-  const hardHitRate = countRate(input.rows, (row) => {
+  const battedBallRows = input.rows.filter(isBattedBallRow);
+  const plateAppearanceRows = input.rows.filter(isPlateAppearanceEndingRow);
+  const exitVelos = battedBallRows.map((row) => typeof row.launch_speed === "number" ? row.launch_speed : typeof row.exit_velocity === "number" ? row.exit_velocity : null);
+  const hardHitRate = countRate(battedBallRows, (row) => {
     const velo = typeof row.launch_speed === "number" ? row.launch_speed : typeof row.exit_velocity === "number" ? row.exit_velocity : null;
     return typeof velo === "number" && velo >= 95;
   });
-  const barrelRate = countRate(input.rows, (row) => row.barrel === 1 || row.barrel === "1" || row.barrels === 1 || row.barrels === "1");
-  const sweetSpotRate = countRate(input.rows, (row) => {
+  const barrelRate = countRate(battedBallRows, (row) => row.barrel === 1 || row.barrel === "1" || row.barrels === 1 || row.barrels === "1");
+  const sweetSpotRate = countRate(battedBallRows, (row) => {
     const angle = typeof row.launch_angle === "number" ? row.launch_angle : null;
     return typeof angle === "number" && angle >= 8 && angle <= 32;
   });
-  const strikeoutRate = countRate(input.rows, (row) => /strikeout|swinging strike|called strike/i.test(String(row.description ?? row.events ?? "")));
-  const walkRate = countRate(input.rows, (row) => /walk/i.test(String(row.description ?? row.events ?? "")));
-  const xwoba = average(input.rows.map((row) => {
+  // events is only populated on the pitch that ends a plate appearance, so
+  // this is a genuine strikeouts-per-batter-faced rate, not a per-pitch rate.
+  const strikeoutRate = countRate(plateAppearanceRows, (row) => String(row.events ?? "").toLowerCase() === "strikeout");
+  const walkRate = countRate(plateAppearanceRows, (row) => String(row.events ?? "").toLowerCase() === "walk");
+  // A true whiff rate: swinging-strike pitches over every pitch seen (the
+  // denominator this endpoint's rows are naturally scoped to -- one row per
+  // pitch), never conflated with the plate-appearance-level strikeoutRate.
+  const swingingStrikeRate = countRate(input.rows, isSwingingStrikeRow);
+  const xwoba = average(battedBallRows.map((row) => {
     const value = row.estimated_woba_using_speedangle ?? row.xwoba ?? row.xwOBA ?? null;
     return typeof value === "number" ? value : null;
   }));
@@ -175,6 +219,7 @@ function summarizeRows(input: { playerName: string; playerId?: string; rows: Sta
     sweetSpotRate,
     strikeoutRate,
     walkRate,
+    swingingStrikeRate,
     contextConfidence,
     lastUpdated: new Date().toISOString(),
     sourceUrl: input.sourceUrl,

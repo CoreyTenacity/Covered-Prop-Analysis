@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 
+import { EvidencePanel } from "@/components/knowledge/evidence-panel";
 import { FactorBreakdown } from "@/components/knowledge/factor-breakdown";
 import { KnowledgeAvatar } from "@/components/knowledge/knowledge-avatar";
 import { RiskBadge } from "@/components/knowledge/risk-badge";
@@ -164,14 +165,6 @@ export function PickCard({
         <p>{plainSummary(resolvedPick.explanation_summary, resolvedPick.player_display_name)}</p>
       </div>
 
-      {resolvedPick.risk_flags?.length ? (
-        <div className="knowledge-card__flags">
-          {resolvedPick.risk_flags.slice(0, 4).map((flag) => (
-            <span key={flag}>{flag.replace(/_/g, " ")}</span>
-          ))}
-        </div>
-      ) : null}
-
       <div className="knowledge-card__meta">
         <span>Edge score {resolvedPick.edge_score ?? "—"}</span>
         <span>Confidence {resolvedPick.confidence_score ?? "—"}</span>
@@ -180,7 +173,7 @@ export function PickCard({
 
       <div className="knowledge-card__actions">
         <button type="button" className="details-button" onClick={toggleExpanded} aria-expanded={expanded}>
-          {expanded ? "Hide details" : "View details"}
+          {expanded ? "Hide why this score?" : "Why this score?"}
           <span>{expanded ? "↑" : "↓"}</span>
         </button>
         {canSave ? (
@@ -202,6 +195,10 @@ export function PickCard({
 
       {expanded ? (
         <div className="knowledge-card__expanded">
+          <p className="knowledge-evidence-disclaimer">
+            Covered Score reflects the strength of the stored evidence below, not a win probability.
+          </p>
+          <EvidencePanel evidence={resolvedPick.evidence} commentary={resolvedPick.commentary} line={resolvedPick.line} side={resolvedPick.side} />
           {loadingDetails ? <div className="knowledge-inline-panel"><small>Loading details</small><strong>Pulling factor breakdown…</strong></div> : null}
           <FactorBreakdown factors={resolvedPick.factor_breakdown} />
           {resolvedPick.grading_result ? (

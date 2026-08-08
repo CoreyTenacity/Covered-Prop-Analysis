@@ -67,6 +67,13 @@ export type AdapterScoreContext = {
   teamContext: StoredFeatureMap | null;
   opponentContext: StoredFeatureMap | null;
   injuries: StoredFeatureMap | null;
+  // Injury reports are exception lists: a healthy player produces NO row, so
+  // `injuries === null` is structurally identical whether the report ran
+  // today and listed nobody, or never ran at all. This flag is the only
+  // signal that distinguishes "checked, confirmed clean" from "never
+  // checked" -- see refreshMlbInjuries/refreshBasketballInjuries's
+  // provider_cache markers in lib/knowledge/enrichment/{mlb,basketball}.ts.
+  injuryContextChecked: boolean;
   lineups: StoredFeatureMap | null;
   restContext: StoredFeatureMap | null;
   event: StoredFeatureMap | null;

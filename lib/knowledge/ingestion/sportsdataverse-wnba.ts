@@ -34,6 +34,81 @@ import { ACTIVE_LEAGUES, ensureEvent, ensurePlayer, ensureTeam, easternDate, add
 export const SPORTSDATAVERSE_WNBA_PROVIDER = "sportsdataverse-wnba";
 const WNBA_CONFIG = ACTIVE_LEAGUES.WNBA;
 
+// Session 92: ingestSportsDataverseWnbaPlayerBox/TeamBox used to delete rows ONE AT A TIME
+// in a for-loop -- N sequential Supabase round-trips for N distinct (key, game_date) pairs,
+// before a single batched insert. Traced live: this is the root cause of most scheduled WNBA
+// production runs exceeding the pipeline's 25-minute job ceiling during background
+// enrichment, before scoring is ever reached (docs/AGENT_HANDOFF.md Session 91/92). A full
+// or near-full season backfill (first run, forceFullBackfill, or a stalled watermark) can
+// have hundreds to low thousands of distinct pairs; even a fast per-call latency compounds
+// into minutes-to-tens-of-minutes. Batching into bounded OR-of-AND requests (same shape as
+// the score_explanations HEADERS_OVERFLOW fix in Session 89 -- chunked, never one unbounded
+// request) collapses this to a small, constant number of round-trips regardless of season
+// size, with identical net deletion semantics (same rows deleted, same provider scope).
+// Session 92 continuation (request-size audit): a batch of 100 pairs produces a request
+// line of ~8,000 bytes (78 bytes/pair for the longer player_id.eq.<uuid> form, plus the
+// or()/provider-filter/base-URL overhead) -- roughly half of undici's/Node's default 16KB
+// header-size ceiling, the exact failure class Session 89 traced (UND_ERR_HEADERS_OVERFLOW)
+// for a DIFFERENT unbounded filter. That is not itself over the limit, but it leaves too
+// thin a margin once real request/auth headers (apikey, Authorization bearer token, ~200-
+// 300 bytes) and any proxy layer's own line-length ceiling (many default to ~8KB total) are
+// added. Reduced to 50: ~4,050 bytes at 50 pairs, a comfortable 2x margin under any of
+// those ceilings, while still keeping the round-trip count tiny (a 2,000-pair full-season
+// volume is 40 requests at this size, vs. 2,000 sequential requests before Session 92's fix
+// -- a 98% reduction either way, batch size barely changes the practical win).
+const GAME_LOG_DELETE_BATCH_SIZE = 50;
+
+// Session 92 audit finding: `encodeURIComponent`-per-value is not actually sufficient to
+// protect the and()/or() structural syntax. The whole `or=(...)` raw filter string is
+// placed unescaped into the URL's query string (by design -- only the untrusted VALUE
+// inside it is percent-encoded, never the structural parens/commas); but the receiving
+// side (both this repo's own test harness's `URLSearchParams.entries()`, and -- unverified
+// against the real PostgREST server, but not worth risking -- potentially the server's own
+// query-string decoding) decodes the ENTIRE parameter value as one string before any DSL
+// parsing happens, which un-escapes a value's own encoded commas/parens back to literal
+// ones at the exact same syntactic level as the real and()/or() structure. Real production
+// values here are always internal UUIDs (player_id/team_id, from ensurePlayer/ensureTeam)
+// and ISO game_date strings -- never containing a comma or parenthesis -- so this could
+// never fire in practice, but failing closed rather than trusting that invariant silently
+// is the safer, cheap choice.
+const SAFE_DELETE_IDENTITY_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+// Exported so its batching behavior can be unit-tested directly against a
+// large synthetic pair count without needing a large parquet fixture.
+export async function deleteGameLogsInBatches(
+  table: "player_game_logs" | "team_game_logs",
+  keyColumn: "player_id" | "team_id",
+  provider: string,
+  pairs: Array<{ key: string; gameDate: string }>,
+) {
+  for (const pair of pairs) {
+    if (!SAFE_DELETE_IDENTITY_PATTERN.test(pair.key) || !SAFE_DELETE_IDENTITY_PATTERN.test(pair.gameDate)) {
+      throw new Error(
+        `deleteGameLogsInBatches: refusing an identity outside the safe [A-Za-z0-9_-] charset (key=${JSON.stringify(pair.key)}, gameDate=${JSON.stringify(pair.gameDate)}) -- real player_id/team_id/game_date values never need punctuation that could corrupt the and()/or() filter structure once URL-decoded.`,
+      );
+    }
+  }
+  for (let index = 0; index < pairs.length; index += GAME_LOG_DELETE_BATCH_SIZE) {
+    const batch = pairs.slice(index, index + GAME_LOG_DELETE_BATCH_SIZE);
+    const orClause = batch
+      .map((pair) => `and(${keyColumn}.eq.${pair.key},game_date.eq.${pair.gameDate})`)
+      .join(",");
+    // Session 92 continuation: previously `.catch(() => {})` swallowed a failed batch and
+    // still proceeded to the caller's subsequent insert -- if a delete genuinely failed
+    // (not "found nothing to delete", a real error), the stale pre-existing rows for this
+    // batch's identities would remain in the table AND the fresh insert would add new rows
+    // alongside them, leaving duplicates. Letting this throw means the caller's insert
+    // never runs for this ingestion pass, and the existing outer try/catch in
+    // runBoundedBackgroundEnrichment already reports this as a stage warning (not a crash)
+    // -- the same safety net every other sub-stage failure in that function already relies
+    // on, not a new failure mode being introduced here.
+    await deleteRows(table, [
+      { column: "provider", value: provider },
+      { raw: `or=(${orClause})` },
+    ]);
+  }
+}
+
 // hyparquet only decodes UNCOMPRESSED + SNAPPY natively; any other codec throws
 // "parquet unsupported compression codec: <CODEC>". The SportsDataverse
 // wehoop-wnba-data files are ZSTD-compressed (confirmed live: production run
@@ -640,13 +715,14 @@ export async function ingestSportsDataverseWnbaPlayerBox(
     // the enrichment layer (see basketball.ts refreshBasketballPlayerLogs)
     // and avoids the ON CONFLICT limitation of the expression-based unique
     // index on player_game_logs, while not touching rows outside this batch.
-    for (const record of records) {
-      await deleteRows("player_game_logs", [
-        { column: "provider", value: SPORTSDATAVERSE_WNBA_PROVIDER },
-        { column: "player_id", value: record.player_id as string },
-        { column: "game_date", value: record.game_date as string },
-      ]).catch(() => {});
-    }
+    // Batched (Session 92), not one request per record -- see
+    // deleteGameLogsInBatches's comment for why.
+    await deleteGameLogsInBatches(
+      "player_game_logs",
+      "player_id",
+      SPORTSDATAVERSE_WNBA_PROVIDER,
+      records.map((record) => ({ key: record.player_id as string, gameDate: record.game_date as string })),
+    );
     await insertRows("player_game_logs", records, { returning: "minimal" });
     gameLogsInserted = records.length;
   }
@@ -756,13 +832,15 @@ export async function ingestSportsDataverseWnbaTeamBox(
 
   let teamLogsInserted = 0;
   if (records.length) {
-    for (const record of records) {
-      await deleteRows("team_game_logs", [
-        { column: "provider", value: SPORTSDATAVERSE_WNBA_PROVIDER },
-        { column: "team_id", value: record.team_id as string },
-        { column: "game_date", value: record.game_date as string },
-      ]).catch(() => {});
-    }
+    // Batched (Session 92) -- see deleteGameLogsInBatches's comment above
+    // ingestSportsDataverseWnbaPlayerBox for why this replaced a one-request-
+    // per-record loop.
+    await deleteGameLogsInBatches(
+      "team_game_logs",
+      "team_id",
+      SPORTSDATAVERSE_WNBA_PROVIDER,
+      records.map((record) => ({ key: record.team_id as string, gameDate: record.game_date as string })),
+    );
     await insertRows("team_game_logs", records, { returning: "minimal" });
     teamLogsInserted = records.length;
   }

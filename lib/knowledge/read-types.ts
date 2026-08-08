@@ -1,4 +1,5 @@
 import type { PublicSnapshotResponseMeta } from "@/lib/knowledge/public-snapshot-types";
+import type { ParlayCommentary } from "@/lib/knowledge/commentary";
 
 export type KnowledgeFactor = {
   name?: string | null;
@@ -61,12 +62,49 @@ export type CoveredPickRow = {
     grade_reason?: string | null;
   } | null;
   last_updated: string | null;
+  /** 2026-08-07 Covered Picks/Analyzer evidence parity: the SAME
+   * ParlayOptionEvidence shape getParlayOptions already builds, computed the
+   * same way (batched, from already-stored score_inputs.feature_payload +
+   * player_game_logs) so "Why this score?" shows identical evidence for the
+   * same prop on either surface. Declared after ParlayOptionEvidence below. */
+  evidence?: ParlayOptionEvidence | null;
+  commentary?: ParlayCommentary | null;
 };
 
 export type CoveredPicksResponse = PublicSnapshotResponseMeta & {
   product_mode: string;
   count: number;
   rows: CoveredPickRow[];
+};
+
+/**
+ * Expanded, deterministic evidence for the Parlay Builder's "expanded
+ * evidence" disclosure tier -- every field is either read directly from the
+ * already-stored score_inputs.feature_payload (structuredInputs, written
+ * once at scoring time, never recomputed here) or counted directly from
+ * already-stored player_game_logs rows against this exact prop's own
+ * current line. Null means the underlying source genuinely has no value
+ * (e.g. too few stored games), never a fabricated placeholder.
+ */
+export type ParlayOptionEvidence = {
+  projection: number | null;
+  edgeValue: number | null;
+  last5Avg: number | null;
+  last10Avg: number | null;
+  /** How many of the last 5 stored games (up to 5) cleared this prop's exact current line, in this prop's direction. */
+  last5HitCount: number | null;
+  /** How many stored games were actually available for the last5HitCount denominator (<=5). */
+  last5SampleSize: number | null;
+  last10HitCount: number | null;
+  last10SampleSize: number | null;
+  /** Last-5-game minutes average (basketball only; null for MLB/unsupported markets). */
+  recentMinutesAvg: number | null;
+  minutesTrend: number | null;
+  usageTrend: number | null;
+  matchupNote: string | null;
+  injuryNote: string | null;
+  /** ISO timestamp of the freshest input this evidence was built from. */
+  dataRefreshedAt: string | null;
 };
 
 export type ParlayOptionRow = {
@@ -107,6 +145,17 @@ export type ParlayOptionRow = {
   score_label: string | null;
   confidence_label: string | null;
   risk_label: string | null;
+  /** Bounded, public-safe commentary computed once during scoring and reused
+   * here -- never fetched per-card. Null only when no explanation row exists
+   * yet for this scored prop (e.g. a legacy pre-explanation row). */
+  commentary?: ParlayCommentary | null;
+  /** Null only when the linked scored_props row has no score_input_id (a legacy
+   * shape not produced by the current pipeline) -- omitted, never fabricated,
+   * per the same contract commentary already follows. Individual fields within
+   * a non-null evidence object are independently null when their own source
+   * (a specific feature_payload key, a named factor, or player_game_logs rows
+   * for that player) is genuinely absent. */
+  evidence?: ParlayOptionEvidence | null;
 };
 
 export type ParlayOptionsResponse = PublicSnapshotResponseMeta & {

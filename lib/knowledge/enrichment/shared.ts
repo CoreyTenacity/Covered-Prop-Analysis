@@ -160,6 +160,63 @@ export function currentMlbSeason(now = new Date()) {
   return String(now.getFullYear());
 }
 
+// Injury reports are exception lists (a healthy player produces no row), so
+// the `injuries` table alone can't distinguish "report ran today, player not
+// listed" from "report never ran for this team/league today." This marker,
+// written only on a genuinely successful fetch (never inside a swallowed
+// .catch()), is the freshness signal the scoring layer checks before
+// treating a missing injuries row as a confirmed-clean state.
+export const INJURY_CHECK_FRESHNESS_HOURS = 8;
+
+export function injuryCheckCacheKey(scope: "mlb-team" | "nba-league" | "wnba-league", id: string) {
+  return `injury-check:${scope}:${id}`;
+}
+
+// Basketball injury reports are fetched as one bounded league request, but a
+// natural run persists only the teams represented by its current props. A
+// fresh marker is therefore useful only when it explicitly covers every team
+// whose absence from the exception-list report scoring is about to treat as
+// confirmed-clean. Legacy league-wide markers intentionally fail closed.
+export function basketballInjuryMarkerCoversTeams(record: { payload?: unknown } | null | undefined, teamIds: Array<string | null | undefined>) {
+  const required = [...new Set(teamIds.filter((teamId): teamId is string => Boolean(teamId)))];
+  if (!required.length) return false;
+  const payload = record?.payload;
+  if (!payload || typeof payload !== "object" || !Array.isArray((payload as { teamIds?: unknown }).teamIds)) return false;
+  const covered = new Set((payload as { teamIds: unknown[] }).teamIds.filter((teamId): teamId is string => typeof teamId === "string"));
+  return required.every((teamId) => covered.has(teamId));
+}
+
+// Statcast/Savant is season-aggregate context (K-rate, whiff rate, hard-hit
+// rate, xwOBA), not a per-game event -- unlike injuries it carries no
+// "exception list" ambiguity (a null column in mlb_pitcher_features/
+// mlb_batter_features unambiguously means "never written by any Statcast
+// attempt," since no other writer ever sets these specific columns to
+// anything but null -- see docs/AGENT_HANDOFF.md Session 105/106). This
+// marker exists only to bound RE-ATTEMPT frequency per player (so a player
+// already checked recently, even if the result was incomplete/empty, is not
+// hammered again every single run), mirroring the injury-check marker's
+// shape for exactly that one purpose.
+export const SAVANT_CHECK_FRESHNESS_HOURS = 24;
+
+export function savantCheckCacheKey(playerId: string) {
+  return `savant-check:mlb:${playerId}`;
+}
+
+// Fail-closed, disabled-by-default activation gate for the MLB Savant
+// enrichment stage: only the exact string "true" enables it. Any other
+// value (unset, "false", "1", a typo, different casing) leaves it disabled --
+// there is no ambiguous state that enables live calls, per the owner's
+// explicit Session 106 authorization boundary (repository implementation
+// and deterministic testing only, no live production calls yet).
+export function mlbSavantEnabled() {
+  return process.env.KNOWLEDGE_MLB_SAVANT_ENABLED === "true";
+}
+
+export function configuredSavantPlayerBatchSize() {
+  const raw = Number(process.env.KNOWLEDGE_MLB_SAVANT_BATCH_SIZE ?? "25");
+  return Number.isFinite(raw) ? Math.max(5, Math.min(50, Math.floor(raw))) : 25;
+}
+
 export function configuredScheduleLookaheadDays() {
   const raw = Number(process.env.KNOWLEDGE_SCHEDULE_DAYS_AHEAD ?? "2");
   return Number.isFinite(raw) ? Math.max(1, Math.min(7, Math.floor(raw))) : 2;

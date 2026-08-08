@@ -1,5 +1,6 @@
 import { deleteRows, insertRows, selectRows, upsertRows, updateRows } from "@/lib/db/supabase-server";
-import { ACTIVE_LEAGUES, addDays, configuredChunkSize, configuredPlayerLogBatchSize, configuredScheduleLookaheadDays, currentMlbSeason, easternDate, ensureEvent, ensurePlayer, ensureTeam, findEventByProviderId, normalizeName, takeRotatingSlice } from "@/lib/knowledge/enrichment/shared";
+import { putProviderCache } from "@/lib/db/provider-cache";
+import { ACTIVE_LEAGUES, addDays, configuredChunkSize, configuredPlayerLogBatchSize, configuredScheduleLookaheadDays, currentMlbSeason, easternDate, ensureEvent, ensurePlayer, ensureTeam, findEventByProviderId, injuryCheckCacheKey, INJURY_CHECK_FRESHNESS_HOURS, normalizeName, takeRotatingSlice } from "@/lib/knowledge/enrichment/shared";
 import type { RefreshWindow } from "@/lib/knowledge/enrichment/shared";
 import { HighlightlyMlbAdapter } from "@/lib/providers/highlightly-mlb";
 import { MlbStatsApiAdapter } from "@/lib/providers/mlb-stats-api";
@@ -112,8 +113,20 @@ function extractScheduleGames(payload: unknown) {
   return dates.flatMap((date) => date.games ?? []);
 }
 
-function gameStatus(game: MlbScheduleGame) {
+export function gameStatus(game: MlbScheduleGame) {
   const detail = game.status?.detailedState ?? game.status?.abstractGameState ?? "Scheduled";
+  // Phase 18 fix: MLB Stats API's documented detailedState values include
+  // "Postponed", "Suspended", and "Cancelled"/"Canceled" (spelling varies by
+  // feed) for a game that will not occur at its currently-recorded
+  // start_time -- previously unmatched by either branch below, so these
+  // silently fell through to the "scheduled" default, indistinguishable
+  // from a genuinely upcoming game. Checked BEFORE "live" (a suspended game
+  // could otherwise match /delay|review/ incorrectly). Not independently
+  // re-verified against a live API sample this session (no live provider
+  // call authorized) -- based on MLB Stats API's publicly documented status
+  // vocabulary, consistent with the existing regex-matching pattern this
+  // function already uses.
+  if (/postpon|suspend|cancel/i.test(detail)) return "postponed";
   if (/final|completed/i.test(detail)) return "completed";
   if (/live|progress|delay|review/i.test(detail)) return "live";
   return "scheduled";
@@ -132,6 +145,299 @@ function statLineValue(stat: Record<string, unknown>, ...keys: string[]) {
   if (direct !== null) return direct;
   const nested = stat.stat && typeof stat.stat === "object" ? rowValue(stat.stat as Record<string, unknown>, ...keys) : null;
   return nested;
+}
+
+export type MlbGameLogSeasonRates = {
+  battingAverage: number | null;
+  onBasePercentage: number | null;
+  sluggingPercentage: number | null;
+  onBasePlusSlugging: number | null;
+  era: number | null;
+  whip: number | null;
+};
+
+// safeNumber(null) is 0 (a bare `Number(null)` JS quirk this codebase's
+// existing safeNumber helper does not guard against), which would silently
+// turn a genuinely absent JSONB field into a fabricated measured zero -- the
+// exact class of defect already fixed once for the scoring adapter's
+// numeric() helper (see docs/AGENT_HANDOFF.md's factor-integrity session).
+// These two parsers guard null/undefined explicitly before delegating to
+// safeNumber, so a missing raw_payload field can never resolve to 0.
+function safeStatNumber(value: unknown) {
+  if (value === null || value === undefined) return null;
+  return safeNumber(value);
+}
+
+// MLB Stats API's gameLog `stat` object carries these six fields computed
+// season-to-date as of that game -- proven live via a bounded read of stored
+// player_game_logs.raw_payload rows (era/avg/obp/slg/ops/whip accumulate
+// across the season on every row; counting stats on the same object, e.g.
+// strikeOuts/battersFaced/baseOnBalls, are single-game only -- see
+// parseMlbGameLogCountingStats below for those). Every field is independently
+// nullable; a malformed or absent value never becomes a fabricated zero.
+// safeStatNumber() also turns MLB's own rate-undefined sentinel strings
+// (".---", "-.--") into null, same as any other unparseable value (NaN).
+export function parseMlbGameLogSeasonRates(rawPayload: unknown): MlbGameLogSeasonRates | null {
+  if (!rawPayload || typeof rawPayload !== "object") return null;
+  const stat = (rawPayload as Record<string, unknown>).stat;
+  if (!stat || typeof stat !== "object") return null;
+  const s = stat as Record<string, unknown>;
+  return {
+    battingAverage: safeStatNumber(s.avg),
+    onBasePercentage: safeStatNumber(s.obp),
+    sluggingPercentage: safeStatNumber(s.slg),
+    onBasePlusSlugging: safeStatNumber(s.ops),
+    era: safeStatNumber(s.era),
+    whip: safeStatNumber(s.whip),
+  };
+}
+
+export type MlbGameLogCountingStats = {
+  strikeOuts: number | null;
+  baseOnBalls: number | null;
+  battersFaced: number | null;
+};
+
+// Unlike the rates above, these are single-game counts on the same raw_payload
+// object -- callers must sum them across every stored game row themselves to
+// get a genuine season total (see the season_k_rate/season_bb_rate
+// aggregation in lib/knowledge/enrichment/jobs.ts).
+export function parseMlbGameLogCountingStats(rawPayload: unknown): MlbGameLogCountingStats | null {
+  if (!rawPayload || typeof rawPayload !== "object") return null;
+  const stat = (rawPayload as Record<string, unknown>).stat;
+  if (!stat || typeof stat !== "object") return null;
+  const s = stat as Record<string, unknown>;
+  return {
+    strikeOuts: safeStatNumber(s.strikeOuts),
+    baseOnBalls: safeStatNumber(s.baseOnBalls),
+    battersFaced: safeStatNumber(s.battersFaced),
+  };
+}
+
+// MLB Stats API's own `game.gameNumber` field (1, 2, ...) on the gameLog
+// payload -- the semantics are verified: it is MLB's literal designation of
+// which game of a doubleheader this row belongs to, not a derived guess.
+function parseMlbGameLogGameNumber(rawPayload: unknown): number | null {
+  if (!rawPayload || typeof rawPayload !== "object") return null;
+  const game = (rawPayload as Record<string, unknown>).game;
+  if (!game || typeof game !== "object") return null;
+  return safeStatNumber((game as Record<string, unknown>).gameNumber);
+}
+
+export type MlbGameLogRecencyRow = {
+  game_date: string;
+  event_id?: string | null;
+  raw_payload?: unknown;
+};
+
+// Deterministic "most recent game" ordering for a player's stored game log
+// rows. game_date alone is insufficient: player_game_logs permits two rows
+// sharing one game_date for the same player (a doubleheader -- the dedup key
+// in refreshMlbPlayerLogs is provider|player_id|game_date|event_id, which
+// allows a second event_id on the same date), and a plain string sort has no
+// defined tie-break for that case, so which row is "latest" could depend on
+// whatever order the database happened to return them in.
+//
+// Preference order, strongest evidence first:
+//   1. game_date (the primary key for "which day").
+//   2. the linked event's real start_time, when resolvable via event_id --
+//      the strongest tie-break this schema carries, since it's an actual
+//      timestamp, not a proxy.
+//   3. MLB's own `game.gameNumber` (1, 2, ...) from raw_payload, when
+//      start_time isn't resolvable for one or both rows (e.g. event_id is
+//      null, or the caller didn't supply that event's start_time).
+// MLB's own numeric gamePk (game.gamePk) is deliberately NOT used: a live
+// bounded check (Session 68) found gamePk is NOT reliably ordered by date --
+// two games on the same date had gamePks 824251/823846, while a LATER date
+// (9 days later) had a LOWER gamePk (822790) than either. Lexical/numeric
+// event-ID or gamePk order does not represent game chronology in this
+// provider's data and must not be assumed to.
+//
+// Ties that survive all three signals return 0; the caller's sort is stable
+// (Array.prototype.sort, guaranteed since ES2019), so a genuine full tie
+// preserves whatever order the rows arrived in -- an honest "we cannot
+// distinguish these" rather than a fabricated distinction.
+export function compareMlbGameLogRecency(
+  left: MlbGameLogRecencyRow,
+  right: MlbGameLogRecencyRow,
+  eventStartTimeByEventId: Map<string, string>,
+): number {
+  const dateOrder = right.game_date.localeCompare(left.game_date);
+  if (dateOrder !== 0) return dateOrder;
+
+  const leftStart = left.event_id ? eventStartTimeByEventId.get(left.event_id) : undefined;
+  const rightStart = right.event_id ? eventStartTimeByEventId.get(right.event_id) : undefined;
+  if (leftStart && rightStart) {
+    const diff = new Date(rightStart).getTime() - new Date(leftStart).getTime();
+    if (Number.isFinite(diff) && diff !== 0) return diff;
+  }
+
+  const leftGameNumber = parseMlbGameLogGameNumber(left.raw_payload);
+  const rightGameNumber = parseMlbGameLogGameNumber(right.raw_payload);
+  if (leftGameNumber !== null && rightGameNumber !== null && leftGameNumber !== rightGameNumber) {
+    return rightGameNumber - leftGameNumber;
+  }
+
+  return 0;
+}
+
+// Session 70 finding: a live bounded read found ~21% of sampled WNBA
+// player+game_date pairs have TWO stored player_game_logs rows -- one from
+// "sportsdataverse-wnba" (a real event_id) and one from "wehoop-wnba"
+// (event_id: null), both reporting the SAME underlying game with identical
+// stat values. Any last5/last10 average computed by naively slicing the N
+// most recent ROWS (rather than the N most recent distinct GAMES) is
+// systematically wrong whenever a duplicated date falls inside that window --
+// this reproduces the owner-reported "incorrect last 5 games averages" defect
+// exactly. This is a read-time correctness fix, not a data cleanup: it does
+// not touch, delete, or migrate any stored row.
+//
+// The dedup rule must not silently collapse a genuine doubleheader (two real
+// games, same calendar date) into one. Identity is resolved in a strict
+// preference order, strongest evidence first:
+//   1. this app's own canonical event_id (an events.id FK), when present.
+//   2. failing that, a stable PROVIDER-NATIVE per-game identifier read
+//      straight out of raw_payload -- MLB Stats API's `game.gamePk` for MLB
+//      rows, wehoop-wnba's own `Game_ID` for WNBA rows lacking event_id. A
+//      live full-table scan (Session 71, this pass) found 9,921 of 10,411
+//      MLB player_game_logs rows (95.3%) have event_id: null -- so for the
+//      overwhelming majority of MLB rows, event_id alone never reaches the
+//      doubleheader branch below and this function was silently relying on
+//      the date-only fallback for games it could actually have distinguished.
+//      gamePk is used ONLY for equality/grouping here, never for ordering --
+//      that is a deliberately different property from the one Session 68
+//      ruled out (see compareMlbGameLogRecency above: gamePk is NOT reliably
+//      ordered by date, so it must never be used to decide which row is
+//      "later"; nothing here does that -- two rows sharing a gamePk are, by
+//      definition, the same MLB Stats API game regardless of chronology).
+//   3. failing both, the whole date bucket collapses to one canonical row
+//      (today's provider-overlap case, or a genuine same-date double game
+//      neither provider tagged with any resolvable identifier -- a live
+//      full-table scan found zero such MLB rows today, so this residual
+//      fallback is currently unexercised by real data, not proven safe by
+//      construction).
+export type MlbGameLogDedupeRow = {
+  game_date: string;
+  event_id?: string | null;
+  updated_at?: string | null;
+  provider?: string | null;
+  raw_payload?: unknown;
+};
+
+// Provider-native per-game identifier, scoped by provider so two different
+// providers' independent ID spaces (e.g. MLB Stats API's gamePk vs. a
+// hypothetical numeric collision in another provider's own numbering) can
+// never be treated as the same key.
+function providerNativeGameKey(row: MlbGameLogDedupeRow): string | null {
+  const payload = row.raw_payload;
+  if (!payload || typeof payload !== "object") return null;
+  const game = (payload as Record<string, unknown>).game;
+  const gamePk = game && typeof game === "object" ? (game as Record<string, unknown>).gamePk : undefined;
+  if (typeof gamePk === "number" || typeof gamePk === "string") {
+    return `${row.provider ?? "unknown"}:gamePk:${gamePk}`;
+  }
+  const wehoopGameId = (payload as Record<string, unknown>).Game_ID;
+  if (typeof wehoopGameId === "number" || typeof wehoopGameId === "string") {
+    return `${row.provider ?? "unknown"}:gameId:${wehoopGameId}`;
+  }
+  return null;
+}
+
+// A row can carry BOTH an event_id and a provider-native id, or just one, or
+// neither. Two duplicate rows for the same real game don't always agree on
+// which signal is populated -- e.g. one row already has our internal
+// event_id resolved while its same-game provider-overlap twin doesn't (only
+// gamePk). Returning a single "the" key per row (event_id if present,
+// else provider-native) would treat those two rows as different games,
+// since they'd never share a key. Instead, every non-null signal a row
+// carries is treated as evidence, and any two rows that share ANY signal are
+// merged into the same canonical game via union-find.
+function identitySignals(row: MlbGameLogDedupeRow): string[] {
+  const signals: string[] = [];
+  if (row.event_id) signals.push(`event:${row.event_id}`);
+  const nativeKey = providerNativeGameKey(row);
+  if (nativeKey) signals.push(nativeKey);
+  return signals;
+}
+
+export function dedupeGameLogsByCanonicalGame<T extends MlbGameLogDedupeRow>(rows: T[]): T[] {
+  const byDate = new Map<string, T[]>();
+  for (const row of rows) {
+    const bucket = byDate.get(row.game_date) ?? [];
+    bucket.push(row);
+    byDate.set(row.game_date, bucket);
+  }
+
+  const preferRow = (candidates: T[]): T => {
+    // Prefer a row with a real event_id (more traceable/complete) over a
+    // null-event_id duplicate; break remaining ties by the most recently
+    // updated row so a fresher re-ingestion wins over a stale duplicate.
+    return [...candidates].sort((left, right) => {
+      const leftHasEvent = left.event_id ? 1 : 0;
+      const rightHasEvent = right.event_id ? 1 : 0;
+      if (leftHasEvent !== rightHasEvent) return rightHasEvent - leftHasEvent;
+      const leftUpdated = left.updated_at ? new Date(left.updated_at).getTime() : 0;
+      const rightUpdated = right.updated_at ? new Date(right.updated_at).getTime() : 0;
+      return rightUpdated - leftUpdated;
+    })[0];
+  };
+
+  const result: T[] = [];
+  for (const dateRows of byDate.values()) {
+    const parent = dateRows.map((_, index) => index);
+    const find = (index: number): number => {
+      if (parent[index] !== index) parent[index] = find(parent[index]);
+      return parent[index];
+    };
+    const union = (a: number, b: number) => {
+      const rootA = find(a);
+      const rootB = find(b);
+      if (rootA !== rootB) parent[rootA] = rootB;
+    };
+
+    const signalToIndex = new Map<string, number>();
+    dateRows.forEach((row, index) => {
+      for (const signal of identitySignals(row)) {
+        const existingIndex = signalToIndex.get(signal);
+        if (existingIndex !== undefined) union(existingIndex, index);
+        else signalToIndex.set(signal, index);
+      }
+    });
+
+    const resolvedGroups = new Map<number, T[]>();
+    const unresolved: T[] = [];
+    dateRows.forEach((row, index) => {
+      if (identitySignals(row).length === 0) {
+        unresolved.push(row);
+        return;
+      }
+      const root = find(index);
+      const bucket = resolvedGroups.get(root) ?? [];
+      bucket.push(row);
+      resolvedGroups.set(root, bucket);
+    });
+
+    if (resolvedGroups.size >= 2) {
+      // Genuine doubleheader signature: keep one representative row per
+      // resolved canonical game (still deduping any provider-overlap
+      // duplicate within a single leg). A row with NO resolvable identity at
+      // all (no event_id and no provider-native game id) alongside 2+
+      // already-known distinct legs is treated as an unattributable
+      // duplicate of one of them (not a synthetic third game) -- there is no
+      // reliable signal here for which leg it belongs to, and the far more
+      // common case (confirmed live) is a provider duplicate, not a genuine
+      // triple-header.
+      for (const bucket of resolvedGroups.values()) {
+        result.push(preferRow(bucket));
+      }
+    } else if (resolvedGroups.size === 1) {
+      const [onlyGroup] = resolvedGroups.values();
+      result.push(preferRow([...onlyGroup, ...unresolved]));
+    } else {
+      result.push(preferRow(dateRows));
+    }
+  }
+  return result;
 }
 
 async function loadLiveSharpPriorities() {
@@ -911,13 +1217,45 @@ export function classifyMlbPlayerForLogs(
 // reservation spills over one slot at a time to whichever class still has
 // eligible candidates beyond its base share; the total never exceeds
 // totalBudget, and a class with no candidates wastes nothing.
+//
+// totalBudget in {0, 1} is a genuine edge case, not just a smaller instance
+// of the general policy: reserving "half the budget" to each class only
+// makes sense when there are at least 2 slots to split. A prior version of
+// this function used `Math.max(1, Math.floor(totalBudget / 2))`, which
+// forced a reservation of >=1 slot to EACH class even when totalBudget
+// itself was 0 or 1 -- e.g. totalBudget=1 with both classes populated
+// returned {pitcherBudget:1, batterBudget:1}, a combined total of 2,
+// silently violating the pitcherBudget+batterBudget<=totalBudget contract
+// every caller depends on. That specific combination was never reachable
+// through this codebase's real call sites (see refreshMlbPlayerLogs's
+// totalBudget computation, which is always >=4 unless there is at most one
+// total candidate -- and with only one candidate, only one class's pool can
+// be non-empty), but the helper itself must not depend on its callers
+// happening to avoid the bug. Fixed by handling totalBudget<2 explicitly:
+// totalBudget=0 allocates nothing; totalBudget=1 allocates exactly one slot,
+// to whichever class actually has candidates, or -- when BOTH classes have
+// candidates and there is only one slot to give -- deterministically to the
+// pitcher class (an arbitrary but fixed, documented, and tested tie-break;
+// it does not matter which side wins a single-slot tie since neither class
+// is meaningfully favored over the long run at totalBudget=1).
 export function allocateBoundedClassSlots(input: {
   pitcherPoolSize: number;
   batterPoolSize: number;
   totalBudget: number;
 }): { pitcherBudget: number; batterBudget: number } {
-  const { pitcherPoolSize, batterPoolSize, totalBudget } = input;
-  const reserved = Math.max(1, Math.floor(totalBudget / 2));
+  const pitcherPoolSize = Math.max(0, Math.floor(input.pitcherPoolSize) || 0);
+  const batterPoolSize = Math.max(0, Math.floor(input.batterPoolSize) || 0);
+  const totalBudget = Math.max(0, Math.floor(input.totalBudget) || 0);
+
+  if (totalBudget === 0) return { pitcherBudget: 0, batterBudget: 0 };
+
+  if (totalBudget === 1) {
+    if (pitcherPoolSize > 0) return { pitcherBudget: 1, batterBudget: 0 };
+    if (batterPoolSize > 0) return { pitcherBudget: 0, batterBudget: 1 };
+    return { pitcherBudget: 0, batterBudget: 0 };
+  }
+
+  const reserved = Math.floor(totalBudget / 2);
   let pitcherBudget = Math.min(reserved, pitcherPoolSize);
   let batterBudget = Math.min(reserved, batterPoolSize);
   let leftover = totalBudget - pitcherBudget - batterBudget;
@@ -929,6 +1267,146 @@ export function allocateBoundedClassSlots(input: {
     leftover -= 1;
   }
   return { pitcherBudget, batterBudget };
+}
+
+// mode: "targeted" -- runLivePreScoreRepair's live-pipeline caller, scoped to
+// exactly the missing/stale players from inspectLiveRepairPreflight; "fair-split"
+// -- the unscoped refresh_player_game_logs job caller (lib/knowledge/enrichment/jobs.ts's
+// refreshPlayerLogsJob, invoked manually/via workflow_dispatch, not the automatic live
+// pipeline); "skipped" -- the caller decided no refresh was needed at all this run, so
+// no allocation logic executed. "unclassified" below is players whose active props need
+// both hitting and pitching stat groups, or neither -- see classifyMlbPlayerForLogs.
+export type MlbLogAllocationSummary = {
+  mode: "targeted" | "fair-split" | "skipped";
+  skipReason: string | null;
+  totalBudget: number;
+  pitcherPoolSize: number;
+  batterPoolSize: number;
+  unclassifiedPoolSize: number;
+  pitcherReservedBudget: number;
+  batterReservedBudget: number;
+  unclassifiedReservedBudget: number;
+  pitcherSpillover: number;
+  batterSpillover: number;
+  pitcherSelectedIds: string[];
+  batterSelectedIds: string[];
+  unclassifiedSelectedIds: string[];
+  pitcherDeferredCount: number;
+  batterDeferredCount: number;
+  unclassifiedDeferredCount: number;
+  cursorBefore: { pitcher: number; batter: number; unclassified: number };
+  cursorAfter: { pitcher: number; batter: number; unclassified: number };
+};
+
+export function skippedMlbLogAllocationSummary(reason: string): MlbLogAllocationSummary {
+  return {
+    mode: "skipped",
+    skipReason: reason,
+    totalBudget: 0,
+    pitcherPoolSize: 0,
+    batterPoolSize: 0,
+    unclassifiedPoolSize: 0,
+    pitcherReservedBudget: 0,
+    batterReservedBudget: 0,
+    unclassifiedReservedBudget: 0,
+    pitcherSpillover: 0,
+    batterSpillover: 0,
+    pitcherSelectedIds: [],
+    batterSelectedIds: [],
+    unclassifiedSelectedIds: [],
+    pitcherDeferredCount: 0,
+    batterDeferredCount: 0,
+    unclassifiedDeferredCount: 0,
+    cursorBefore: { pitcher: 0, batter: 0, unclassified: 0 },
+    cursorAfter: { pitcher: 0, batter: 0, unclassified: 0 },
+  };
+}
+
+// The single class-fair allocation policy shared by both refreshMlbPlayerLogs
+// callers (targeted live-pipeline mode and the unscoped fair-split job mode) --
+// previously these were two divergent implementations, one of which (the
+// fair-split logic) was never actually reachable from the live pipeline. Each
+// caller supplies its own candidate pool, total budget, and cache-key
+// namespace (so the two modes' rotation cursors never collide), but both get
+// the identical bounded-reservation-with-spillover policy and identical
+// reporting shape.
+export async function allocateClassFairPlayerWindow<T extends { id: string }>(input: {
+  mode: "targeted" | "fair-split";
+  pool: T[];
+  totalBudget: number;
+  cacheKeyPrefix: string;
+  isPriorityFor: (player: T) => boolean;
+  requiredStatGroupsByPlayerId: Record<string, MlbPostgameStatGroup[]>;
+}): Promise<RefreshWindow<T> & { allocation: MlbLogAllocationSummary }> {
+  const classify = (player: T) => classifyMlbPlayerForLogs(player, input.requiredStatGroupsByPlayerId);
+  const pitcherPool = input.pool.filter((p) => classify(p) === "pitcher");
+  const batterPool = input.pool.filter((p) => classify(p) === "batter");
+  const unclassifiedPool = input.pool.filter((p) => classify(p) === "unclassified");
+
+  const { pitcherBudget, batterBudget } = allocateBoundedClassSlots({
+    pitcherPoolSize: pitcherPool.length,
+    batterPoolSize: batterPool.length,
+    totalBudget: input.totalBudget,
+  });
+  const baseReservation = Math.max(1, Math.floor(input.totalBudget / 2));
+
+  async function windowFor(pool: T[], budget: number, cacheSuffix: string) {
+    if (!budget || !pool.length) {
+      return { items: [] as T[], start: 0, end: 0, nextIndex: 0, total: pool.length, priorityOnly: false };
+    }
+    const priorityCount = pool.filter(input.isPriorityFor).length;
+    return takeLiveFirstWindow({
+      cacheKey: `${input.cacheKeyPrefix}:${cacheSuffix}`,
+      provider: "mlb-stats-api",
+      items: pool,
+      isPriority: input.isPriorityFor,
+      sliceSize: budget,
+      maxPriorityItems: priorityCount > 0 ? Math.min(Math.max(priorityCount, Math.ceil(budget / 2)), budget) : Math.max(1, Math.floor(budget / 2)),
+    });
+  }
+
+  const [pitcherWindow, batterWindow] = await Promise.all([
+    windowFor(pitcherPool, pitcherBudget, "pitcher"),
+    windowFor(batterPool, batterBudget, "batter"),
+  ]);
+  // Unclassified players (a player whose active props need both/neither stat
+  // group) only run with whatever budget genuinely goes unused by both
+  // reserved classes, so they can never displace a classified player.
+  const unclassifiedBudget = Math.max(0, input.totalBudget - pitcherWindow.items.length - batterWindow.items.length);
+  const unclassifiedWindow = await windowFor(unclassifiedPool, unclassifiedBudget, "unclassified");
+
+  const pitcherBaseAllocated = Math.min(baseReservation, pitcherPool.length);
+  const batterBaseAllocated = Math.min(baseReservation, batterPool.length);
+
+  return {
+    items: [...pitcherWindow.items, ...batterWindow.items, ...unclassifiedWindow.items],
+    start: pitcherWindow.start,
+    end: unclassifiedWindow.end,
+    nextIndex: batterWindow.nextIndex,
+    total: input.pool.length,
+    priorityOnly: pitcherWindow.priorityOnly && batterWindow.priorityOnly,
+    allocation: {
+      mode: input.mode,
+      skipReason: null,
+      totalBudget: input.totalBudget,
+      pitcherPoolSize: pitcherPool.length,
+      batterPoolSize: batterPool.length,
+      unclassifiedPoolSize: unclassifiedPool.length,
+      pitcherReservedBudget: pitcherBaseAllocated,
+      batterReservedBudget: batterBaseAllocated,
+      unclassifiedReservedBudget: unclassifiedBudget,
+      pitcherSpillover: Math.max(0, pitcherBudget - pitcherBaseAllocated),
+      batterSpillover: Math.max(0, batterBudget - batterBaseAllocated),
+      pitcherSelectedIds: pitcherWindow.items.map((p) => p.id),
+      batterSelectedIds: batterWindow.items.map((p) => p.id),
+      unclassifiedSelectedIds: unclassifiedWindow.items.map((p) => p.id),
+      pitcherDeferredCount: pitcherPool.length - pitcherWindow.items.length,
+      batterDeferredCount: batterPool.length - batterWindow.items.length,
+      unclassifiedDeferredCount: unclassifiedPool.length - unclassifiedWindow.items.length,
+      cursorBefore: { pitcher: pitcherWindow.start, batter: batterWindow.start, unclassified: unclassifiedWindow.start },
+      cursorAfter: { pitcher: pitcherWindow.nextIndex, batter: batterWindow.nextIndex, unclassified: unclassifiedWindow.nextIndex },
+    },
+  };
 }
 
 export async function refreshMlbPlayerLogs(now = new Date(), options?: {
@@ -988,98 +1466,34 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
   const maxPlayerItemsPerRun = Math.min(baseSliceSize, 12);
   const livePriorityCount = scopedPlayers.filter((player) => priorities.playerIds.has(player.id) || priorities.playerNames.has(normalizeName(player.canonical_name))).length;
   const missingRecentPriorityCount = scopedPlayers.filter((player) => missingRecentPriorityPlayerIds.has(player.id) || missingRecentPriorityNames.has(normalizeName(player.canonical_name))).length;
-  type PlayerWindowWithAllocation = RefreshWindow<(typeof scopedPlayers)[number]> & {
-    allocation: null | {
-      pitcherPoolSize: number;
-      batterPoolSize: number;
-      unclassifiedPoolSize: number;
-      pitcherBudget: number;
-      batterBudget: number;
-      unclassifiedBudget: number;
-      pitcherSelectedIds: string[];
-      batterSelectedIds: string[];
-      unclassifiedSelectedIds: string[];
-    };
-  };
-  const playerWindow: PlayerWindowWithAllocation = targetedPlayerIds.size
-    ? (() => {
-        const targetedLimit = typeof options?.limit === "number" && Number.isFinite(options.limit)
-          ? Math.max(1, Math.floor(options.limit))
-          : maxPlayerItemsPerRun;
-        const targetedItems = scopedPlayers.slice(0, Math.min(maxPlayerItemsPerRun, targetedLimit));
-        return {
-          items: targetedItems,
-          start: 0,
-          end: targetedItems.length,
-          nextIndex: 0,
-          total: scopedPlayers.length,
-          priorityOnly: false,
-          allocation: null,
-        };
-      })()
-    : await (async () => {
-        const isPriorityFor = (player: (typeof scopedPlayers)[number]) =>
-          missingRecentPriorityPlayerIds.has(player.id)
-          || missingRecentPriorityNames.has(normalizeName(player.canonical_name))
-          || priorities.playerIds.has(player.id)
-          || priorities.playerNames.has(normalizeName(player.canonical_name));
-
-        const pitcherPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "pitcher");
-        const batterPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "batter");
-        const unclassifiedPool = scopedPlayers.filter((p) => classifyMlbPlayerForLogs(p, liveCoverage.requiredStatGroupsByPlayerId) === "unclassified");
-
-        const { pitcherBudget, batterBudget } = allocateBoundedClassSlots({
-          pitcherPoolSize: pitcherPool.length,
-          batterPoolSize: batterPool.length,
-          totalBudget: maxPlayerItemsPerRun,
-        });
-
-        async function windowFor(pool: typeof scopedPlayers, budget: number, cacheSuffix: string) {
-          if (!budget || !pool.length) {
-            return { items: [] as (typeof scopedPlayers)[number][], start: 0, end: 0, nextIndex: 0, total: pool.length, priorityOnly: false };
-          }
-          const priorityCount = pool.filter(isPriorityFor).length;
-          return takeLiveFirstWindow({
-            cacheKey: `knowledge:cursor:mlb:refresh_player_game_logs:players:${cacheSuffix}`,
-            provider: "mlb-stats-api",
-            items: pool,
-            isPriority: isPriorityFor,
-            sliceSize: budget,
-            maxPriorityItems: priorityCount > 0 ? Math.min(Math.max(priorityCount, Math.ceil(budget / 2)), budget) : Math.max(1, Math.floor(budget / 2)),
-          });
-        }
-
-        const [pitcherWindow, batterWindow] = await Promise.all([
-          windowFor(pitcherPool, pitcherBudget, "pitcher"),
-          windowFor(batterPool, batterBudget, "batter"),
-        ]);
-        // Unclassified players (a player whose active props need both/neither
-        // stat group) only run with whatever budget genuinely goes unused by
-        // both reserved classes, so they can never displace a classified
-        // player from the fair split.
-        const unclassifiedBudget = Math.max(0, maxPlayerItemsPerRun - pitcherWindow.items.length - batterWindow.items.length);
-        const unclassifiedWindow = await windowFor(unclassifiedPool, unclassifiedBudget, "unclassified");
-
-        return {
-          items: [...pitcherWindow.items, ...batterWindow.items, ...unclassifiedWindow.items],
-          start: pitcherWindow.start,
-          end: unclassifiedWindow.end,
-          nextIndex: batterWindow.nextIndex,
-          total: scopedPlayers.length,
-          priorityOnly: pitcherWindow.priorityOnly && batterWindow.priorityOnly,
-          allocation: {
-            pitcherPoolSize: pitcherPool.length,
-            batterPoolSize: batterPool.length,
-            unclassifiedPoolSize: unclassifiedPool.length,
-            pitcherBudget,
-            batterBudget,
-            unclassifiedBudget,
-            pitcherSelectedIds: pitcherWindow.items.map((p) => p.id),
-            batterSelectedIds: batterWindow.items.map((p) => p.id),
-            unclassifiedSelectedIds: unclassifiedWindow.items.map((p) => p.id),
-          },
-        };
-      })();
+  const isPriorityFor = (player: (typeof scopedPlayers)[number]) =>
+    missingRecentPriorityPlayerIds.has(player.id)
+    || missingRecentPriorityNames.has(normalizeName(player.canonical_name))
+    || priorities.playerIds.has(player.id)
+    || priorities.playerNames.has(normalizeName(player.canonical_name));
+  // Targeted mode (runLivePreScoreRepair, the live pipeline's only caller)
+  // and fair-split mode (the unscoped refresh_player_game_logs job) share the
+  // identical allocateClassFairPlayerWindow policy; they differ only in
+  // candidate-pool scope, total budget, and cache-key namespace (kept
+  // separate so the two modes' rotation cursors never collide -- targeted
+  // mode's candidate universe is a small missing/stale subset, fair-split
+  // mode's is the full player table).
+  const totalBudget = targetedPlayerIds.size
+    ? Math.min(
+        maxPlayerItemsPerRun,
+        typeof options?.limit === "number" && Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : maxPlayerItemsPerRun,
+      )
+    : maxPlayerItemsPerRun;
+  const playerWindow = await allocateClassFairPlayerWindow({
+    mode: targetedPlayerIds.size ? "targeted" : "fair-split",
+    pool: scopedPlayers,
+    totalBudget,
+    cacheKeyPrefix: targetedPlayerIds.size
+      ? "knowledge:cursor:mlb:refresh_player_game_logs:players:targeted"
+      : "knowledge:cursor:mlb:refresh_player_game_logs:players",
+    isPriorityFor,
+    requiredStatGroupsByPlayerId: liveCoverage.requiredStatGroupsByPlayerId,
+  });
   const playerItems = playerWindow.items;
   let logsUpserted = 0;
   let emptyFetches = 0;
@@ -1224,10 +1638,11 @@ export async function refreshMlbPlayerLogs(now = new Date(), options?: {
     priorityOnlyWindow: playerWindow.priorityOnly,
     sampleMissingRecentPlayers: liveCoverage.sampleMissingPlayerNames,
     playerCursor: { start: playerWindow.start, nextIndex: playerWindow.nextIndex, total: playerWindow.total },
-    // Explicit batter/pitcher allocation visibility (null in targeted mode,
-    // where a caller-supplied playerIds list bypasses the fair split
-    // entirely) -- so a stuck or imbalanced rotation is visible in the run
-    // report itself rather than only discoverable by a manual DB audit.
+    // Explicit batter/pitcher allocation visibility in every run, including
+    // targeted mode (mode: "targeted") where a caller-supplied playerIds list
+    // bypasses the fair-split reservation entirely and budgets are reported as
+    // null -- so a stuck or imbalanced rotation is visible in the run report
+    // itself rather than only discoverable by a manual DB audit.
     classAllocation: playerWindow.allocation,
     logsUpserted,
     emptyFetches,
@@ -1659,12 +2074,22 @@ export async function refreshMlbTeamLogs(now = new Date()) {
   return { league: "MLB", rowsInserted, gameCursor: { start: gameWindow.start, nextIndex: gameWindow.nextIndex, total: gameWindow.total }, priorityOnlyWindow: gameWindow.priorityOnly };
 }
 
-export async function refreshMlbInjuries(now = new Date()) {
+export async function refreshMlbInjuries(now = new Date(), options?: { teamIdAllowlist?: string[] }) {
   const adapter = new MlbStatsApiAdapter();
   const teams = await selectRows<{ id: string; name: string }>("teams", {
     select: "id,name",
     filters: [{ column: "league_id", value: config.leagueId }],
   });
+  // Bounded-recovery entry point (lib/knowledge/recovery/orchestrator.ts):
+  // when an explicit team allowlist is provided, skip the rotating-slice
+  // scan entirely and scope to exactly those teams -- no broad league
+  // refresh, no rotation-cursor side effect, capped at the same max the
+  // normal rotation uses so a caller can't turn this into an unbounded scan.
+  if (options?.teamIdAllowlist?.length) {
+    const allowlistSet = new Set(options.teamIdAllowlist);
+    const scopedTeams = teams.filter((team) => allowlistSet.has(team.id)).slice(0, 8);
+    return runMlbInjuryRefreshForTeams(adapter, scopedTeams, teams.length, now);
+  }
   const priorities = await loadLiveSharpPriorities();
   const orderedTeams = [...teams].sort((left, right) => {
     const leftPriority = priorities.teamIds.has(left.id) || priorities.teamNames.has(normalizeName(left.name)) ? 1 : 0;
@@ -1678,21 +2103,35 @@ export async function refreshMlbInjuries(now = new Date()) {
     items: orderedTeams,
     sliceSize: configuredChunkSize("KNOWLEDGE_MLB_INJURY_TEAMS_PER_RUN", 4, 2, 8),
   });
-  const scopedTeams = rotation.items;
+  const result = await runMlbInjuryRefreshForTeams(adapter, rotation.items, teams.length, now);
+  return { ...result, rotation };
+}
+
+async function runMlbInjuryRefreshForTeams(
+  adapter: MlbStatsApiAdapter,
+  scopedTeams: Array<{ id: string; name: string }>,
+  teamsAvailable: number,
+  now: Date,
+) {
   const injuryDate = easternDate(now);
-  const teamIds = scopedTeams.map((team) => team.id).filter(Boolean);
-  if (teamIds.length) {
+  let inserted = 0;
+  for (const team of scopedTeams) {
+    let fetchSucceeded = true;
+    const records = await adapter.fetchTeamInjuries(team.name, Number(currentMlbSeason(now))).catch(() => {
+      fetchSucceeded = false;
+      return [];
+    });
+    if (!fetchSucceeded) continue;
+    // Delete-then-insert is scoped to (and only attempted for) THIS team, and
+    // only after its own fetch has already succeeded -- a team whose fetch
+    // failed keeps whatever rows it already had for today, rather than losing
+    // real, previously-known injury data to a report that never returned.
     await deleteRows("injuries", [
       { column: "league_id", value: config.leagueId },
       { column: "report_source", value: "mlb-stats-api" },
       { column: "injury_date", value: injuryDate },
-      { column: "team_id", operator: "in", value: teamIds },
+      { column: "team_id", value: team.id },
     ]).catch(() => {});
-  }
-  let inserted = 0;
-  const pendingRows: Array<Record<string, unknown>> = [];
-  for (const team of scopedTeams) {
-    const records = await adapter.fetchTeamInjuries(team.name, Number(currentMlbSeason(now))).catch(() => []);
     const externalIds = records.map((record) => String(record.playerId)).filter(Boolean);
     const playerMappings = externalIds.length
       ? await selectRows<{ entity_id: string; external_id: string | null }>("source_mappings", {
@@ -1706,33 +2145,45 @@ export async function refreshMlbInjuries(now = new Date()) {
         })
       : [];
     const playerMap = new Map(playerMappings.map((mapping) => [String(mapping.external_id ?? ""), mapping.entity_id]));
-    for (const record of records) {
-      pendingRows.push({
-        sport_id: config.sportId,
-        league_id: config.leagueId,
-        player_id: playerMap.get(String(record.playerId)) ?? null,
-        team_id: team.id,
-        injury_date: injuryDate,
-        status: record.status,
-        report_source: "mlb-stats-api",
-        body_part: null,
-        note: record.note,
-        return_timeline: null,
-        raw_payload: record,
-      });
-      inserted += 1;
+    const teamRows = records.map((record) => ({
+      sport_id: config.sportId,
+      league_id: config.leagueId,
+      player_id: playerMap.get(String(record.playerId)) ?? null,
+      team_id: team.id,
+      injury_date: injuryDate,
+      status: record.status,
+      report_source: "mlb-stats-api",
+      body_part: null,
+      note: record.note,
+      return_timeline: null,
+      raw_payload: record,
+    }));
+    // Persist THIS team's rows (if any) before marking the check successful --
+    // writing the marker any earlier (e.g. right after the fetch, before an
+    // insert that could still fail) would let a persistence failure silently
+    // masquerade as a verified-clean check on the next scoring pass. A team
+    // with zero records still gets a marker (an empty result IS a complete,
+    // interpretable result -- "checked, nobody listed"), but only after the
+    // insert step for any non-empty result has actually succeeded.
+    let persisted = true;
+    if (teamRows.length) {
+      persisted = await insertRows("injuries", teamRows, { returning: "minimal" }).then(() => true).catch(() => false);
     }
-  }
-  if (pendingRows.length) {
-    await insertRows("injuries", pendingRows, { returning: "minimal" });
+    if (!persisted) continue;
+    inserted += teamRows.length;
+    await putProviderCache({
+      cacheKey: injuryCheckCacheKey("mlb-team", team.id),
+      provider: "mlb-stats-api",
+      payload: { teamId: team.id, checkedDate: injuryDate, recordCount: teamRows.length },
+      expiresAt: new Date(Date.now() + INJURY_CHECK_FRESHNESS_HOURS * 60 * 60 * 1000).toISOString(),
+    }).catch(() => {});
   }
   return {
-    league: "MLB",
-    provider: "mlb-stats-api",
+    league: "MLB" as const,
+    provider: "mlb-stats-api" as const,
     inserted,
     teamsProcessed: scopedTeams.length,
-    teamsAvailable: teams.length,
-    rotation,
+    teamsAvailable,
   };
 }
 
@@ -2612,67 +3063,153 @@ export async function refreshMlbMatchupFeatures(now = new Date(), options?: {
   return { league: "MLB", inserted, eventCursor: { start: eventWindow.start, nextIndex: eventWindow.nextIndex, total: eventWindow.total }, priorityOnlyWindow: eventWindow.priorityOnly };
 }
 
-export async function refreshMlbStatcastForKnownPlayers(now = new Date()) {
-  const statcast = new StatcastSavantAdapter();
-  const players = await selectRows<{ id: string; canonical_name: string; primary_position: string | null }>("players", {
-    select: "id,canonical_name,primary_position",
-    filters: [{ column: "league_id", value: config.leagueId }],
-    limit: Math.min(configuredPlayerLogBatchSize(), 25),
-  });
-  let enriched = 0;
-  for (const player of players) {
-    const probe = await statcast.fetchPlayerContextSummary({
-      playerName: player.canonical_name,
-      playerType: /pitcher/i.test(player.primary_position ?? "") ? "pitcher" : "batter",
-      probeOnly: false,
-    }).catch(() => null);
-    if (probe?.status !== "ok" || !probe.summary) continue;
-    if (/pitcher/i.test(player.primary_position ?? "")) {
-      await deleteRows("mlb_pitcher_features", [
-        { column: "player_id", value: player.id },
-        { column: "feature_date", value: easternDate(now) },
-      ]).catch(() => {});
-      await insertRows("mlb_pitcher_features", [{
-        player_id: player.id,
-        event_id: null,
-        game_id: null,
-        feature_date: easternDate(now),
-        recent_strikeouts_avg: null,
-        recent_pitch_count_avg: null,
-        season_era: null,
-        season_whip: null,
-        season_k_rate: probe.summary.strikeoutRate,
-        season_bb_rate: probe.summary.walkRate,
-        swinging_strike_rate: null,
-        velocity_trend: null,
-        feature_payload: probe.summary,
-      }], { returning: "minimal" }).catch(() => {});
-    } else {
-      await deleteRows("mlb_batter_features", [
-        { column: "player_id", value: player.id },
-        { column: "feature_date", value: easternDate(now) },
-      ]).catch(() => {});
-      await insertRows("mlb_batter_features", [{
-        player_id: player.id,
-        event_id: null,
-        game_id: null,
-        feature_date: easternDate(now),
-        recent_hits_avg: null,
-        recent_total_bases_avg: null,
-        season_avg: null,
-        season_obp: null,
-        season_slg: null,
-        season_ops: null,
-        average_exit_velocity: probe.summary.avgExitVelocity,
-        hard_hit_rate: probe.summary.hardHitRate,
-        barrel_rate: probe.summary.barrelRate,
-        xba: null,
-        xslg: null,
-        xwoba: probe.summary.xwoba,
-        feature_payload: probe.summary,
-      }], { returning: "minimal" }).catch(() => {});
-    }
-    enriched += 1;
+export type MlbSavantCandidate = { playerId: string; role: "batter" | "pitcher" };
+
+export type MlbSavantPlayerOutcome = {
+  playerId: string;
+  role: "batter" | "pitcher";
+  outcome: "success" | "empty" | "retrieval_failed" | "persistence_failed";
+  sampleSize?: number;
+  error?: string;
+};
+
+export type MlbSavantRefreshResult = {
+  league: "MLB";
+  attempted: number;
+  succeeded: number;
+  empty: number;
+  retrievalFailed: number;
+  persistenceFailed: number;
+  players: MlbSavantPlayerOutcome[];
+};
+
+// Bounded, current-scoped Statcast/Savant refresh. Callers (the preflight-gated
+// pipeline stage) supply the exact candidate player IDs and roles -- this
+// function does not select "the first N players in the league" itself, so it
+// can never silently drift toward historical/off-slate players. Session 106:
+// rewritten from the prior dead version to (a) resolve each player's real
+// MLBAM external ID once, up front, so fetchPlayerContextSummary never falls
+// back to a redundant MLB Stats API name-resolution sub-call, and (b) stop
+// swallowing persistence (delete/insert) failures silently -- a caller now
+// gets an honest per-player outcome instead of an "enriched" count that was
+// incremented even when the write itself failed.
+export async function refreshMlbStatcastForKnownPlayers(
+  candidates: MlbSavantCandidate[],
+  now = new Date(),
+): Promise<MlbSavantRefreshResult> {
+  const outcomes: MlbSavantPlayerOutcome[] = [];
+  if (!candidates.length) {
+    return { league: "MLB", attempted: 0, succeeded: 0, empty: 0, retrievalFailed: 0, persistenceFailed: 0, players: outcomes };
   }
-  return { league: "MLB", statcastRows: enriched };
+  const statcast = new StatcastSavantAdapter();
+  const playerIds = candidates.map((candidate) => candidate.playerId);
+  const playerRows = await selectRows<{ id: string; canonical_name: string; external_ids: Record<string, unknown> | null }>("players", {
+    select: "id,canonical_name,external_ids",
+    filters: [{ column: "id", operator: "in", value: playerIds }],
+    limit: Math.max(playerIds.length, 1),
+  });
+  const playerById = new Map(playerRows.map((row) => [row.id, row]));
+
+  for (const candidate of candidates) {
+    const player = playerById.get(candidate.playerId);
+    if (!player) {
+      outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "retrieval_failed", error: "Player row not found for this ID." });
+      continue;
+    }
+    const externalId = typeof player.external_ids?.["mlb-stats-api"] === "string" || typeof player.external_ids?.["mlb-stats-api"] === "number"
+      ? String(player.external_ids["mlb-stats-api"])
+      : undefined;
+    let probe: Awaited<ReturnType<typeof statcast.fetchPlayerContextSummary>> | null = null;
+    let probeThrew: string | null = null;
+    try {
+      probe = await statcast.fetchPlayerContextSummary({
+        playerName: player.canonical_name,
+        playerId: externalId,
+        playerType: candidate.role,
+        probeOnly: false,
+      });
+    } catch (error) {
+      probeThrew = error instanceof Error ? error.message : String(error);
+    }
+    if (!probe || probe.status !== "ok" || !probe.summary) {
+      outcomes.push({
+        playerId: candidate.playerId,
+        role: candidate.role,
+        outcome: "retrieval_failed",
+        error: probeThrew ?? probe?.error ?? "Statcast retrieval did not return a usable summary.",
+      });
+      continue;
+    }
+    if (probe.summary.sampleSize === 0) {
+      // A genuine zero-row response (no batted-ball/pitch events in the lookback
+      // window) is a real, complete answer -- "checked, nothing to report" --
+      // not a failure. No feature row is written (there is nothing to write),
+      // but this still counts as a successful attempt for marker purposes so
+      // the same player isn't re-hit again before the freshness window expires.
+      outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "empty", sampleSize: 0 });
+      continue;
+    }
+    const table = candidate.role === "pitcher" ? "mlb_pitcher_features" : "mlb_batter_features";
+    const deleteResult = await deleteRows(table, [
+      { column: "player_id", value: candidate.playerId },
+      { column: "feature_date", value: easternDate(now) },
+    ]).then(() => true).catch((error: unknown) => {
+      outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "persistence_failed", error: error instanceof Error ? error.message : String(error) });
+      return false;
+    });
+    if (!deleteResult) continue;
+    const insertResult = candidate.role === "pitcher"
+      ? await insertRows("mlb_pitcher_features", [{
+          player_id: candidate.playerId,
+          event_id: null,
+          game_id: null,
+          feature_date: easternDate(now),
+          recent_strikeouts_avg: null,
+          recent_pitch_count_avg: null,
+          season_era: null,
+          season_whip: null,
+          season_k_rate: probe.summary.strikeoutRate,
+          season_bb_rate: probe.summary.walkRate,
+          swinging_strike_rate: probe.summary.swingingStrikeRate,
+          velocity_trend: null,
+          feature_payload: probe.summary,
+        }], { returning: "minimal" }).then(() => true).catch((error: unknown) => {
+          outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "persistence_failed", error: error instanceof Error ? error.message : String(error) });
+          return false;
+        })
+      : await insertRows("mlb_batter_features", [{
+          player_id: candidate.playerId,
+          event_id: null,
+          game_id: null,
+          feature_date: easternDate(now),
+          recent_hits_avg: null,
+          recent_total_bases_avg: null,
+          season_avg: null,
+          season_obp: null,
+          season_slg: null,
+          season_ops: null,
+          average_exit_velocity: probe.summary.avgExitVelocity,
+          hard_hit_rate: probe.summary.hardHitRate,
+          barrel_rate: probe.summary.barrelRate,
+          xba: null,
+          xslg: null,
+          xwoba: probe.summary.xwoba,
+          feature_payload: probe.summary,
+        }], { returning: "minimal" }).then(() => true).catch((error: unknown) => {
+          outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "persistence_failed", error: error instanceof Error ? error.message : String(error) });
+          return false;
+        });
+    if (!insertResult) continue;
+    outcomes.push({ playerId: candidate.playerId, role: candidate.role, outcome: "success", sampleSize: probe.summary.sampleSize });
+  }
+
+  return {
+    league: "MLB",
+    attempted: outcomes.length,
+    succeeded: outcomes.filter((o) => o.outcome === "success").length,
+    empty: outcomes.filter((o) => o.outcome === "empty").length,
+    retrievalFailed: outcomes.filter((o) => o.outcome === "retrieval_failed").length,
+    persistenceFailed: outcomes.filter((o) => o.outcome === "persistence_failed").length,
+    players: outcomes,
+  };
 }

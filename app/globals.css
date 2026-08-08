@@ -261,14 +261,76 @@ h1 { margin: 0; font-size: clamp(30px, 4vw, 43px); line-height: 1.08; letter-spa
 .knowledge-inline-panel small { color: #8da5ce; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
 .knowledge-inline-panel strong { font-size: 14px; }
 .knowledge-inline-panel span { color: #b7b1c6; font-size: 12px; }
-.knowledge-builder-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, .9fr); gap: 16px; }
+.knowledge-evidence { display: grid; gap: 8px; }
+.knowledge-evidence-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid rgba(139,92,246,.10); border-radius: 10px; background: rgba(255,255,255,.02); }
+.knowledge-evidence-row__label { color: #a39ab8; font-size: 11px; }
+.knowledge-evidence-row__value { color: #e5def8; font-size: 12px; font-weight: 600; text-align: right; }
+.knowledge-evidence-empty { margin: 0; color: #8d869d; font-size: 12px; font-style: italic; }
+.knowledge-evidence-list { display: grid; gap: 6px; }
+.knowledge-evidence-list small { color: #8da5ce; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+.knowledge-evidence-list ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.knowledge-evidence-list li { color: #b7b1c6; font-size: 12px; line-height: 1.5; }
+
+/* Shared "Why this score?" evidence panel (evidence-panel.tsx), used
+   identically by the Analyzer catalog card, the selected-slip leg, and the
+   Covered Picks card -- one set of rules for all three, so legibility fixes
+   never need to be made three times. Sections stack vertically at every
+   width (no side-by-side dense columns) to avoid the exact scrunching the
+   old inline-row layout produced. */
+.knowledge-evidence-panel { display: grid; gap: 12px; margin-top: 10px; }
+.knowledge-evidence-disclaimer { margin: 10px 0 0; color: #8d869d; font-size: 11px; font-style: italic; line-height: 1.5; }
+.knowledge-evidence-section { display: grid; gap: 6px; min-width: 0; padding: 12px 14px; border: 1px solid rgba(139,92,246,.10); border-radius: 12px; background: rgba(255,255,255,.02); }
+.knowledge-evidence-section h4 { margin: 0; color: #a39ab8; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+.knowledge-evidence-section p { margin: 0; color: #d9d3ea; font-size: 13px; line-height: 1.55; overflow-wrap: break-word; }
+.knowledge-evidence-section ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.knowledge-evidence-section li { color: #d9d3ea; font-size: 13px; line-height: 1.55; overflow-wrap: break-word; }
+.knowledge-evidence-section--support { border-color: rgba(16,185,129,.18); background: rgba(16,185,129,.05); }
+.knowledge-evidence-section--risk { border-color: rgba(245,158,11,.18); background: rgba(245,158,11,.05); }
+.knowledge-evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 10px 16px; }
+.knowledge-evidence-cell { display: grid; gap: 2px; min-width: 0; }
+.knowledge-evidence-cell span { color: #a39ab8; font-size: 10.5px; text-transform: uppercase; letter-spacing: .3px; }
+.knowledge-evidence-cell strong { color: #e5def8; font-size: 15px; font-weight: 700; overflow-wrap: break-word; }
+.knowledge-evidence-freshness { margin: 0; color: #8d869d; font-size: 11px; }
+
+/* Widened relative to the catalog column (was 1.4fr/minmax(360px,1fr)) --
+   the selection panel needs enough usable width for structured rows
+   (matchup, market, badges, evidence sections) without cramming everything
+   onto tightly-wrapped lines. Rebalance width, not typography. */
+.knowledge-builder-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(420px, 1fr); gap: 24px; }
 .knowledge-builder__selection { position: sticky; top: 92px; height: fit-content; }
-.knowledge-selection-list { display: grid; gap: 10px; margin: 12px 0 16px; padding: 0; list-style: none; }
-.knowledge-selection-list li { display: flex; flex-direction: column; gap: 3px; padding: 11px 12px; border: 1px solid rgba(139,92,246,.12); border-radius: 10px; background: rgba(109,40,217,.06); }
+.knowledge-selection-list { display: grid; gap: 12px; margin: 12px 0 16px; padding: 0; list-style: none; }
+.knowledge-selection-list li { display: flex; flex-direction: column; gap: 8px; padding: 13px 14px; border: 1px solid rgba(139,92,246,.12); border-radius: 10px; background: rgba(109,40,217,.06); }
+.knowledge-selection-list__row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .knowledge-selection-list__identity { display: flex; gap: 10px; align-items: center; }
-.knowledge-selection-list__copy { min-width: 0; }
-.knowledge-selection-list li strong { font-size: 12px; }
-.knowledge-selection-list li small { color: #958ba9; font-size: 10px; line-height: 1.45; }
+.knowledge-selection-list__copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
+.knowledge-selection-list li strong { font-size: 13px; }
+.knowledge-selection-list li small { color: #958ba9; font-size: 11px; line-height: 1.5; }
+.knowledge-selection-list__remove {
+  flex: none; padding: 5px 11px; border: 1px solid rgba(239,68,68,.25); border-radius: 999px;
+  background: rgba(239,68,68,.08); color: #fecaca; font-size: 10px; font-weight: 700;
+  letter-spacing: .3px; text-transform: uppercase; cursor: pointer;
+}
+.knowledge-selection-list__remove:hover { background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.4); }
+.knowledge-selection-list__market { color: #b7add4; font-size: 11px; }
+.knowledge-selection-list__badges { gap: 6px; }
+.knowledge-selection-list__commentary {
+  display: grid; gap: 5px; padding-top: 9px; border-top: 1px solid rgba(139,92,246,.1);
+  color: #cfc7e4; font-size: 11.5px; line-height: 1.55;
+}
+.knowledge-selection-list__commentary p { margin: 0; }
+.knowledge-selection-list__commentary strong { font-size: 11.5px; color: #ded6f2; }
+.knowledge-selection-list__eligibility { font-style: italic; color: #b7add4; }
+.knowledge-selection-list__evidence { margin-top: 4px; }
+.details-button--compact { min-height: 34px; padding: 0 12px; font-size: 0.7rem; align-self: flex-start; }
+/* The selection panel's wider 360px floor (needed for badges/commentary to
+   read cleanly) leaves too little room for the catalog column in 2-column
+   mode at tablet-portrait widths (e.g. 768px) -- verified visually: catalog
+   card text wrapped into single-word lines. Stack earlier (900px) than the
+   existing 760px mobile breakpoint, specifically for this layout only. */
+@media (max-width: 900px) {
+  .knowledge-builder-layout { grid-template-columns: 1fr; }
+  .knowledge-builder__selection { position: static; order: -1; }
+}
 .auth-page { display: grid; min-height: 100vh; place-items: center; padding: 32px 18px; background: radial-gradient(circle at 25% 0%, rgba(124,58,237,.18), transparent 30%), var(--bg); }
 .auth-card { width: min(520px, 100%); padding: 28px; border: 1px solid rgba(139,92,246,.18); border-radius: 20px; background: linear-gradient(145deg, #0f1219, #09090f); box-shadow: var(--shadow-soft); }
 .auth-card p { color: var(--secondary); font-size: 14px; line-height: 1.6; }
@@ -315,7 +377,34 @@ h1 { margin: 0; font-size: clamp(30px, 4vw, 43px); line-height: 1.08; letter-spa
 .knowledge-warning-list { display: grid; gap: 8px; margin: 0 0 16px; padding: 12px; border: 1px solid rgba(245,158,11,.18); border-radius: 12px; background: rgba(245,158,11,.06); }
 .knowledge-warning-list strong { font-size: 11px; }
 .knowledge-warning-list ul { display: grid; gap: 6px; margin: 0; padding-left: 16px; color: #d8cda9; font-size: 11px; line-height: 1.5; }
-.knowledge-performance-kpis { margin-top: 0; }
+/* The Parlay Builder's selected-leg sidebar reuses the Performance page's
+   4-column KPI grid (30px numeric font, built for short numbers like "81"),
+   but "Overall Slip Quality" and "High-confidence legs" are word-based
+   labels ("Strong Slip") -- at 1/4 of an already-narrow sidebar's width that
+   font size wraps the text letter-by-letter. Switch to a 2x2 grid with a
+   smaller value font specifically in this narrower context. */
+.knowledge-performance-kpis {
+  margin-top: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.knowledge-performance-kpis .kpi-card {
+  min-height: 84px;
+  padding: 13px 14px;
+}
+.knowledge-performance-kpis .kpi-card > strong {
+  margin: 6px 0 3px;
+  font-size: 18px;
+  letter-spacing: -0.3px;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.knowledge-performance-kpis .kpi-card--primary > strong {
+  font-size: 20px;
+}
+.knowledge-performance-kpis .kpi-card > small {
+  line-height: 1.4;
+}
 .knowledge-warning-pills { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0 0; padding: 0; list-style: none; }
 .knowledge-warning-pill { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 999px; font-size: 10px; line-height: 1.35; }
 .knowledge-warning-pill--info { color: #c8bcf0; background: rgba(109,40,217,.1); border: 1px solid rgba(109,40,217,.18); }

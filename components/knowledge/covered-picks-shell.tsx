@@ -270,7 +270,17 @@ export function CoveredPicksShell() {
 
       {loading ? <div className="empty-state"><strong>Loading Covered Picks of the Day…</strong><span>Pulling the latest ranked scored props from the backend read layer.</span></div> : null}
       {!loading && error ? <div className="empty-state"><strong>Couldn’t load Covered Picks of the Day.</strong><span>{error}</span></div> : null}
-      {!loading && !error && !displayedRows.length ? <div className="empty-state"><strong>No Covered Picks are available right now.</strong><span>Scored props may already exist, but none have cleared the 70+ Covered Score board floor yet. The board publishes fewer picks rather than lowering the floor. Try widening the other filters or switch the date.</span></div> : null}
+      {!loading && !error && !displayedRows.length ? (
+        <div className="empty-state">
+          <strong>No Covered Picks are available right now.</strong>
+          <span>
+            Scored props may already exist, but none have cleared the 70+ Covered Score board floor yet. Covered does
+            not manufacture picks to fill the board, so it publishes fewer picks rather than lowering the floor. Try
+            widening the other filters or switching the date. Complete lower-scoring props can still be reviewed in{" "}
+            <a href="/slip-analyzer">Parlay Builder</a>.
+          </span>
+        </div>
+      ) : null}
 
       {!loading && !error && visibleRows.length ? (
         <section aria-live="polite">

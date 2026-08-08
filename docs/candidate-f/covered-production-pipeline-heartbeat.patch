@@ -1,0 +1,15 @@
+--- a/.github/workflows/covered-production-pipeline.yml
++++ b/.github/workflows/covered-production-pipeline.yml
+@@
+-    - cron: "0,20,40 22,23,0,1,2,3,4 * * *"
+-    - cron: "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"
++    - cron: "7,27,47 16-23,0-4 * * *"
+@@
+-            case "$SCHED" in
+-              "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
+-              "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
+-            esac
++            LEAGUE="auto"; CFG="1"
+@@
+             --league "${{ steps.params.outputs.league }}" \
++            --wnbaEnabled "${WNBA_INGESTION_ENABLED}" \

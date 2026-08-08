@@ -1,6 +1,6 @@
-import { getProviderCache } from "@/lib/db/provider-cache";
+import { getProviderCache, putProviderCache } from "@/lib/db/provider-cache";
 import { deleteRows, insertRows, selectRows, updateRows } from "@/lib/db/supabase-server";
-import { ensureEvent, ensurePlayer, ensureTeam, ACTIVE_LEAGUES, configuredChunkSize, configuredScheduleLookaheadDays, currentBasketballSeason, currentWnbaSeason, easternDate, findEventByProviderId, normalizeName, takeRotatingSlice } from "@/lib/knowledge/enrichment/shared";
+import { ensureEvent, ensurePlayer, ensureTeam, ACTIVE_LEAGUES, configuredChunkSize, configuredScheduleLookaheadDays, currentBasketballSeason, currentWnbaSeason, easternDate, findEventByProviderId, injuryCheckCacheKey, normalizeName, takeRotatingSlice, INJURY_CHECK_FRESHNESS_HOURS } from "@/lib/knowledge/enrichment/shared";
 import type { RefreshWindow } from "@/lib/knowledge/enrichment/shared";
 import type { ActiveKnowledgeLeagueCode } from "@/lib/knowledge/types";
 import { NbaComStatsAdapter } from "@/lib/providers/nba-com-stats";
@@ -1373,55 +1373,149 @@ export async function refreshBasketballTeamLogs(scope: LeagueScope, now = new Da
   return { league: scope, provider, teamLogsUpserted: inserted };
 }
 
-export async function refreshBasketballInjuries(scope: LeagueScope) {
+export type BasketballInjuryRefreshOptions = {
+  /** Restrict persistence to teams referenced by the current prop window. */
+  teamIdAllowlist?: string[];
+};
+
+export async function refreshBasketballInjuries(scope: LeagueScope, options: BasketballInjuryRefreshOptions = {}) {
   const adapter = new OfficialInjuryReportAdapter();
   if (!adapter.configured(scope)) {
     return { league: scope, provider: "official-injuries", skipped: true, reason: "injury source not configured" };
   }
-  const payload = await adapter.fetchReport(scope);
   const config = ACTIVE_LEAGUES[scope];
-  await deleteRows("injuries", [
-    { column: "league_id", value: config.leagueId },
-    { column: "report_source", value: "official-injuries" },
-    { column: "injury_date", value: easternDate(new Date()) },
-  ]).catch(() => {});
-  let inserted = 0;
-  for (const record of payload.data.records) {
-    const alias = await selectRows<{ entity_id: string }>("entity_aliases", {
-      select: "entity_id",
-      filters: [
-        { column: "entity_type", value: "player" },
-        { column: "league_id", value: config.leagueId },
-        { column: "normalized_alias", value: normalizeName(record.playerName) },
-      ],
-      limit: 1,
-    });
-    const playerId = alias[0]?.entity_id ?? null;
-    const teamId = record.team ? (await selectRows<{ entity_id: string }>("entity_aliases", {
-      select: "entity_id",
+  const teamIdAllowlist = [...new Set((options.teamIdAllowlist ?? []).filter(Boolean))];
+  // A whole-league report is the provider's retrieval shape, not permission
+  // to persist a whole league. Natural repair supplies the current teams; a
+  // caller without that scope does no work instead of widening the write.
+  if (!teamIdAllowlist.length) {
+    return { league: scope, provider: "official-injuries", skipped: true, reason: "no current teams were targeted" };
+  }
+  const [targetTeams, targetTeamAliases] = await Promise.all([
+    selectRows<{ id: string; name: string | null; abbreviation: string | null }>("teams", {
+      select: "id,name,abbreviation",
+      filters: [{ column: "id", operator: "in", value: teamIdAllowlist }],
+      limit: teamIdAllowlist.length,
+    }),
+    selectRows<{ entity_id: string; normalized_alias: string | null }>("entity_aliases", {
+      select: "entity_id,normalized_alias",
       filters: [
         { column: "entity_type", value: "team" },
         { column: "league_id", value: config.leagueId },
-        { column: "normalized_alias", value: normalizeName(record.team) },
+        { column: "entity_id", operator: "in", value: teamIdAllowlist },
       ],
-      limit: 1,
-    }))[0]?.entity_id ?? null : null;
-    await insertRows("injuries", [{
-      sport_id: config.sportId,
-      league_id: config.leagueId,
-      player_id: playerId,
-      team_id: teamId,
-      injury_date: record.reportDate ? String(record.reportDate).slice(0, 10) : easternDate(new Date()),
-      status: record.status,
-      report_source: "official-injuries",
-      body_part: null,
-      note: record.note ?? null,
-      return_timeline: null,
-      raw_payload: record,
-    }], { returning: "minimal" });
-    inserted += 1;
+      limit: Math.max(teamIdAllowlist.length * 8, 24),
+    }),
+  ]);
+  const targetTeamByName = new Map<string, string>();
+  for (const team of targetTeams) {
+    for (const value of [team.name, team.abbreviation]) {
+      const normalized = value ? normalizeName(value) : "";
+      if (normalized) targetTeamByName.set(normalized, team.id);
+    }
   }
-  return { league: scope, provider: "official-injuries", inserted };
+  for (const alias of targetTeamAliases) {
+    const normalized = alias.normalized_alias ? normalizeName(alias.normalized_alias) : "";
+    if (normalized) targetTeamByName.set(normalized, alias.entity_id);
+  }
+
+  const payload = await adapter.fetchReport(scope);
+  // A 200-status fetch can still be a PARTIAL result -- the adapter's own
+  // `errors` array records parse failures (e.g. a PDF section that didn't
+  // extract cleanly) that don't throw but mean the report isn't fully
+  // trustworthy. This was previously never checked: any non-empty `errors`
+  // was silently ignored and treated identically to a clean, complete
+  // report. A partial result must not delete today's existing rows (nothing
+  // trustworthy to replace them with) or write a successful-check marker.
+  if (payload.data.errors.length) {
+    return {
+      league: scope,
+      provider: "official-injuries",
+      partial: true,
+      errors: payload.data.errors.slice(0, 5),
+      inserted: 0,
+    };
+  }
+  const scopedRecords = payload.data.records.flatMap((record) => {
+    const teamId = record.team ? targetTeamByName.get(normalizeName(record.team)) ?? null : null;
+    return teamId ? [{ record, teamId }] : [];
+  });
+
+  try {
+    // Delete only the teams this run is certifying. Do not swallow a failed
+    // delete and then write a "clean" marker over potentially stale rows.
+    await deleteRows("injuries", [
+      { column: "league_id", value: config.leagueId },
+      { column: "report_source", value: "official-injuries" },
+      { column: "injury_date", value: easternDate(new Date()) },
+      { column: "team_id", operator: "in", value: teamIdAllowlist },
+    ]);
+    const playerAliases = await Promise.all(scopedRecords.map(async ({ record }) => {
+      const alias = await selectRows<{ entity_id: string }>("entity_aliases", {
+        select: "entity_id",
+        filters: [
+          { column: "entity_type", value: "player" },
+          { column: "league_id", value: config.leagueId },
+          { column: "normalized_alias", value: normalizeName(record.playerName) },
+        ],
+        limit: 1,
+      });
+      return alias[0]?.entity_id ?? null;
+    }));
+    if (scopedRecords.length) {
+      await insertRows("injuries", scopedRecords.map(({ record, teamId }, index) => ({
+        sport_id: config.sportId,
+        league_id: config.leagueId,
+        player_id: playerAliases[index] ?? null,
+        team_id: teamId,
+        injury_date: record.reportDate ? String(record.reportDate).slice(0, 10) : easternDate(new Date()),
+        status: record.status,
+        report_source: "official-injuries",
+        body_part: null,
+        note: record.note ?? null,
+        return_timeline: null,
+        raw_payload: record,
+      })), { returning: "minimal" });
+    }
+  } catch (error) {
+    return {
+      league: scope,
+      provider: "official-injuries",
+      persistenceFailed: true,
+      inserted: 0,
+      selectedRecords: scopedRecords.length,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  // The report is fetched once for the whole league (not per team), so a
+  // single marker covers every team in scope -- same freshness contract as
+  // the MLB per-team markers, only written on a genuinely successful fetch.
+  const markerWritten = await putProviderCache({
+    // Cache key id is lowercased to match prop.league_id ("wnba"/"nba"), which
+    // is what the scoring-service.ts reader keys off of -- scope here is the
+    // uppercase LeagueScope enum ("NBA"/"WNBA").
+    cacheKey: injuryCheckCacheKey(scope === "WNBA" ? "wnba-league" : "nba-league", scope.toLowerCase()),
+    provider: "official-injuries",
+    payload: { scope, checkedDate: easternDate(new Date()), recordCount: scopedRecords.length, teamIds: teamIdAllowlist },
+    expiresAt: new Date(Date.now() + INJURY_CHECK_FRESHNESS_HOURS * 60 * 60 * 1000).toISOString(),
+  });
+  if (!markerWritten) {
+    return {
+      league: scope,
+      provider: "official-injuries",
+      persistenceFailed: true,
+      inserted: scopedRecords.length,
+      selectedRecords: scopedRecords.length,
+      error: "injury-check marker write failed",
+    };
+  }
+  return {
+    league: scope,
+    provider: "official-injuries",
+    inserted: scopedRecords.length,
+    selectedRecords: scopedRecords.length,
+    skippedOutOfScope: payload.data.records.length - scopedRecords.length,
+  };
 }
 
 export async function refreshBasketballLineups(scope: LeagueScope) {

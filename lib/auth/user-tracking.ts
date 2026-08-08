@@ -1,5 +1,6 @@
 import { deleteRows, insertRows, selectRows, updateRows } from "@/lib/db/supabase-server";
 import { derivePlayerHeadshotUrl, deriveTeamLogoUrl } from "@/lib/knowledge/media";
+import { filterRowsWithCurrentScoreContract } from "@/lib/knowledge/read-service";
 
 type CurrentPropHydration = {
   id: string;
@@ -24,9 +25,12 @@ type CurrentPropHydration = {
 type ScoredPropHydration = {
   id: string;
   current_prop_id: string;
+  score_input_id: string | null;
   covered_score: number | null;
   confidence_score: number | null;
   data_quality_score: number | null;
+  prop_state: string | null;
+  publishable: boolean | null;
   created_at: string;
 };
 
@@ -212,15 +216,25 @@ async function loadMap<T extends { id: string }>(table: string, ids: string[], s
 async function latestScoredByCurrent(currentPropIds: string[]) {
   if (!currentPropIds.length) return new Map<string, ScoredPropHydration>();
   const rows = await selectRows<ScoredPropHydration>("scored_props", {
-    select: "id,current_prop_id,covered_score,confidence_score,data_quality_score,created_at",
+    select: "id,current_prop_id,score_input_id,covered_score,confidence_score,data_quality_score,prop_state,publishable,created_at",
     filters: [{ column: "current_prop_id", operator: "in", value: currentPropIds }],
     orderBy: "created_at.desc",
     limit: Math.min(currentPropIds.length * 6, 2000),
   });
-  const map = new Map<string, ScoredPropHydration>();
+  const deduped = new Map<string, ScoredPropHydration>();
   for (const row of rows) {
-    if (!map.has(row.current_prop_id)) map.set(row.current_prop_id, row);
+    if (!deduped.has(row.current_prop_id)) deduped.set(row.current_prop_id, row);
   }
+  // A saved pick's covered_score/labels are re-hydrated LIVE from the latest
+  // scored_props row on every list read (never frozen at save time -- see
+  // saveUserPick, which stores no covered_score column at all), so this is a
+  // current-recommendation surface exactly like the public board/Manual
+  // Analyzer, just behind login. Requires the same score-row eligibility
+  // contract (Session 99/100) -- an old/unversioned score is hidden from
+  // display (falls back to the same "no score yet" null shape already used
+  // for a pick with no scored_prop at all), not silently shown live.
+  const contractCurrentRows = await filterRowsWithCurrentScoreContract([...deduped.values()]);
+  const map = new Map<string, ScoredPropHydration>(contractCurrentRows.map((row) => [row.current_prop_id, row]));
   return map;
 }
 
@@ -460,7 +474,7 @@ export async function saveUserPick(input: {
 
   if (!input.scoredPropId && input.currentPropId) {
     const scoredRows = await selectRows<ScoredPropHydration>("scored_props", {
-      select: "id,current_prop_id,covered_score,confidence_score,data_quality_score,created_at",
+      select: "id,current_prop_id,score_input_id,covered_score,confidence_score,data_quality_score,prop_state,publishable,created_at",
       filters: [{ column: "current_prop_id", value: input.currentPropId }],
       orderBy: "created_at.desc",
       limit: 1,

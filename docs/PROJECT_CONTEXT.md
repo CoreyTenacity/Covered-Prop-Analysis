@@ -2,7 +2,59 @@
 
 Covered is a sports prop analysis app built around reusable stored knowledge, not inline one-off lookups.
 
-## Current handoff state — 2026-07-27 (Session 63) — COVERAGE FIXES READY, NOT YET PROMOTED
+## Current handoff state — 2026-08-06 (WNBA CLOSED: operationally certified)
+
+**Read `docs/AGENT_HANDOFF.md`'s "WNBA CLOSED (2026-08-06)" entry first for the full final record.** This is the
+active state anchor; older entries are retained for chronology only.
+
+**Live production, current verified state:**
+- Public workflow is restored to the explicit GitHub-cron baseline and remains active.
+- `COVERED_PRIVATE_PIPELINE_SHA_V2=e32e81e59eb5d0bd3bdb716d880d81c081648457` (matches repair-branch HEAD exactly).
+- `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`.
+- `COVERED_GITHUB_SCHEDULER_ENABLED=true`; `WNBA_INGESTION_ENABLED=true`.
+- Cloudflare dispatcher remains disabled and has no Cron (confirmed: no `repository_dispatch` events in recent
+  run history, only `schedule`).
+- Private repo schedulers remain `disabled_manually`.
+- Private `origin/main` remains `23f665955b55a9e862f7f2efa8205538c5426013`.
+- The inherited invalid identity rows `7a74156a-0244-46fe-bb93-d97666d5f685` and
+  `c5fdc81c-5adf-442d-9652-773bfaa8a40f` are contained and excluded by the current score contract.
+
+**What changed:** a bounded read-only Supabase check (real `scored_props`/`provider_cache`/`current_props`
+data, no writes) found the natural WNBA certification the monitoring phase was waiting for has occurred,
+repeatedly: 13 fully-complete (`prop_state="publishable"`, zero blockers) WNBA rows across 5 distinct players in
+the last 24h, including 2 that reached `covered_score >= 70` (74, 88) -- genuinely Covered-Picks-eligible during
+their own pregame window. They don't appear in a *current* read only because their game has since started and
+correctly rolled off the board (existing, tested, by-design behavior). Identity resolution, a fresh league
+injury-check marker, and real SportsDataverse log/feature ingestion were all directly confirmed in the natural
+run's own logs. No WNBA production defect was found; no code, scheduler, pin, or dispatcher change was made.
+
+**Closed.** The owner accepted this evidence as sufficient operational certification. WNBA monitoring is closed;
+remaining gaps are calibration-only (insufficient graded-outcome sample), not operational. Do not reopen WNBA
+architecture, MLB, dispatcher, or public-workflow work absent a new, separate owner request.
+
+## Prior handoff state — 2026-07-27/28 (Session 65) — LIVE AND CERTIFIED WITH DIRECTION-AWARE SCORING
+
+**Read `docs/AGENT_HANDOFF.md` Session 65 first.** The release-blocking directionless-absEdge defect is
+fixed, promoted, and naturally certified in production. Live state:
+- Public main: `fe9fc4f3db97dbe3ab0ace083c9261143e820e09`
+- `COVERED_PRIVATE_PIPELINE_SHA_V2`: `933ae62fabc2f8d50adf0e084d422c7d7db47181`
+- Natural certification runs both `success` on the new SHA: MLB `30311209936`, WNBA `30312202350`
+- Live Covered Picks: 10 rows across all 3 WNBA markets (points 5, rebounds 3, assists 2), scores 70–91
+- **Post-promotion production check: 0 wrong-direction rows are publishable AND ≥70** (was 75 pre-fix — 52 MLB pitcher, 23 WNBA)
+- 4 WNBA `odds_pull_configs` (player_pra + player_threes, both books) set to `enabled=false`; pull-configs cache invalidated
+- Rollback SHA on file: `182f6caf1a50c7d6cbcd64c1921f3832f153e8f2`
+
+## Prior handoff state — 2026-07-27 (Session 64) — DIRECTION-AWARE SCORING FIX READY, NOT YET PROMOTED
+
+**Read `docs/AGENT_HANDOFF.md` Session 64 first.** A release-blocking scoring defect (directionless `absEdge`
+was crediting positive Covered Score to props whose projection *opposed* the selected side) is fixed at
+`codex/public-repo-repair` HEAD but not yet promoted. Live production still runs V2 `182f6ca…` (Session 61
+certified state); production evidence: **75 currently-publishable rows with score ≥70 have wrong-direction
+projections** (52 MLB pitcher, 23 WNBA), max observed inflation ~127 covered-score points before the 55 cap.
+Prior Session 63 fixes (fair Covered Picks scan, MLB batter/pitcher allocation, WNBA PRA/threes provider gap)
+are also included in the same not-yet-promoted branch.
+
+## Prior handoff state — 2026-07-27 (Session 63) — COVERAGE FIXES READY, NOT YET PROMOTED
 
 **Read `docs/AGENT_HANDOFF.md` Session 63 first.** Live production (V2 `182f6ca…`, unchanged) is the Session 61
 certified state, which surfaced real, narrow coverage: MLB Covered Picks dominated by `pitcher_strikeouts` (MLB

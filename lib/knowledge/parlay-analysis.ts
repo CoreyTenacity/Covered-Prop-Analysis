@@ -24,7 +24,7 @@ export type AnalyzedParlayLeg = {
 export type ParlaySummary = {
   selected_leg_count: number;
   average_covered_score: number | null;
-  average_match_confidence: number | null;
+  legs_with_warnings: number;
   high_confidence_legs: number;
   low_confidence_or_data_limited_legs: number;
   warning_count: number;

@@ -1,7 +1,8 @@
 "use client";
 
-"use client";
+import { useState } from "react";
 
+import { EvidencePanel } from "@/components/knowledge/evidence-panel";
 import { KnowledgeAvatar } from "@/components/knowledge/knowledge-avatar";
 import { RiskBadge } from "@/components/knowledge/risk-badge";
 import { ScoreBadge } from "@/components/knowledge/score-badge";
@@ -42,6 +43,10 @@ export function ParlayLegSelector({
   selected: boolean;
   onToggle: (option: ParlayOptionRow) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const evidence = option.evidence ?? null;
+  const commentary = option.commentary ?? null;
+
   return (
     <article className={`knowledge-card knowledge-card--compact ${selected ? "knowledge-card--selected" : ""}`}>
       <div className="knowledge-card__top">
@@ -77,15 +82,29 @@ export function ParlayLegSelector({
         <ScoreBadge label={option.confidence_label} tone="confidence" />
         <RiskBadge label={option.risk_label} />
       </div>
-      <div className="knowledge-card__flags">
-        {!["matched", "strongly_resolved"].includes(option.match_status) ? <span>{option.match_status.replace(/_/g, " ")}</span> : null}
-        {option.match_quality_flags.slice(0, 3).map((flag) => <span key={flag}>{flag.replace(/_/g, " ")}</span>)}
-      </div>
+      {commentary?.summary ? (
+        <div className="knowledge-card__summary">
+          <p>{commentary.summary}</p>
+        </div>
+      ) : null}
       <div className="knowledge-card__actions">
+        <button type="button" className="details-button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+          {expanded ? "Hide why this score?" : "Why this score?"}
+          <span>{expanded ? "↑" : "↓"}</span>
+        </button>
         <button type="button" className={selected ? "save-button save-button--saved" : "save-button"} onClick={() => onToggle(option)}>
           {selected ? "✓ Selected" : "+ Add leg"}
         </button>
       </div>
+
+      {expanded ? (
+        <div className="knowledge-card__expanded">
+          <p className="knowledge-evidence-disclaimer">
+            Covered Score reflects the strength of the stored evidence below, not a win probability.
+          </p>
+          <EvidencePanel evidence={evidence} commentary={commentary} line={option.line} side={option.side} />
+        </div>
+      ) : null}
     </article>
   );
 }

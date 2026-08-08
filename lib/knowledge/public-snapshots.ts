@@ -25,6 +25,7 @@ import {
   type PublicCoveredPickSnapshotRow,
   type PublicModelPerformanceSnapshotRow,
   type PublicParlayOptionSnapshotRow,
+  STRICT_ELIGIBILITY_CONTRACT_VERSION,
 } from "@/lib/knowledge/public-snapshot-types";
 import { PUBLIC_SNAPSHOT_FILTER_SCOPES, PUBLIC_SNAPSHOT_LIMITS } from "@/lib/knowledge/public-snapshot-types";
 export { PUBLIC_SNAPSHOT_FILTER_SCOPES, PUBLIC_SNAPSHOT_LIMITS } from "@/lib/knowledge/public-snapshot-types";
@@ -262,6 +263,13 @@ export async function publishPublicSnapshot<T>(input: {
     effectiveFilterScope: snapshotScope(route),
     pipelineRunId: input.pipelineRunId ?? snapshotTraceId(),
     status: input.status ?? "published",
+    // Session 98: every snapshot this codebase ever writes is stamped with the
+    // CURRENT strict-completeness contract this build's own scoring-service.ts
+    // enforces -- there is no "weak" mode to opt into, so this is never a
+    // caller-supplied parameter. The read path (resolvePublicSnapshotRoute)
+    // is what actually enforces the invariant, by rejecting any snapshot whose
+    // stamped value doesn't match this same constant.
+    eligibilityContractVersion: STRICT_ELIGIBILITY_CONTRACT_VERSION,
   };
   const serializedBytes = measureBytes(payload);
   const maxBytes = input.maxBytes ?? 256 * 1024;
@@ -492,6 +500,24 @@ function coveredPicksSourceRow(row: CoveredPickRow) {
   return compact;
 }
 
+/**
+ * Phase 18 continuation (owner-directed): extracted from
+ * app/api/knowledge/covered-picks/route.ts so this route-specific response-
+ * shape behavior is directly testable without importing next/server. A
+ * published Covered Picks snapshot row never carries `factor_breakdown`/
+ * `grading_result` (coveredPicksSourceRow strips them at publish time above,
+ * to keep the snapshot small), so every snapshot-served row is hydrated with
+ * an empty array / null here at read time -- intentional, not a data-loss
+ * bug, but previously untested at this exact boundary.
+ */
+export function hydrateCoveredPickSnapshotRow(row: PublicCoveredPickSnapshotRow) {
+  return {
+    ...row,
+    factor_breakdown: [],
+    grading_result: null,
+  };
+}
+
 export function filterCoveredPicksSnapshotRows(rows: PublicCoveredPickSnapshotRow[], query: {
   date?: string | null;
   sport?: string | null;
@@ -575,6 +601,11 @@ export function filterParlayOptionsSnapshotRows(rows: ParlayOptionRow[], query: 
 }) {
   const limit = Math.min(Math.max(query.limit ?? 100, 1), 250);
   const filtered = rows.flatMap((row) => {
+    // Snapshot rows are normally produced by getParlayOptions, which already
+    // applies the strict score contract. Keep the same fail-closed rule at the
+    // snapshot hydration boundary so a malformed or legacy snapshot cannot
+    // revive a blocked score in the Manual Analyzer.
+    if (row.publishability_status !== "publishable") return [];
     if (query.sport && row.sport !== query.sport) return [];
     if (query.league && row.league !== query.league) return [];
     if (query.eventId && row.event_id !== query.eventId) return [];
@@ -984,7 +1015,29 @@ export async function resolvePublicSnapshotRoute<TPayload>(input: {
   const isLatestAliasRead = input.snapshotVersion === null;
   let emptyPublishedSnapshot = false;
   if (input.canUseSnapshot) {
-    const snapshot = await input.readSnapshot();
+    const rawSnapshot = await input.readSnapshot();
+    // A snapshot payload is written only by publishPublicSnapshot, but a
+    // provider_cache row can still be malformed (manual edit, partial write,
+    // cross-version skew) -- treat a non-array `rows` as unusable rather than
+    // trusting it, so a corrupted cache row degrades to the relational
+    // fallback instead of throwing an uncaught error through the route.
+    //
+    // Session 98 (owner-directed): a structurally VALID snapshot can still be
+    // unusable -- one published before this contract-version field existed
+    // (`eligibilityContractVersion` absent/null), one published under an
+    // older/weaker contract string, or one carrying an unrecognized future
+    // value. Every one of those is rejected by the SAME exact-equality check,
+    // not merely the missing-field case -- "unknown" and "weaker" both fail
+    // closed identically, since this build only ever trusts an EXACT match to
+    // the contract it itself enforces, never a version-ordering comparison
+    // that could be tricked by a lexicographically-"greater" but semantically
+    // unrelated string.
+    const structurallyValid = rawSnapshot && Array.isArray(rawSnapshot.rows);
+    const contractMatches = structurallyValid && rawSnapshot.eligibilityContractVersion === STRICT_ELIGIBILITY_CONTRACT_VERSION;
+    if (structurallyValid && !contractMatches) {
+      console.warn(`[public-snapshot][contract-mismatch] route=${input.route} stamped=${JSON.stringify(rawSnapshot.eligibilityContractVersion ?? null)} expected=${STRICT_ELIGIBILITY_CONTRACT_VERSION}`);
+    }
+    const snapshot = contractMatches ? rawSnapshot : null;
     if (snapshot && (snapshot.rows.length > 0 || !isLatestAliasRead)) {
       return {
         payload: input.buildSnapshotResponse(snapshot),
@@ -1028,7 +1081,30 @@ export async function resolvePublicSnapshotRoute<TPayload>(input: {
     console.warn(`[public-snapshot][fallback] route=${input.route} reason=${emptyPublishedSnapshot ? "empty-snapshot" : "snapshot-miss"}`);
   }
 
-  const payload = await input.buildFallbackResponse();
+  // Phase 18 continuation (owner-directed): buildFallbackResponse ultimately
+  // calls into a real Supabase read (getCoveredPicksOfTheDay/getParlayOptions)
+  // with no surrounding try/catch anywhere up to the route handler -- a
+  // genuine transient read failure (network blip, timeout) would previously
+  // crash the entire route uncaught instead of degrading the same way a
+  // disabled fallback already does. Same defensive pattern as the malformed-
+  // snapshot fix above: a failed fallback is treated as unavailable, not fatal.
+  let payload: TPayload;
+  try {
+    payload = await input.buildFallbackResponse();
+  } catch (error) {
+    console.warn(`[public-snapshot][fallback-error] route=${input.route}:`, error instanceof Error ? error.message : error);
+    return {
+      payload: input.buildUnavailableResponse(),
+      cacheProfile: "public-snapshot-unavailable" as const,
+      cacheStatus: "snapshot-unavailable",
+      snapshotVersion: null,
+      sourceRefreshedAt: null,
+      publishedAt: null,
+      status: "degraded" as const,
+      snapshotSource: "unavailable" as PublicSnapshotSource,
+      effectiveFilterScope: null,
+    } as const;
+  }
   return {
     payload,
     cacheProfile: publicSnapshotCacheProfile({ snapshotVersion: input.snapshotVersion, fallback: true }),

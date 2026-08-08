@@ -10,24 +10,21 @@ Claude Code should:
 
 Only add Claude-specific guidance if it is truly necessary for this repository.
 
->> ACTIVE HANDOFF (2026-07-26, Session 60) — PREPARED-SLATE SNAPSHOT FIX READY, NOT YET PROMOTED. Read
->> `docs/AGENT_HANDOFF.md` Session 60 FIRST. Production `COVERED_PRIVATE_PIPELINE_SHA_V2` is still pinned to
->> `6d58a3aab8cc9e9d1da1c82887dc39434c9c0c1f` (Session 58) and has NOT been advanced. Session 59 (2026-07-25)
->> found the live public snapshots empty (`covered-picks`/`parlay-options` both `published`/`count=0`) despite
->> nonzero relational MLB supply. The repair branch's un-promoted commits `f505fa1`/`5ae2e8b`/`ef54794` (on top
->> of Session 58's SHA) are the direct fix for that exact symptom: a zero-row published `:latest` snapshot no
->> longer pins as a permanent hit, and every public read path now shares one explicit Eastern prepared-slate
->> window instead of relying only on the 6-hour pregame gate. This fix has not yet been promoted to
->> `COVERED_PRIVATE_PIPELINE_SHA_V2` or proven live — that promotion is an explicit owner-approval boundary.
->> Private repo scheduler remains disabled; private `origin/main` remains
->> `23f665955b55a9e862f7f2efa8205538c5426013`, unchanged.
+>> ACTIVE HANDOFF (2026-08-06) — WNBA CLOSED: OPERATIONALLY CERTIFIED. REPOSITORY AND PRODUCTION CHAIN COMPLETE.
+>> Read `docs/AGENT_HANDOFF.md`'s "WNBA CLOSED (2026-08-06)" entry for the full final record. The owner accepted
+>> the natural production evidence as sufficient: 13 fully-complete WNBA `scored_props` rows across 5 players in
+>> a 24h window, 2 reaching `covered_score >= 70` (74 and 88), with identity/injury-marker/ingestion/scoring/
+>> persistence all directly confirmed. Those 2 rows don't show in a *current* read only because their game has
+>> since started and correctly rolled off the board (existing, tested behavior, not a defect). Live controls
+>> unchanged: `COVERED_PRIVATE_PIPELINE_SHA_V2=e32e81e59eb5d0bd3bdb716d880d81c081648457` (matches repair-branch
+>> HEAD), `COVERED_PRIVATE_PIPELINE_SHA=RETIRED_STALE_RUN_GUARD`, `COVERED_GITHUB_SCHEDULER_ENABLED=true`,
+>> Cloudflare dispatcher still disabled, no Cloudflare Cron. No production mutation was required to reach or
+>> record this closure. Remaining WNBA gaps are calibration-only (insufficient graded-outcome sample), not
+>> operational. Do not reopen WNBA architecture, scheduler, or dispatcher work absent a new, separate owner
+>> request. MLB was not touched in this pass.
 
-Current handoff anchor: branch `codex/public-repo-repair`, tip `ef54794080e7014fd5247d250b59de1f25991cf8`
-(`origin/codex/public-repo-repair` matches — verified via `git rev-parse HEAD origin/codex/public-repo-repair`
-this session). This tip is 9 commits ahead of the previously-recorded anchor `eef63e1…` (Session 56), linear
-with no divergence (`git merge-base --is-ancestor eef63e1… HEAD` confirmed). `origin/main` remains unchanged at
-`23f665955b55a9e862f7f2efa8205538c5426013`. Before making any further changes, re-read `docs/AGENT_HANDOFF.md`
-and preserve the non-main repair workflow.
+Current handoff anchor: branch `codex/public-repo-repair`. Before making any further changes, re-read the current
+monitoring section in `docs/AGENT_HANDOFF.md` and preserve the non-main repair workflow.
 
 The historical Session 42–45 notes below are retained as archive only.
 
@@ -186,8 +183,18 @@ Covered uses:
 - ESPN for current WNBA schedule and game-state data
 - SportsDataverse for durable historical WNBA data
 
-Vercel is dormant and retained only as a fallback. GitHub Actions schedulers remain disabled, and this
-repair branch must not be pushed to or merged into `main` without explicit owner approval.
+Vercel is dormant and retained only as a fallback. **Correction (Session 91, verified live 2026-08-01):**
+the claim that "GitHub Actions schedulers remain disabled" is WRONG for the actual live product and must not
+be repeated as current truth. The PRIVATE repo's own `covered-live-pipeline.yml` scheduled trigger has not
+run since 2026-07-15 (genuinely idle) -- but the deployed product runs from a SEPARATE PUBLIC repo
+(`CoreyTenacity/Covered-Prop-Analysis`), whose `covered-production-pipeline.yml` checks out this private
+repo at the pinned `COVERED_PRIVATE_PIPELINE_SHA_V2` and runs on a live 20-minute cron, gated by the
+`production` Environment's `COVERED_GITHUB_SCHEDULER_ENABLED=true` and `WNBA_INGESTION_ENABLED=true` (both
+confirmed true via `gh api .../environments/production/variables` on 2026-08-01). This scheduler is real,
+live, and currently writing real `scored_props`/board/snapshot rows for both leagues. See
+`docs/AGENT_HANDOFF.md` Session 91 for the full trace and the real defect this correction uncovered (most
+WNBA scheduled runs time out during background enrichment before ever reaching scoring). This repair branch
+must not be pushed to or merged into `main` without explicit owner approval.
 
 The application should read prepared Supabase data rather than repeatedly calling external providers during user requests.
 
