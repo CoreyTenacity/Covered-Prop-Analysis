@@ -56,7 +56,14 @@ on:
     # UTC. July 2026 = EDT (UTC-4). Game-window gating lives INSIDE the pipeline (it skips fast when no
     # game qualifies), so these windows are bounded to game hours to avoid needless overnight runs.
     # Staggered by 10 min so WNBA and MLB never fire on the same minute (shared concurrency also serializes).
-    - cron: "0,20,40 22,23,0,1,2,3,4 * * *"       # WNBA — every 20 min, ~6:00pm–1:00am ET
+    # WNBA window widened 2026-08-08 (owner-authorized): the original 22-4 UTC (~6pm-1am ET) window assumed
+    # evening-only WNBA start times and silently missed earlier weekend games (confirmed live: two WNBA games
+    # on 2026-08-08 started 17:00 and 19:30 UTC / 1:00pm and 3:30pm ET, both entirely outside the old window,
+    # so their props never got a scheduled odds refresh during their pregame lifetime). Reuses MLB's
+    # already-vetted 16-4 UTC range rather than inventing a new one -- the pipeline's own internal
+    # game-window gating still skips fast on any cycle with no qualifying WNBA game, so this only adds
+    # scheduled opportunities to observe real early games, not unconditional extra work.
+    - cron: "0,20,40 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"   # WNBA — every 20 min, ~12:00pm–1:00am ET
     - cron: "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *"  # MLB — every 20 min, ~12:10pm–1:00am ET
 
 permissions:
