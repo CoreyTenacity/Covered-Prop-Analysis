@@ -128,7 +128,7 @@ jobs:
             MAINTENANCE_JOB="none"
             DRY="false"; SCORING="true"; BOARD="true"; PUBLISH="true"
             case "$SCHED" in
-              "0,20,40 22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
+              "0,20,40 11,12,13,14,15,16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="WNBA"; CFG="8" ;;
               "10,30,50 16,17,18,19,20,21,22,23,0,1,2,3,4 * * *") LEAGUE="MLB"; CFG="10" ;;
               *) echo "::error::Unrecognized schedule cron: $SCHED"; exit 1 ;;
             esac
