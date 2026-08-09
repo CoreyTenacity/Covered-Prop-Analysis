@@ -1144,7 +1144,15 @@ export async function getCoveredPicksOfTheDay(query: CoveredPicksQuery) {
       confidence_label: confidenceLabel,
       risk_label: riskLabel,
       explanation_summary: explanation?.summary ?? null,
-      factor_breakdown: [],
+      // Session 2026-08-09: was hardcoded to [], which made pick-card.tsx's
+      // toggleExpanded always treat this row as missing detail (its guard is
+      // `!factor_breakdown?.length && !grading_result`) and fire a per-card
+      // GET /api/knowledge/covered-picks/:id on every first expand -- a real
+      // per-expand request the egress rule (AGENTS.md) forbids. explanation
+      // is already the FULL (non-compact) read this function requests above
+      // specifically because it includes `factors`, so this is zero
+      // additional queries, not a new batched load.
+      factor_breakdown: explanation?.factors ?? [],
       risk_flags: score.risk_flags,
       grading_result: null,
       last_updated: current.updated_at ?? score.created_at,
