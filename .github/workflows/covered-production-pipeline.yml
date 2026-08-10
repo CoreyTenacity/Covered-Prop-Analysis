@@ -95,6 +95,7 @@ jobs:
       NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
       COVERED_GITHUB_SCHEDULER_ENABLED: ${{ vars.COVERED_GITHUB_SCHEDULER_ENABLED }}
       WNBA_INGESTION_ENABLED: ${{ vars.WNBA_INGESTION_ENABLED }}
+      WNBA_REBOUNDS_V2_SHADOW_ENABLED: ${{ vars.WNBA_REBOUNDS_V2_SHADOW_ENABLED }}
     steps:
       - name: Resolve run parameters (dispatch inputs, or map schedule cron -> league)
         id: params
