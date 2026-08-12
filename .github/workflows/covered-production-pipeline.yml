@@ -82,6 +82,7 @@ jobs:
       WNBA_REBOUNDS_V2_SHADOW_ENABLED: ${{ vars.WNBA_REBOUNDS_V2_SHADOW_ENABLED }}
       WNBA_POINTS_V2_SHADOW_ENABLED: ${{ vars.WNBA_POINTS_V2_SHADOW_ENABLED }}
       WNBA_ASSISTS_V2_SHADOW_ENABLED: ${{ vars.WNBA_ASSISTS_V2_SHADOW_ENABLED }}
+      COVERED_EGRESS_DIAGNOSTIC: ${{ vars.COVERED_EGRESS_DIAGNOSTIC }}
     steps:
       - name: Resolve run parameters (dispatch inputs, or map schedule cron -> league)
         id: params
