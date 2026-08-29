@@ -61,7 +61,7 @@ jobs:
       BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      COVERED_EGRESS_DIAGNOSTIC: "true"
+      COVERED_EGRESS_DIAGNOSTIC: ${{ vars.COVERED_EGRESS_DIAGNOSTIC }}
       COVERED2_REFRESH_RUNTIME: "github-actions-c2-wnba"
     steps:
       - name: Resolve and validate the C2 dispatch contract
