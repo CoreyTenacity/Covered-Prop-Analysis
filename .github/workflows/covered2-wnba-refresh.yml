@@ -1,8 +1,29 @@
-# Covered 2 - dedicated WNBA current-evidence owner.
-# This workflow is separate from the inherited Covered 1 pipeline:
-# it refreshes bounded factual/current evidence only and never scores, builds a
-# board, publishes a snapshot, grades props, or activates another sport.
-name: Covered 2 WNBA Lightweight Refresh
+# COVERED 2 PRODUCTION WAKE - the single recurring production trigger.
+#
+# DISABLING THIS DISABLES THE ENTIRE LIVE COVERED 2 REFRESH PATH.
+#
+# The name and the comment above used to say "WNBA current-evidence only ...
+# never scores, builds a board, publishes a snapshot, grades props". That is no
+# longer true and had become actively misleading: this one workflow now owns
+#   - WNBA current-evidence refresh
+#   - MLB refresh, schedule ingest, identity, player logs and postgame settlement
+#   - odds-snapshot and current-prop retention for BOTH leagues
+#   - the WNBA league profile
+#   - the Covered Picks board build (gated by COVERED2_PICKS_BOARD_BUILD)
+#
+# Trigger chain, proven 2026-08-28:
+#   Cloudflare Worker `covered-github-dispatcher`, cron "0,30 11-23,0-4 * * *" UTC
+#     -> repository_dispatch `covered2-wnba-refresh`  (event type UNCHANGED on purpose)
+#     -> this workflow, gated by COVERED2_WNBA_SCHEDULER_ENABLED
+#     -> the private Covered repo checked out at COVERED_PRIVATE_PIPELINE_SHA_V2
+#
+# The event type and file path are deliberately NOT renamed: the dispatcher
+# sends this exact event, and renaming either would break the only production
+# wake for a cosmetic gain.
+#
+# NOTE: COVERED_GITHUB_SCHEDULER_ENABLED does NOT gate this workflow. It gates
+# the legacy covered-production-pipeline.yml only, and is false.
+name: "Covered 2 Production Wake (dispatch event: covered2-wnba-refresh)"
 
 on:
   repository_dispatch:
