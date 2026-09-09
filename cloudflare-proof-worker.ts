@@ -1,4 +1,10 @@
 // Cloudflare proof-only entrypoint. Vercel and GitHub Actions do not use this file.
+// NON-PRODUCTION -- see the DO-NOT-USE-FOR-PRODUCTION Worker name in
+// wrangler.jsonc for why. This file's own copy never set an
+// x-covered-build-sha header, which is one of the two signals that
+// distinguished a production reversion caused by deploying from this repo
+// (2026-09-09 incident). Do not deploy this to any Worker name that could
+// ever collide with Covered production.
 // @ts-expect-error OpenNext creates this generated module during the proof build.
 import openNextWorker from "./.open-next/worker.js";
 
