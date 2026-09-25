@@ -48,7 +48,7 @@ test("manual validation pins execution to one sport and leaves all other sport f
 
 test("the authorized one-off payload is NFL-only and process-locally bypasses only discovery cadence", () => {
   assert.match(workflow, /MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"/);
-  assert.match(workflow, /REVIEWED_SHA="55751a50a46a03237aa010bb59d673cb08bb1f6f"/);
+  assert.match(workflow, /REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"/);
   assert.match(workflow, /FORCE_DISCOVERY: \$\{\{ github\.event\.client_payload\.manual_validation_force_discovery \}\}/);
   assert.match(workflow, /\[ "\$FORCE_DISCOVERY" != "true" \] \|\| \[ "\$VALIDATION_SPORT" != "NFL" \]/);
   assert.match(workflow, /force_discovery=true/);

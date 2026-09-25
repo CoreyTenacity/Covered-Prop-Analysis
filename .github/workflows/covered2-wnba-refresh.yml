@@ -100,7 +100,7 @@ jobs:
         run: |
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
-              REVIEWED_SHA="55751a50a46a03237aa010bb59d673cb08bb1f6f"
+              REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"
               if [ "$SCHEDULER_ENABLED" != "false" ] \
                 || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
                 || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
