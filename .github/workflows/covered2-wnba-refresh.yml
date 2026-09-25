@@ -86,6 +86,8 @@ jobs:
           VALIDATION_SPORT: ${{ github.event.client_payload.manual_validation_sport }}
           FORCE_DISCOVERY: ${{ github.event.client_payload.manual_validation_force_discovery }}
           MANUAL_VALIDATION_ID: ${{ github.event.client_payload.validation_id }}
+          VALIDATION_MODE: ${{ github.event.client_payload.manual_validation_mode }}
+          CERTIFICATION_OBSERVATION_ID: ${{ github.event.client_payload.certification_observation_id }}
           EXPECTED_SHA: ${{ github.event.client_payload.expected_sha }}
           ACTOR: ${{ github.actor }}
           SENDER: ${{ github.event.sender.login }}
@@ -98,12 +100,11 @@ jobs:
         run: |
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
-              REVIEWED_SHA="206e9c850e0749c10e6cd71ba3eb5b4f442946a4"
+              REVIEWED_SHA="faa83c2ed0d6de15b11ad375a5f83dad95b05013"
               if [ "$SCHEDULER_ENABLED" != "false" ] \
                 || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
                 || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
                 || [ "$SOURCE" != "owner-manual-validation" ] \
-                || [ "$MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925" ] \
                 || [ "$ACTOR" != "CoreyTenacity" ] \
                 || [ "$SENDER" != "CoreyTenacity" ] \
                 || [ "$EXPECTED_SHA" != "$REVIEWED_SHA" ] \
@@ -121,18 +122,37 @@ jobs:
                 MLB|NFL|WNBA) ;;
                 *) echo "::error::Manual validation requires one runner-wired sport: MLB, NFL, or WNBA."; exit 1 ;;
               esac
-              if [ "$FORCE_DISCOVERY" != "true" ] || [ "$VALIDATION_SPORT" != "NFL" ]; then
-                echo "::error::This one-off validation contract requires explicit NFL force-discovery and rejects every other scope."
-                exit 1
-              fi
+              case "$VALIDATION_MODE" in
+                force-discovery)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "true" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
+                    echo "::error::Force-discovery validation requires its exact NFL-only payload and both persistent gates false."
+                    exit 1
+                  fi
+                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=true" >> "$GITHUB_OUTPUT"
+                  ;;
+                certification-one-observation)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] \
+                    || ! printf '%s' "$CERTIFICATION_OBSERVATION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
+                    echo "::error::One-observation certification requires one exact NFL scored_prop UUID while persistent gates remain false."
+                    exit 1
+                  fi
+                  echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
+                  echo "certification_observation_id=$CERTIFICATION_OBSERVATION_ID" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                  ;;
+                *) echo "::error::Manual validation mode is missing or unsupported."; exit 1 ;;
+              esac
               if [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                echo "::error::Manual validation requires the certification ledger to remain false."
+                echo "::error::Manual validation requires the persistent certification ledger variable to remain false."
                 exit 1
               fi
               echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
-              echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
               echo "sport=$VALIDATION_SPORT" >> "$GITHUB_OUTPUT"
-              echo "force_discovery=true" >> "$GITHUB_OUTPUT"
               echo "skip=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -208,7 +228,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run exactly one bounded C2 WNBA current-evidence refresh
-        if: steps.contract.outputs.skip != 'true'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
@@ -232,6 +252,21 @@ jobs:
             echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
           fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
+
+      - name: Run one existing NFL observation through certification admission/completion
+        if: steps.contract.outputs.mode == 'manual-certification'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: "true"
+          COVERED2_MANUAL_CERTIFICATION_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION_SPORT: NFL
+          SCOPED_SCORED_PROP_ID: ${{ steps.contract.outputs.certification_observation_id }}
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --scoredPropId "$SCOPED_SCORED_PROP_ID"
 
       - name: Remove the private checkout
         if: always()

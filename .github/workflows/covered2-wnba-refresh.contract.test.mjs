@@ -48,7 +48,7 @@ test("manual validation pins execution to one sport and leaves all other sport f
 
 test("the authorized one-off payload is NFL-only and process-locally bypasses only discovery cadence", () => {
   assert.match(workflow, /MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"/);
-  assert.match(workflow, /REVIEWED_SHA="206e9c850e0749c10e6cd71ba3eb5b4f442946a4"/);
+  assert.match(workflow, /REVIEWED_SHA="faa83c2ed0d6de15b11ad375a5f83dad95b05013"/);
   assert.match(workflow, /FORCE_DISCOVERY: \$\{\{ github\.event\.client_payload\.manual_validation_force_discovery \}\}/);
   assert.match(workflow, /\[ "\$FORCE_DISCOVERY" != "true" \] \|\| \[ "\$VALIDATION_SPORT" != "NFL" \]/);
   assert.match(workflow, /force_discovery=true/);
@@ -58,8 +58,29 @@ test("the authorized one-off payload is NFL-only and process-locally bypasses on
   assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
 });
 
+test("force-discovery is explicit, NFL-only, one-off, and does not change provider or cadence limits", () => {
+  assert.match(workflow, /VALIDATION_MODE: \$\{\{ github\.event\.client_payload\.manual_validation_mode \}\}/);
+  assert.match(workflow, /force-discovery\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"[\s\S]*FORCE_DISCOVERY" != "true"[\s\S]*VALIDATION_SPORT" != "NFL"/);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY:\s*\$\{\{\s*steps\.contract\.outputs\.force_discovery\s*\}\}/);
+  assert.doesNotMatch(workflow, /COVERED2_[A-Z_]*(?:CAP|HORIZON|WINDOW)[A-Z_]*\s*:/i);
+  assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
+  assert.match(workflow, /COVERED2_SCHEDULER_CADENCE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULER_CADENCE\s*\}\}/);
+});
+
+test("manual certification is a separate one-observation step and only sets a process-local ledger variable", () => {
+  assert.match(workflow, /certification-one-observation\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"[\s\S]*CERTIFICATION_OBSERVATION_ID/);
+  assert.match(workflow, /certification_observation_id=\$CERTIFICATION_OBSERVATION_ID/);
+  assert.match(workflow, /mode == 'manual-certification'[\s\S]*run-covered2-certification-validation\.mjs --scoredPropId/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
+  assert.match(workflow, /if:\s*steps\.contract\.outputs\.mode == 'manual-certification'/);
+  assert.match(workflow, /if:\s*steps\.contract\.outputs\.skip != 'true' && steps\.contract\.outputs\.mode != 'manual-certification'/);
+  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED" != "false"/);
+  assert.match(workflow, /SCHEDULER_ENABLED" != "false"/);
+});
+
 test("workflow does not change persistent gate values or enable certification", () => {
   assert.doesNotMatch(workflow, /gh\s+variable\s+set|gh\s+api\s+--method\s+(PATCH|POST|PUT|DELETE)/i);
   assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.doesNotMatch(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
+  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED: \$\{\{ vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED \}\}/);
 });
