@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: covered2-wnba-refresh
+  group: ${{ github.event.client_payload.manual_validation == true && 'covered2-wnba-refresh-manual-validation' || 'covered2-wnba-refresh' }}
   cancel-in-progress: false
 
 jobs:
