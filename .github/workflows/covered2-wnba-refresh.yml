@@ -82,6 +82,11 @@ jobs:
           SOURCE: ${{ github.event.client_payload.source }}
           SLOT: ${{ github.event.client_payload.slot }}
           DELIVERY_KEY: ${{ github.event.client_payload.delivery_key }}
+          MANUAL_VALIDATION: ${{ github.event.client_payload.manual_validation }}
+          MANUAL_VALIDATION_ID: ${{ github.event.client_payload.validation_id }}
+          EXPECTED_SHA: ${{ github.event.client_payload.expected_sha }}
+          ACTOR: ${{ github.actor }}
+          SENDER: ${{ github.event.sender.login }}
           SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           ALLOWLIST: ${{ secrets.COVERED2_ALLOWED_EMAILS }}
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
@@ -89,9 +94,39 @@ jobs:
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
         run: |
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
-            echo "C2 WNBA scheduler disabled; skipping dispatch."
+            if [ "$MANUAL_VALIDATION" = "true" ]; then
+              REVIEWED_SHA="ee98b62a76a617e6c81feb8d6397b72789e375bf"
+              if [ "$SCHEDULER_ENABLED" != "false" ] \
+                || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
+                || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
+                || [ "$SOURCE" != "owner-manual-validation" ] \
+                || [ "$MANUAL_VALIDATION_ID" != "covered-final-live-acceptance-20260925" ] \
+                || [ "$ACTOR" != "CoreyTenacity" ] \
+                || [ "$SENDER" != "CoreyTenacity" ] \
+                || [ "$EXPECTED_SHA" != "$REVIEWED_SHA" ] \
+                || [ "$PIN" != "$REVIEWED_SHA" ] \
+                || [ -n "$SLOT" ] \
+                || [ -n "$DELIVERY_KEY" ]; then
+                echo "::error::Rejected manual validation contract; scheduler must remain false and the exact reviewed owner dispatch/pin is required."
+                exit 1
+              fi
+              if [ "$ALLOWLIST" != "corey093011@gmail.com" ] || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] || [ "$DEPLOYMENT_AUTHORIZED" != "true" ]; then
+                echo "::error::C2 production configuration is incomplete; manual validation will not bypass it."
+                exit 1
+              fi
+              echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
+              echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout."
+            echo "mode=paused" >> "$GITHUB_OUTPUT"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$MANUAL_VALIDATION" = "true" ]; then
+            echo "::error::Manual validation is accepted only while the global scheduler gate is false."
+            exit 1
           fi
           if [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] || [ "$SCHEMA" != "covered2-wnba-refresh/v1" ] || [ "$SOURCE" != "cloudflare-cron" ]; then
             echo "::error::Rejected C2 repository_dispatch contract."
@@ -110,6 +145,7 @@ jobs:
             exit 1
           fi
           echo "Accepted bounded C2 WNBA slot; immutable configuration validated without printing secrets."
+          echo "mode=scheduled" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
@@ -159,8 +195,13 @@ jobs:
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
-          INVOCATION_ID: gha-c2-wnba-${{ github.run_id }}
+          INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
+          COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.mode == 'manual-validation' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
+          COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.mode == 'manual-validation' && 'true' || 'false' }}
         run: |
+          if [ "$COVERED2_MANUAL_VALIDATION" = "true" ]; then
+            echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
+          fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
 
       - name: Remove the private checkout
