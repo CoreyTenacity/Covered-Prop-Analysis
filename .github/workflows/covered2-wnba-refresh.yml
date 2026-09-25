@@ -83,6 +83,7 @@ jobs:
           SLOT: ${{ github.event.client_payload.slot }}
           DELIVERY_KEY: ${{ github.event.client_payload.delivery_key }}
           MANUAL_VALIDATION: ${{ github.event.client_payload.manual_validation }}
+          VALIDATION_SPORT: ${{ github.event.client_payload.manual_validation_sport }}
           MANUAL_VALIDATION_ID: ${{ github.event.client_payload.validation_id }}
           EXPECTED_SHA: ${{ github.event.client_payload.expected_sha }}
           ACTOR: ${{ github.actor }}
@@ -92,15 +93,16 @@ jobs:
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
           CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
+          CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
         run: |
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
-              REVIEWED_SHA="ee98b62a76a617e6c81feb8d6397b72789e375bf"
+              REVIEWED_SHA="d03954e603c590f451ad6171eea64a5c9372fc5f"
               if [ "$SCHEDULER_ENABLED" != "false" ] \
                 || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
                 || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
                 || [ "$SOURCE" != "owner-manual-validation" ] \
-                || [ "$MANUAL_VALIDATION_ID" != "covered-final-live-acceptance-20260925" ] \
+                || [ "$MANUAL_VALIDATION_ID" != "covered-final-live-acceptance-scoped-20260925" ] \
                 || [ "$ACTOR" != "CoreyTenacity" ] \
                 || [ "$SENDER" != "CoreyTenacity" ] \
                 || [ "$EXPECTED_SHA" != "$REVIEWED_SHA" ] \
@@ -114,8 +116,17 @@ jobs:
                 echo "::error::C2 production configuration is incomplete; manual validation will not bypass it."
                 exit 1
               fi
+              case "$VALIDATION_SPORT" in
+                MLB|NFL|WNBA) ;;
+                *) echo "::error::Manual validation requires one runner-wired sport: MLB, NFL, or WNBA."; exit 1 ;;
+              esac
+              if [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                echo "::error::Manual validation requires the certification ledger to remain false."
+                exit 1
+              fi
               echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
               echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+              echo "sport=$VALIDATION_SPORT" >> "$GITHUB_OUTPUT"
               echo "skip=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -198,6 +209,17 @@ jobs:
           INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
           COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.mode == 'manual-validation' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
           COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.mode == 'manual-validation' && 'true' || 'false' }}
+          COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
+          COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
+          COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
+          COVERED2_MLB_MARKET_GAMELOG: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_GAMELOG }}
+          COVERED2_MLB_MARKET_OPPONENT: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_OPPONENT }}
+          COVERED2_MLB_PLAYER_LOG_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_LOG_REFRESH }}
+          COVERED2_MLB_LINEUP_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_LINEUP_REFRESH }}
+          COVERED2_NFL_RECEPTIONS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
+          COVERED2_NFL_RECEIVING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
+          COVERED2_NFL_RUSHING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
+          COVERED2_NFL_PASSING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
         run: |
           if [ "$COVERED2_MANUAL_VALIDATION" = "true" ]; then
             echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
