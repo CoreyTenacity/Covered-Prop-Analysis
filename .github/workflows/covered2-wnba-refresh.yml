@@ -133,6 +133,16 @@ jobs:
                   echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
                   echo "force_discovery=true" >> "$GITHUB_OUTPUT"
                   ;;
+                current-inventory)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-current-inventory-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
+                    echo "::error::Current-inventory validation requires its exact NFL-only payload, no cadence bypass, and both persistent gates false."
+                    exit 1
+                  fi
+                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                  ;;
                 certification-one-observation)
                   if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925" ] \
                     || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \

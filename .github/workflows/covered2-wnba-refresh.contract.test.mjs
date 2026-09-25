@@ -67,6 +67,13 @@ test("force-discovery is explicit, NFL-only, one-off, and does not change provid
   assert.match(workflow, /COVERED2_SCHEDULER_CADENCE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULER_CADENCE\s*\}\}/);
 });
 
+test("current-inventory validation is NFL-only and does not bypass ingestion cadence", () => {
+  assert.match(workflow, /current-inventory\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-current-inventory-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"/);
+  assert.match(workflow, /current-inventory\)[\s\S]*mode=manual-validation[\s\S]*force_discovery=false/);
+  assert.match(workflow, /SCHEDULER_ENABLED" != "false"/);
+  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED" != "false"/);
+});
+
 test("manual certification is a separate one-observation step and only sets a process-local ledger variable", () => {
   assert.match(workflow, /certification-one-observation\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"[\s\S]*CERTIFICATION_OBSERVATION_ID/);
   assert.match(workflow, /certification_observation_id=\$CERTIFICATION_OBSERVATION_ID/);
