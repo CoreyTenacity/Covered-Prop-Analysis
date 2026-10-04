@@ -107,9 +107,10 @@ test("current-inventory validation is NFL-only and does not bypass ingestion cad
 });
 
 test("manual certification is a separate one-observation step and only sets a process-local ledger variable", () => {
-  assert.match(workflow, /certification-one-observation\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"[\s\S]*CERTIFICATION_OBSERVATION_ID/);
-  assert.match(workflow, /certification_observation_id=\$CERTIFICATION_OBSERVATION_ID/);
-  assert.match(workflow, /mode == 'manual-certification'[\s\S]*run-covered2-certification-validation\.mjs --scoredPropId/);
+  assert.match(workflow, /certification-one-observation\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"/);
+  assert.match(workflow, /mode == 'manual-certification'[\s\S]*buildCoveredPicksBoard/);
+  assert.match(workflow, /certification_expected_exactly_one_observation/);
+  assert.match(workflow, /certified: diagnostics\.certifiedCount/);
   assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
   assert.match(workflow, /if:\s*steps\.contract\.outputs\.mode == 'manual-certification'/);
   assert.match(workflow, /if:\s*steps\.contract\.outputs\.skip != 'true' && steps\.contract\.outputs\.mode != 'manual-certification'/);

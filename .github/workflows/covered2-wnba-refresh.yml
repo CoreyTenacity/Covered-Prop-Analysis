@@ -61,7 +61,7 @@ on:
         default: false
         type: boolean
       scored_prop_id:
-        description: "One existing scored_prop UUID for certification"
+        description: "Deprecated compatibility input; the bounded certification selects one board candidate"
         required: false
         type: string
 
@@ -183,13 +183,11 @@ jobs:
                 ;;
               certification-one-observation)
                 if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] \
-                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
-                  || ! printf '%s' "$SCORED_PROP_ID_INPUT" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
-                  echo "::error::Certification requires one NFL market, no discovery bypass, and one scored_prop UUID."
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
+                  echo "::error::Certification requires one NFL market and no discovery bypass."
                   exit 1
                 fi
                 echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
-                echo "certification_observation_id=$SCORED_PROP_ID_INPUT" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 ;;
               *) echo "::error::Unsupported exact-market operation."; exit 1 ;;
@@ -417,9 +415,30 @@ jobs:
           COVERED2_MANUAL_VALIDATION: "true"
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
-          SCOPED_SCORED_PROP_ID: ${{ steps.contract.outputs.certification_observation_id }}
         run: |
-          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --scoredPropId "$SCOPED_SCORED_PROP_ID"
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs --input-type=module -e '
+            const { listCovered2CatalogProps } = await import("./lib/knowledge/covered2/catalog.ts");
+            const { buildCoveredPicksBoard } = await import("./lib/knowledge/covered2/picks/board.ts");
+            const { resolveCovered2ValidationScope } = await import("./lib/knowledge/covered2/validation-scope.ts");
+            const validationScope = resolveCovered2ValidationScope({ sport: "NFL", market: "receiving_yards" });
+            const catalogRows = await listCovered2CatalogProps({ league: "nfl", validationScope });
+            if (!catalogRows.length) throw new Error("certification_no_existing_exact_market_catalog_rows");
+            const board = await buildCoveredPicksBoard({ catalogRows, validationScope });
+            const diagnostics = board.diagnostics;
+            console.log(`[manual-certification] ${JSON.stringify({
+              status: "completed",
+              sport: "NFL",
+              market: "receiving_yards",
+              universe: diagnostics.universeCount,
+              scored: diagnostics.scoredCount,
+              certified: diagnostics.certifiedCount,
+              certificationSkipped: diagnostics.certificationSkipped,
+              certificationErrors: diagnostics.certificationErrors,
+            })}`);
+            if (diagnostics.certifiedCount !== 1 || diagnostics.certificationErrors !== 0) {
+              throw new Error(`certification_expected_exactly_one_observation:certified=${diagnostics.certifiedCount}:errors=${diagnostics.certificationErrors}`);
+            }
+          '
 
       - name: Remove the private checkout
         if: always()
