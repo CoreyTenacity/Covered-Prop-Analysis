@@ -143,7 +143,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="56248ee0c7d18cb29c337e1bd1186fcc76eb83c2"
+            REVIEWED_RELEASE_SHA="0c1299a092f61b1fc2c3edf1f86d6f8c3ae2b9d7"
             if [ "$REF_NAME" != "main" ] && [ "$REF_NAME" != "codex/covered2-event-aware-wake-path" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
