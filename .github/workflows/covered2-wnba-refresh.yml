@@ -28,6 +28,41 @@ name: "Covered 2 Production Wake (dispatch event: covered2-wnba-refresh)"
 on:
   repository_dispatch:
     types: [covered2-wnba-refresh]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "One bounded exact-market operation"
+        required: true
+        type: choice
+        options:
+          - exact-market-discovery
+          - certification-one-observation
+      release_sha:
+        description: "Reviewed full Covered release SHA"
+        required: true
+        type: string
+      validation_sport:
+        description: "Exact sport"
+        required: true
+        type: choice
+        options:
+          - NFL
+          - MLB
+          - WNBA
+          - NBA
+      validation_market:
+        description: "Exact market key"
+        required: true
+        type: string
+      force_discovery:
+        description: "Use the one-off NFL discovery-cadence bypass"
+        required: false
+        default: false
+        type: boolean
+      scored_prop_id:
+        description: "One existing scored_prop UUID for certification"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -78,6 +113,8 @@ jobs:
         id: contract
         env:
           EVENT_TYPE: ${{ github.event.action }}
+          TRIGGER: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
           SCHEMA: ${{ github.event.client_payload.schema }}
           SOURCE: ${{ github.event.client_payload.source }}
           SLOT: ${{ github.event.client_payload.slot }}
@@ -97,7 +134,65 @@ jobs:
           CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
           CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          MANUAL_OPERATION: ${{ inputs.operation }}
+          RELEASE_SHA_INPUT: ${{ inputs.release_sha }}
+          VALIDATION_SPORT_INPUT: ${{ inputs.validation_sport }}
+          VALIDATION_MARKET_INPUT: ${{ inputs.validation_market }}
+          FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
+          SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
+          if [ "$TRIGGER" = "workflow_dispatch" ]; then
+            REVIEWED_RELEASE_SHA="56248ee0c7d18cb29c337e1bd1186fcc76eb83c2"
+            if [ "$REF_NAME" != "codex/covered2-event-aware-wake-path" ] \
+              || [ "$ACTOR" != "CoreyTenacity" ] \
+              || [ "$SCHEDULER_ENABLED" != "false" ] \
+              || [ "$RELEASE_SHA_INPUT" != "$REVIEWED_RELEASE_SHA" ] \
+              || ! printf '%s' "$RELEASE_SHA_INPUT" | grep -Eq '^[0-9a-f]{40}$' \
+              || [ "$ALLOWLIST" != "corey093011@gmail.com" ] \
+              || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] \
+              || [ "$DEPLOYMENT_AUTHORIZED" != "true" ] \
+              || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+              echo "::error::Rejected exact-market workflow dispatch; owner, repair ref, reviewed SHA, paused scheduler, and persistent gates are required."
+              exit 1
+            fi
+            case "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
+              NFL:passing_yards|NFL:receiving_yards|NFL:rushing_yards|MLB:batter_total_bases|MLB:pitcher_strikeouts|WNBA:points|WNBA:rebounds|WNBA:assists|NBA:points|NBA:rebounds|NBA:assists) ;;
+              *) echo "::error::Unsupported exact sport/market pair."; exit 1 ;;
+            esac
+            case "$MANUAL_OPERATION" in
+              exact-market-discovery)
+                if [ "$FORCE_DISCOVERY_INPUT" = "true" ] && [ "$VALIDATION_SPORT_INPUT" != "NFL" ]; then
+                  echo "::error::The discovery-cadence bypass is restricted to one NFL market."
+                  exit 1
+                fi
+                if [ "$FORCE_DISCOVERY_INPUT" != "true" ] && [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
+                  echo "::error::force_discovery must be exactly true or false."
+                  exit 1
+                fi
+                echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=$FORCE_DISCOVERY_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              certification-one-observation)
+                if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$SCORED_PROP_ID_INPUT" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
+                  echo "::error::Certification requires one NFL market, no discovery bypass, and one scored_prop UUID."
+                  exit 1
+                fi
+                echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
+                echo "certification_observation_id=$SCORED_PROP_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                ;;
+              *) echo "::error::Unsupported exact-market operation."; exit 1 ;;
+            esac
+            echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+            echo "sport=$VALIDATION_SPORT_INPUT" >> "$GITHUB_OUTPUT"
+            echo "market=$VALIDATION_MARKET_INPUT" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "exact_manual=true" >> "$GITHUB_OUTPUT"
+            echo "EXACT MARKET dispatch accepted: one owner-gated operation, one reviewed release SHA, one sport, and one market."
+            exit 0
+          fi
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
               REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"
@@ -163,6 +258,8 @@ jobs:
               fi
               echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
               echo "sport=$VALIDATION_SPORT" >> "$GITHUB_OUTPUT"
+              echo "release_sha=$REVIEWED_SHA" >> "$GITHUB_OUTPUT"
+              echo "market=" >> "$GITHUB_OUTPUT"
               echo "skip=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -194,6 +291,9 @@ jobs:
           echo "Accepted bounded C2 WNBA slot; immutable configuration validated without printing secrets."
           echo "mode=scheduled" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$PIN" >> "$GITHUB_OUTPUT"
+          echo "sport=" >> "$GITHUB_OUTPUT"
+          echo "market=" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Check out PRIVATE Covered at the immutable production pin
@@ -201,7 +301,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: CoreyTenacity/Covered
-          ref: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          ref: ${{ steps.contract.outputs.release_sha }}
           token: ${{ secrets.COVERED_PRIVATE_REPO_TOKEN }}
           path: private-covered
           persist-credentials: false
@@ -211,7 +311,7 @@ jobs:
         if: steps.contract.outputs.skip != 'true'
         working-directory: private-covered
         env:
-          EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
         run: |
           GOT="$(git rev-parse HEAD)"
           if [ "$GOT" != "$EXPECTED_SHA" ]; then
@@ -241,11 +341,12 @@ jobs:
         if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification'
         working-directory: private-covered
         env:
-          EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
           INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
           COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.mode == 'manual-validation' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
           COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.mode == 'manual-validation' && 'true' || 'false' }}
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
+          COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
           COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
@@ -267,13 +368,14 @@ jobs:
         if: steps.contract.outputs.mode == 'manual-certification'
         working-directory: private-covered
         env:
-          EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
-          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
           COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           COVERED2_CERTIFICATION_LEDGER_ENABLED: "true"
           COVERED2_MANUAL_CERTIFICATION_VALIDATION: "true"
           COVERED2_MANUAL_VALIDATION: "true"
-          COVERED2_MANUAL_VALIDATION_SPORT: NFL
+          COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
+          COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
           SCOPED_SCORED_PROP_ID: ${{ steps.contract.outputs.certification_observation_id }}
         run: |
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --scoredPropId "$SCOPED_SCORED_PROP_ID"

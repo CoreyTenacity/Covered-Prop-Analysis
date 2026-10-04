@@ -9,6 +9,20 @@ test("manual and scheduled deliveries use isolated, non-cancelling concurrency g
   assert.match(workflow, /cancel-in-progress:\s*false/);
 });
 
+test("workflow dispatch exposes a separately governed exact-market contract", () => {
+  assert.match(workflow, /workflow_dispatch:\s+inputs:/);
+  assert.match(workflow, /operation:[\s\S]*exact-market-discovery[\s\S]*certification-one-observation/);
+  assert.match(workflow, /release_sha:[\s\S]*required:\s*true/);
+  assert.match(workflow, /validation_sport:[\s\S]*NFL[\s\S]*MLB[\s\S]*WNBA[\s\S]*NBA/);
+  assert.match(workflow, /validation_market:[\s\S]*required:\s*true/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="56248ee0c7d18cb29c337e1bd1186fcc76eb83c2"/);
+  assert.match(workflow, /REF_NAME" != "codex\/covered2-event-aware-wake-path"/);
+  assert.match(workflow, /RELEASE_SHA_INPUT" != "\$REVIEWED_RELEASE_SHA"/);
+  assert.match(workflow, /Unsupported exact sport\/market pair/);
+  assert.match(workflow, /release_sha=\$RELEASE_SHA_INPUT/);
+  assert.match(workflow, /market=\$VALIDATION_MARKET_INPUT/);
+});
+
 test("ordinary dispatch exits behind the false global gate before private checkout", () => {
   const gate = workflow.indexOf('C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout.');
   const checkout = workflow.indexOf('Check out PRIVATE Covered at the immutable production pin');
@@ -44,6 +58,15 @@ test("manual validation pins execution to one sport and leaves all other sport f
   ]) {
     assert.match(workflow, new RegExp(`${name}:.*manual-validation.*sport.*false`));
   }
+});
+
+test("exact-market execution checks out and passes the selected release, sport, and market", () => {
+  assert.match(workflow, /ref: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
+  assert.match(workflow, /EXPECTED_SHA: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_SPORT: \$\{\{ steps\.contract\.outputs\.sport \}\}/);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_MARKET: \$\{\{ steps\.contract\.outputs\.market \}\}/);
+  assert.match(workflow, /COVERED_PRIVATE_PIPELINE_SHA_V2: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
+  assert.match(workflow, /exact_manual=true/);
 });
 
 test("the authorized one-off payload is NFL-only and process-locally bypasses only discovery cadence", () => {
