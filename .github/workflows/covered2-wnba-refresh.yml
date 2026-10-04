@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: covered2-wnba-refresh
+  group: ${{ github.event.client_payload.manual_validation == true && 'covered2-wnba-refresh-manual-validation' || 'covered2-wnba-refresh' }}
   cancel-in-progress: false
 
 jobs:
@@ -55,15 +55,23 @@ jobs:
       COVERED_COMPACT_RECEIPT_WRITES_ENABLED: ${{ vars.COVERED_COMPACT_RECEIPT_WRITES_ENABLED }}
       COVERED_COMPACT_GAME_LOG_WRITES_ENABLED: ${{ vars.COVERED_COMPACT_GAME_LOG_WRITES_ENABLED }}
       COVERED2_MLB_MARKET_GAMELOG: ${{ vars.COVERED2_MLB_MARKET_GAMELOG }}
+      COVERED2_MLB_MARKET_OPPONENT: ${{ vars.COVERED2_MLB_MARKET_OPPONENT }}
       COVERED2_MLB_PLAYER_LOG_REFRESH: ${{ vars.COVERED2_MLB_PLAYER_LOG_REFRESH }}
+      COVERED2_MLB_LINEUP_REFRESH: ${{ vars.COVERED2_MLB_LINEUP_REFRESH }}
+      COVERED2_NFL_RECEPTIONS_REFRESH: ${{ vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
+      COVERED2_NFL_RECEIVING_YARDS_REFRESH: ${{ vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
+      COVERED2_NFL_RUSHING_YARDS_REFRESH: ${{ vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
+      COVERED2_NFL_PASSING_YARDS_REFRESH: ${{ vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
       COVERED2_PICKS_BOARD_BUILD: ${{ vars.COVERED2_PICKS_BOARD_BUILD }}
       SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
       BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       COVERED_EGRESS_DIAGNOSTIC: ${{ vars.COVERED_EGRESS_DIAGNOSTIC }}
+      KNOWLEDGE_LOW_EGRESS_MODE: ${{ vars.KNOWLEDGE_LOW_EGRESS_MODE }}
       COVERED2_EVENT_AWARE_RUNTIME_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_RUNTIME_ENABLED }}
       COVERED2_EVENT_AWARE_SHADOW_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_SHADOW_ENABLED }}
+      COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
       COVERED2_REFRESH_RUNTIME: "github-actions-c2-wnba"
     steps:
       - name: Resolve and validate the C2 dispatch contract
@@ -74,16 +82,98 @@ jobs:
           SOURCE: ${{ github.event.client_payload.source }}
           SLOT: ${{ github.event.client_payload.slot }}
           DELIVERY_KEY: ${{ github.event.client_payload.delivery_key }}
+          MANUAL_VALIDATION: ${{ github.event.client_payload.manual_validation }}
+          VALIDATION_SPORT: ${{ github.event.client_payload.manual_validation_sport }}
+          FORCE_DISCOVERY: ${{ github.event.client_payload.manual_validation_force_discovery }}
+          MANUAL_VALIDATION_ID: ${{ github.event.client_payload.validation_id }}
+          VALIDATION_MODE: ${{ github.event.client_payload.manual_validation_mode }}
+          CERTIFICATION_OBSERVATION_ID: ${{ github.event.client_payload.certification_observation_id }}
+          EXPECTED_SHA: ${{ github.event.client_payload.expected_sha }}
+          ACTOR: ${{ github.actor }}
+          SENDER: ${{ github.event.sender.login }}
           SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           ALLOWLIST: ${{ secrets.COVERED2_ALLOWED_EMAILS }}
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
           CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
+          CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
         run: |
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
-            echo "C2 WNBA scheduler disabled; skipping dispatch."
+            if [ "$MANUAL_VALIDATION" = "true" ]; then
+              REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"
+              if [ "$SCHEDULER_ENABLED" != "false" ] \
+                || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
+                || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
+                || [ "$SOURCE" != "owner-manual-validation" ] \
+                || [ "$ACTOR" != "CoreyTenacity" ] \
+                || [ "$SENDER" != "CoreyTenacity" ] \
+                || [ "$EXPECTED_SHA" != "$REVIEWED_SHA" ] \
+                || [ "$PIN" != "$REVIEWED_SHA" ] \
+                || [ -n "$SLOT" ] \
+                || [ -n "$DELIVERY_KEY" ]; then
+                echo "::error::Rejected manual validation contract; scheduler must remain false and the exact reviewed owner dispatch/pin is required."
+                exit 1
+              fi
+              if [ "$ALLOWLIST" != "corey093011@gmail.com" ] || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] || [ "$DEPLOYMENT_AUTHORIZED" != "true" ]; then
+                echo "::error::C2 production configuration is incomplete; manual validation will not bypass it."
+                exit 1
+              fi
+              case "$VALIDATION_SPORT" in
+                MLB|NFL|WNBA) ;;
+                *) echo "::error::Manual validation requires one runner-wired sport: MLB, NFL, or WNBA."; exit 1 ;;
+              esac
+              case "$VALIDATION_MODE" in
+                force-discovery)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "true" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
+                    echo "::error::Force-discovery validation requires its exact NFL-only payload and both persistent gates false."
+                    exit 1
+                  fi
+                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=true" >> "$GITHUB_OUTPUT"
+                  ;;
+                current-inventory)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-current-inventory-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
+                    echo "::error::Current-inventory validation requires its exact NFL-only payload, no cadence bypass, and both persistent gates false."
+                    exit 1
+                  fi
+                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                  ;;
+                certification-one-observation)
+                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925" ] \
+                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] \
+                    || ! printf '%s' "$CERTIFICATION_OBSERVATION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
+                    echo "::error::One-observation certification requires one exact NFL scored_prop UUID while persistent gates remain false."
+                    exit 1
+                  fi
+                  echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
+                  echo "certification_observation_id=$CERTIFICATION_OBSERVATION_ID" >> "$GITHUB_OUTPUT"
+                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                  ;;
+                *) echo "::error::Manual validation mode is missing or unsupported."; exit 1 ;;
+              esac
+              if [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                echo "::error::Manual validation requires the persistent certification ledger variable to remain false."
+                exit 1
+              fi
+              echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
+              echo "sport=$VALIDATION_SPORT" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout."
+            echo "mode=paused" >> "$GITHUB_OUTPUT"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$MANUAL_VALIDATION" = "true" ]; then
+            echo "::error::Manual validation is accepted only while the global scheduler gate is false."
+            exit 1
           fi
           if [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] || [ "$SCHEMA" != "covered2-wnba-refresh/v1" ] || [ "$SOURCE" != "cloudflare-cron" ]; then
             echo "::error::Rejected C2 repository_dispatch contract."
@@ -102,6 +192,7 @@ jobs:
             exit 1
           fi
           echo "Accepted bounded C2 WNBA slot; immutable configuration validated without printing secrets."
+          echo "mode=scheduled" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
@@ -147,13 +238,45 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run exactly one bounded C2 WNBA current-evidence refresh
-        if: steps.contract.outputs.skip != 'true'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
-          INVOCATION_ID: gha-c2-wnba-${{ github.run_id }}
+          INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
+          COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.mode == 'manual-validation' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
+          COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.mode == 'manual-validation' && 'true' || 'false' }}
+          COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
+          COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
+          COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
+          COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
+          COVERED2_MLB_MARKET_GAMELOG: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_GAMELOG }}
+          COVERED2_MLB_MARKET_OPPONENT: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_OPPONENT }}
+          COVERED2_MLB_PLAYER_LOG_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_LOG_REFRESH }}
+          COVERED2_MLB_LINEUP_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_LINEUP_REFRESH }}
+          COVERED2_NFL_RECEPTIONS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
+          COVERED2_NFL_RECEIVING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
+          COVERED2_NFL_RUSHING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
+          COVERED2_NFL_PASSING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
         run: |
+          if [ "$COVERED2_MANUAL_VALIDATION" = "true" ]; then
+            echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
+          fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
+
+      - name: Run one existing NFL observation through certification admission/completion
+        if: steps.contract.outputs.mode == 'manual-certification'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: "true"
+          COVERED2_MANUAL_CERTIFICATION_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION_SPORT: NFL
+          SCOPED_SCORED_PROP_ID: ${{ steps.contract.outputs.certification_observation_id }}
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --scoredPropId "$SCOPED_SCORED_PROP_ID"
 
       - name: Remove the private checkout
         if: always()

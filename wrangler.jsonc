@@ -1,7 +1,18 @@
 {
+  // NON-PRODUCTION. This config previously carried the name
+  // "covered-opennext-proof" -- the SAME name as the private repository's
+  // real production Cloudflare Worker (see wrangler.jsonc there). A
+  // `wrangler deploy`/`pnpm cf:deploy` run from a checkout of THIS repo
+  // silently overwrote live production with this repo's older, incomplete
+  // build (missing the private-only /api/covered2/* routes and the build-
+  // SHA header entirely) -- confirmed as the mechanism behind a 2026-09-09
+  // production incident and a matching 2026-08-28 occurrence. Renamed
+  // (owner-authorized) so a deploy from this repo can never again reach the
+  // production Worker. If this proof/demo target is ever deployed again,
+  // it publishes to its OWN distinct Worker, not production.
   "$schema": "node_modules/wrangler/config-schema.json",
   "main": "cloudflare-proof-worker.ts",
-  "name": "covered-opennext-proof",
+  "name": "covered-public-repo-demo-DO-NOT-USE-FOR-PRODUCTION",
   "compatibility_date": "2026-07-12",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
