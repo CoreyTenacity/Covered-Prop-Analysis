@@ -16,7 +16,7 @@ test("workflow dispatch exposes a separately governed exact-market contract", ()
   assert.match(workflow, /validation_sport:[\s\S]*NFL[\s\S]*MLB[\s\S]*WNBA[\s\S]*NBA/);
   assert.match(workflow, /validation_market:[\s\S]*required:\s*true/);
   assert.match(workflow, /REVIEWED_RELEASE_SHA="56248ee0c7d18cb29c337e1bd1186fcc76eb83c2"/);
-  assert.match(workflow, /REF_NAME" != "codex\/covered2-event-aware-wake-path"/);
+  assert.match(workflow, /REF_NAME" != "main" \] && \[ "\$REF_NAME" != "codex\/covered2-event-aware-wake-path"/);
   assert.match(workflow, /RELEASE_SHA_INPUT" != "\$REVIEWED_RELEASE_SHA"/);
   assert.match(workflow, /Unsupported exact sport\/market pair/);
   assert.match(workflow, /release_sha=\$RELEASE_SHA_INPUT/);

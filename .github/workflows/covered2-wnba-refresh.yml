@@ -144,7 +144,7 @@ jobs:
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             REVIEWED_RELEASE_SHA="56248ee0c7d18cb29c337e1bd1186fcc76eb83c2"
-            if [ "$REF_NAME" != "codex/covered2-event-aware-wake-path" ] \
+            if [ "$REF_NAME" != "main" ] && [ "$REF_NAME" != "codex/covered2-event-aware-wake-path" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
               || [ "$RELEASE_SHA_INPUT" != "$REVIEWED_RELEASE_SHA" ] \
