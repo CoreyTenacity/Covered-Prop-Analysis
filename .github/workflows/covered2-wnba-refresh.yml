@@ -35,6 +35,7 @@ on:
         required: true
         type: choice
         options:
+          - exact-market-preflight
           - exact-market-discovery
           - certification-one-observation
       release_sha:
@@ -160,6 +161,14 @@ jobs:
               *) echo "::error::Unsupported exact sport/market pair."; exit 1 ;;
             esac
             case "$MANUAL_OPERATION" in
+              exact-market-preflight)
+                if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] || [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
+                  echo "::error::The read-only exact-market preflight is restricted to one NFL market with no discovery bypass."
+                  exit 1
+                fi
+                echo "mode=manual-preflight" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                ;;
               exact-market-discovery)
                 if [ "$FORCE_DISCOVERY_INPUT" = "true" ] && [ "$VALIDATION_SPORT_INPUT" != "NFL" ]; then
                   echo "::error::The discovery-cadence bypass is restricted to one NFL market."
@@ -337,8 +346,40 @@ jobs:
         working-directory: private-covered
         run: pnpm install --frozen-lockfile
 
+      - name: Run read-only schema and exact-market availability preflight
+        if: steps.contract.outputs.mode == 'manual-preflight'
+        working-directory: private-covered
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
+          BBS_API_KEY: ${{ secrets.BBS_API_KEY }}
+          PREFLIGHT_MARKET: ${{ steps.contract.outputs.market }}
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/covered2-schema-contract-check.ts
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs --input-type=module -e '
+            const { refreshNflMarkets } = await import("./lib/knowledge/covered2/nfl-refresh/production.ts");
+            const market = process.env.PREFLIGHT_MARKET;
+            if (!["passing_yards", "receiving_yards", "rushing_yards"].includes(market)) throw new Error("unsupported_preflight_market");
+            const result = await refreshNflMarkets({ write: false, markets: [market] });
+            const manifest = result.byMarket[market]?.manifest;
+            const evidence = {
+              status: result.status,
+              market,
+              providerRequests: manifest?.providerRequests ?? 0,
+              providerRows: manifest?.providerRows ?? 0,
+              marketRows: manifest?.marketRows ?? 0,
+              lineRows: manifest?.lineRows ?? 0,
+              unresolvedRows: manifest?.unresolvedRows ?? 0,
+              eventCount: manifest?.events?.length ?? 0,
+              currentPropKeyCount: manifest?.currentPropKeys?.length ?? 0,
+            };
+            console.log(`[exact-market-preflight] ${JSON.stringify(evidence)}`);
+            if (evidence.lineRows < 1 || evidence.eventCount < 1 || evidence.currentPropKeyCount < 1) throw new Error("no_live_exact_market_opportunity");
+          '
+
       - name: Run exactly one bounded C2 WNBA current-evidence refresh
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-preflight'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}

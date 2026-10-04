@@ -11,7 +11,7 @@ test("manual and scheduled deliveries use isolated, non-cancelling concurrency g
 
 test("workflow dispatch exposes a separately governed exact-market contract", () => {
   assert.match(workflow, /workflow_dispatch:\s+inputs:/);
-  assert.match(workflow, /operation:[\s\S]*exact-market-discovery[\s\S]*certification-one-observation/);
+  assert.match(workflow, /operation:[\s\S]*exact-market-preflight[\s\S]*exact-market-discovery[\s\S]*certification-one-observation/);
   assert.match(workflow, /release_sha:[\s\S]*required:\s*true/);
   assert.match(workflow, /validation_sport:[\s\S]*NFL[\s\S]*MLB[\s\S]*WNBA[\s\S]*NBA/);
   assert.match(workflow, /validation_market:[\s\S]*required:\s*true/);
@@ -67,6 +67,15 @@ test("exact-market execution checks out and passes the selected release, sport, 
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION_MARKET: \$\{\{ steps\.contract\.outputs\.market \}\}/);
   assert.match(workflow, /COVERED_PRIVATE_PIPELINE_SHA_V2: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
   assert.match(workflow, /exact_manual=true/);
+});
+
+test("read-only exact-market preflight cannot fall through to the write-enabled refresh", () => {
+  assert.match(workflow, /exact-market-preflight\)[\s\S]*VALIDATION_SPORT_INPUT.*NFL[\s\S]*mode=manual-preflight/);
+  assert.match(workflow, /Run read-only schema and exact-market availability preflight/);
+  assert.match(workflow, /covered2-schema-contract-check\.ts/);
+  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\] \}\)/);
+  assert.match(workflow, /no_live_exact_market_opportunity/);
+  assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
 });
 
 test("the authorized one-off payload is NFL-only and process-locally bypasses only discovery cadence", () => {
