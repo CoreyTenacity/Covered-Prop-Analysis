@@ -61,7 +61,7 @@ on:
         default: false
         type: boolean
       scored_prop_id:
-        description: "Deprecated compatibility input; the bounded certification selects one board candidate"
+        description: "Exact existing scored_props UUID; required only for certification-one-observation"
         required: false
         type: string
 
@@ -143,12 +143,13 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="e51d02ebe61d8e6eab998cb20d3814e8f14827cd"
-            if [ "$REF_NAME" != "main" ] && [ "$REF_NAME" != "codex/covered2-event-aware-wake-path" ] \
+            REVIEWED_RELEASE_SHA="87c82f0b769a31f08cd4166a44697b5fa102abcd"
+            if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
               || [ "$RELEASE_SHA_INPUT" != "$REVIEWED_RELEASE_SHA" ] \
               || ! printf '%s' "$RELEASE_SHA_INPUT" | grep -Eq '^[0-9a-f]{40}$' \
+              || [ "$PIN" != "$REVIEWED_RELEASE_SHA" ] \
               || [ "$ALLOWLIST" != "corey093011@gmail.com" ] \
               || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] \
               || [ "$DEPLOYMENT_AUTHORIZED" != "true" ] \
@@ -157,7 +158,7 @@ jobs:
               exit 1
             fi
             case "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
-              NFL:passing_yards|NFL:receiving_yards|NFL:rushing_yards|MLB:batter_total_bases|MLB:pitcher_strikeouts|WNBA:points|WNBA:rebounds|WNBA:assists|NBA:points|NBA:rebounds|NBA:assists) ;;
+              NFL:receiving_yards|NFL:rushing_yards|MLB:batter_total_bases|MLB:pitcher_strikeouts|WNBA:rebounds|NBA:points|NBA:rebounds|NBA:assists) ;;
               *) echo "::error::Unsupported exact sport/market pair."; exit 1 ;;
             esac
             case "$MANUAL_OPERATION" in
@@ -182,9 +183,9 @@ jobs:
                 echo "force_discovery=$FORCE_DISCOVERY_INPUT" >> "$GITHUB_OUTPUT"
                 ;;
               certification-one-observation)
-                if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] \
-                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
-                  echo "::error::Certification requires one NFL market and no discovery bypass."
+                if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$SCORED_PROP_ID_INPUT" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
+                  echo "::error::Certification requires one exact existing scored_prop UUID and no discovery bypass."
                   exit 1
                 fi
                 echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
@@ -195,6 +196,9 @@ jobs:
             echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
             echo "sport=$VALIDATION_SPORT_INPUT" >> "$GITHUB_OUTPUT"
             echo "market=$VALIDATION_MARKET_INPUT" >> "$GITHUB_OUTPUT"
+            if [ "$MANUAL_OPERATION" = "certification-one-observation" ]; then
+              echo "scored_prop_id=$SCORED_PROP_ID_INPUT" >> "$GITHUB_OUTPUT"
+            fi
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "exact_manual=true" >> "$GITHUB_OUTPUT"
             echo "EXACT MARKET dispatch accepted: one owner-gated operation, one reviewed release SHA, one sport, and one market."
@@ -202,73 +206,8 @@ jobs:
           fi
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
-              REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"
-              if [ "$SCHEDULER_ENABLED" != "false" ] \
-                || [ "$EVENT_TYPE" != "covered2-wnba-refresh" ] \
-                || [ "$SCHEMA" != "covered2-manual-validation/v1" ] \
-                || [ "$SOURCE" != "owner-manual-validation" ] \
-                || [ "$ACTOR" != "CoreyTenacity" ] \
-                || [ "$SENDER" != "CoreyTenacity" ] \
-                || [ "$EXPECTED_SHA" != "$REVIEWED_SHA" ] \
-                || [ "$PIN" != "$REVIEWED_SHA" ] \
-                || [ -n "$SLOT" ] \
-                || [ -n "$DELIVERY_KEY" ]; then
-                echo "::error::Rejected manual validation contract; scheduler must remain false and the exact reviewed owner dispatch/pin is required."
-                exit 1
-              fi
-              if [ "$ALLOWLIST" != "corey093011@gmail.com" ] || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] || [ "$DEPLOYMENT_AUTHORIZED" != "true" ]; then
-                echo "::error::C2 production configuration is incomplete; manual validation will not bypass it."
-                exit 1
-              fi
-              case "$VALIDATION_SPORT" in
-                MLB|NFL|WNBA) ;;
-                *) echo "::error::Manual validation requires one runner-wired sport: MLB, NFL, or WNBA."; exit 1 ;;
-              esac
-              case "$VALIDATION_MODE" in
-                force-discovery)
-                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925" ] \
-                    || [ "$FORCE_DISCOVERY" != "true" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
-                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
-                    echo "::error::Force-discovery validation requires its exact NFL-only payload and both persistent gates false."
-                    exit 1
-                  fi
-                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
-                  echo "force_discovery=true" >> "$GITHUB_OUTPUT"
-                  ;;
-                current-inventory)
-                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-current-inventory-20260925" ] \
-                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
-                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] || [ -n "$CERTIFICATION_OBSERVATION_ID" ]; then
-                    echo "::error::Current-inventory validation requires its exact NFL-only payload, no cadence bypass, and both persistent gates false."
-                    exit 1
-                  fi
-                  echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
-                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
-                  ;;
-                certification-one-observation)
-                  if [ "$MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925" ] \
-                    || [ "$FORCE_DISCOVERY" != "false" ] || [ "$VALIDATION_SPORT" != "NFL" ] \
-                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ] \
-                    || ! printf '%s' "$CERTIFICATION_OBSERVATION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
-                    echo "::error::One-observation certification requires one exact NFL scored_prop UUID while persistent gates remain false."
-                    exit 1
-                  fi
-                  echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
-                  echo "certification_observation_id=$CERTIFICATION_OBSERVATION_ID" >> "$GITHUB_OUTPUT"
-                  echo "force_discovery=false" >> "$GITHUB_OUTPUT"
-                  ;;
-                *) echo "::error::Manual validation mode is missing or unsupported."; exit 1 ;;
-              esac
-              if [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                echo "::error::Manual validation requires the persistent certification ledger variable to remain false."
-                exit 1
-              fi
-              echo "MANUAL VALIDATION accepted: owner dispatch, one-off ID, paused scheduler, and immutable runtime pin verified. No scheduler configuration was changed."
-              echo "sport=$VALIDATION_SPORT" >> "$GITHUB_OUTPUT"
-              echo "release_sha=$REVIEWED_SHA" >> "$GITHUB_OUTPUT"
-              echo "market=" >> "$GITHUB_OUTPUT"
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              echo "::error::The legacy repository_dispatch manual-validation contract is retired. Use the owner-gated workflow_dispatch exact operation on main."
+              exit 1
             fi
             echo "C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout."
             echo "mode=paused" >> "$GITHUB_OUTPUT"
@@ -376,7 +315,7 @@ jobs:
             if (evidence.lineRows < 1 || evidence.eventCount < 1 || evidence.currentPropKeyCount < 1) throw new Error("no_live_exact_market_opportunity");
           '
 
-      - name: Run exactly one bounded C2 WNBA current-evidence refresh
+      - name: Run exactly one bounded C2 exact-market discovery
         if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-preflight'
         working-directory: private-covered
         env:
@@ -403,7 +342,7 @@ jobs:
           fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
 
-      - name: Run one existing NFL observation through certification admission/completion
+      - name: Certify one existing exact-market observation
         if: steps.contract.outputs.mode == 'manual-certification'
         working-directory: private-covered
         env:
@@ -415,30 +354,14 @@ jobs:
           COVERED2_MANUAL_VALIDATION: "true"
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
+          COVERED2_CERTIFICATION_LEDGER_PERSISTENT_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SPORT: ${{ steps.contract.outputs.sport }}
+          MARKET: ${{ steps.contract.outputs.market }}
+          SCORED_PROP_ID: ${{ steps.contract.outputs.scored_prop_id }}
         run: |
-          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs --input-type=module -e '
-            const { listCovered2CatalogProps } = await import("./lib/knowledge/covered2/catalog.ts");
-            const { buildCoveredPicksBoard } = await import("./lib/knowledge/covered2/picks/board.ts");
-            const { resolveCovered2ValidationScope } = await import("./lib/knowledge/covered2/validation-scope.ts");
-            const validationScope = resolveCovered2ValidationScope({ sport: "NFL", market: "receiving_yards" });
-            const catalogRows = await listCovered2CatalogProps({ league: "nfl", validationScope });
-            if (!catalogRows.length) throw new Error("certification_no_existing_exact_market_catalog_rows");
-            const board = await buildCoveredPicksBoard({ catalogRows, validationScope });
-            const diagnostics = board.diagnostics;
-            console.log(`[manual-certification] ${JSON.stringify({
-              status: "completed",
-              sport: "NFL",
-              market: "receiving_yards",
-              universe: diagnostics.universeCount,
-              scored: diagnostics.scoredCount,
-              certified: diagnostics.certifiedCount,
-              certificationSkipped: diagnostics.certificationSkipped,
-              certificationErrors: diagnostics.certificationErrors,
-            })}`);
-            if (diagnostics.certifiedCount !== 1 || diagnostics.certificationErrors !== 0) {
-              throw new Error(`certification_expected_exactly_one_observation:certified=${diagnostics.certifiedCount}:errors=${diagnostics.certificationErrors}`);
-            }
-          '
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --sport "$SPORT" --market "$MARKET" --scoredPropId "$SCORED_PROP_ID"
 
       - name: Remove the private checkout
         if: always()

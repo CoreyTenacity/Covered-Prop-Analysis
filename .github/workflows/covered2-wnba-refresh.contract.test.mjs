@@ -1,126 +1,198 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
+const reviewedSha = "87c82f0b769a31f08cd4166a44697b5fa102abcd";
+const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
+const readyPairs = [
+  ["NFL", "receiving_yards"],
+  ["NFL", "rushing_yards"],
+  ["MLB", "batter_total_bases"],
+  ["MLB", "pitcher_strikeouts"],
+  ["WNBA", "rebounds"],
+  ["NBA", "points"],
+  ["NBA", "rebounds"],
+  ["NBA", "assists"],
+];
+const blockedPairs = [
+  ["NFL", "passing_yards"],
+  ["WNBA", "assists"],
+  ["WNBA", "points"],
+];
 
-test("manual and scheduled deliveries use isolated, non-cancelling concurrency groups", () => {
-  assert.match(workflow, /group:\s*\$\{\{\s*github\.event\.client_payload\.manual_validation\s*==\s*true\s*&&\s*'covered2-wnba-refresh-manual-validation'\s*\|\|\s*'covered2-wnba-refresh'\s*\}\}/);
-  assert.match(workflow, /cancel-in-progress:\s*false/);
-});
+function extractContractShell() {
+  const contractStep = workflow.indexOf("        id: contract");
+  assert.notEqual(contractStep, -1, "contract step exists");
+  const runStart = workflow.indexOf("        run: |\n", contractStep);
+  assert.notEqual(runStart, -1, "contract step has an inline shell");
+  const bodyStart = runStart + "        run: |\n".length;
+  const nextStep = workflow.indexOf("\n      - name:", bodyStart);
+  assert.notEqual(nextStep, -1, "contract shell has a bounded end");
+  return workflow.slice(bodyStart, nextStep).split("\n").map((line) => line.replace(/^ {10}/, "")).join("\n");
+}
 
-test("workflow dispatch exposes a separately governed exact-market contract", () => {
-  assert.match(workflow, /workflow_dispatch:\s+inputs:/);
-  assert.match(workflow, /operation:[\s\S]*exact-market-preflight[\s\S]*exact-market-discovery[\s\S]*certification-one-observation/);
-  assert.match(workflow, /release_sha:[\s\S]*required:\s*true/);
-  assert.match(workflow, /validation_sport:[\s\S]*NFL[\s\S]*MLB[\s\S]*WNBA[\s\S]*NBA/);
-  assert.match(workflow, /validation_market:[\s\S]*required:\s*true/);
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="e51d02ebe61d8e6eab998cb20d3814e8f14827cd"/);
-  assert.match(workflow, /REF_NAME" != "main" \] && \[ "\$REF_NAME" != "codex\/covered2-event-aware-wake-path"/);
-  assert.match(workflow, /RELEASE_SHA_INPUT" != "\$REVIEWED_RELEASE_SHA"/);
-  assert.match(workflow, /Unsupported exact sport\/market pair/);
-  assert.match(workflow, /release_sha=\$RELEASE_SHA_INPUT/);
-  assert.match(workflow, /market=\$VALIDATION_MARKET_INPUT/);
-});
+const contractShell = extractContractShell();
 
-test("ordinary dispatch exits behind the false global gate before private checkout", () => {
-  const gate = workflow.indexOf('C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout.');
-  const checkout = workflow.indexOf('Check out PRIVATE Covered at the immutable production pin');
-  assert.ok(gate >= 0 && checkout > gate);
-  assert.match(workflow, /if:\s*steps\.contract\.outputs\.skip\s*!=\s*'true'/);
-});
+function runContract(overrides = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "c2-receiver-contract-"));
+  const outputPath = join(directory, "github-output.txt");
+  writeFileSync(outputPath, "");
+  const env = {
+    ...process.env,
+    GITHUB_OUTPUT: outputPath,
+    TRIGGER: "workflow_dispatch",
+    REF_NAME: "main",
+    ACTOR: "CoreyTenacity",
+    SCHEDULER_ENABLED: "false",
+    RELEASE_SHA_INPUT: reviewedSha,
+    PIN: reviewedSha,
+    ALLOWLIST: "corey093011@gmail.com",
+    CADENCE: "0,30 11-23,0-4 * * *",
+    DEPLOYMENT_AUTHORIZED: "true",
+    CERTIFICATION_LEDGER_ENABLED: "false",
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+    FORCE_DISCOVERY_INPUT: "false",
+    SCORED_PROP_ID_INPUT: "",
+    ...overrides,
+  };
+  try {
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", contractShell], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    return { ...result, diagnostics: (result.stdout ?? "") + (result.stderr ?? ""), outputs: readFileSync(outputPath, "utf8") };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
-test("manual validation is bound to the exact owner payload, paused gates, immutable pin, and supported runner sport", () => {
-  assert.match(workflow, /MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"/);
-  assert.match(workflow, /ACTOR" != "CoreyTenacity"/);
-  assert.match(workflow, /SENDER" != "CoreyTenacity"/);
-  assert.match(workflow, /EXPECTED_SHA" != "\$REVIEWED_SHA"/);
-  assert.match(workflow, /PIN" != "\$REVIEWED_SHA"/);
-  assert.match(workflow, /SCHEDULER_ENABLED" != "false"/);
-  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED" != "false"/);
-  assert.match(workflow, /case "\$VALIDATION_SPORT" in\s+MLB\|NFL\|WNBA\)/);
-  assert.match(workflow, /Manual validation is accepted only while the global scheduler gate is false/);
-});
-
-test("manual validation pins execution to one sport and leaves all other sport flags false", () => {
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_SPORT:\s*\$\{\{\s*steps\.contract\.outputs\.sport\s*\}\}/);
-  for (const name of [
-    "COVERED2_MLB_SCHEDULE_INGEST",
-    "COVERED2_MLB_PLAYER_IDENTITY",
-    "COVERED2_MLB_MARKET_GAMELOG",
-    "COVERED2_MLB_MARKET_OPPONENT",
-    "COVERED2_MLB_PLAYER_LOG_REFRESH",
-    "COVERED2_MLB_LINEUP_REFRESH",
-    "COVERED2_NFL_RECEPTIONS_REFRESH",
-    "COVERED2_NFL_RECEIVING_YARDS_REFRESH",
-    "COVERED2_NFL_RUSHING_YARDS_REFRESH",
-    "COVERED2_NFL_PASSING_YARDS_REFRESH",
+test("only the exact reviewed SHA, main ref, owner actor, matching production pin, and paused persistent gates are accepted", () => {
+  assert.match(workflow, new RegExp("REVIEWED_RELEASE_SHA=\"" + reviewedSha + "\""));
+  assert.match(workflow, /\[ "\$PIN" != "\$REVIEWED_RELEASE_SHA" \]/);
+  for (const invalid of [
+    { RELEASE_SHA_INPUT: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
+    { RELEASE_SHA_INPUT: retiredSha },
+    { PIN: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
+    { SCHEDULER_ENABLED: "true" },
+    { CERTIFICATION_LEDGER_ENABLED: "true" },
+    { ACTOR: "not-the-owner" },
+    { REF_NAME: "codex/old-receiver" },
   ]) {
-    assert.match(workflow, new RegExp(`${name}:.*manual-validation.*sport.*false`));
+    const result = runContract(invalid);
+    assert.notEqual(result.status, 0, JSON.stringify(invalid));
+    assert.match(result.diagnostics, /Rejected exact-market workflow dispatch/);
+  }
+  assert.equal(runContract().status, 0);
+});
+
+test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact discovery", () => {
+  for (const [sport, market] of readyPairs) {
+    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market });
+    assert.equal(result.status, 0, sport + "/" + market + ": " + result.diagnostics);
+    assert.match(result.outputs, /^mode=manual-validation$/m);
+    assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
+    assert.match(result.outputs, new RegExp("^market=" + market + "$", "m"));
+    assert.match(result.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+    assert.match(result.outputs, /^exact_manual=true$/m);
+  }
+  for (const [sport, market] of blockedPairs) {
+    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market });
+    assert.notEqual(result.status, 0, sport + "/" + market + " must fail closed");
+    assert.match(result.diagnostics, /Unsupported exact sport\/market pair/);
   }
 });
 
-test("exact-market execution checks out and passes the selected release, sport, and market", () => {
-  assert.match(workflow, /ref: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
-  assert.match(workflow, /EXPECTED_SHA: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_SPORT: \$\{\{ steps\.contract\.outputs\.sport \}\}/);
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_MARKET: \$\{\{ steps\.contract\.outputs\.market \}\}/);
-  assert.match(workflow, /COVERED_PRIVATE_PIPELINE_SHA_V2: \$\{\{ steps\.contract\.outputs\.release_sha \}\}/);
-  assert.match(workflow, /exact_manual=true/);
+test("all eight ready markets route to certification only with one exact existing scored_prop UUID and no bypass", () => {
+  const scoredPropId = "00000000-0000-4000-8000-000000000001";
+  for (const [sport, market] of readyPairs) {
+    const result = runContract({
+      MANUAL_OPERATION: "certification-one-observation",
+      VALIDATION_SPORT_INPUT: sport,
+      VALIDATION_MARKET_INPUT: market,
+      SCORED_PROP_ID_INPUT: scoredPropId,
+    });
+    assert.equal(result.status, 0, sport + "/" + market + ": " + result.diagnostics);
+    assert.match(result.outputs, /^mode=manual-certification$/m);
+    assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
+    assert.match(result.outputs, new RegExp("^market=" + market + "$", "m"));
+    assert.match(result.outputs, new RegExp("^scored_prop_id=" + scoredPropId + "$", "m"));
+  }
+  for (const invalid of ["", "not-a-uuid"]) {
+    const result = runContract({
+      MANUAL_OPERATION: "certification-one-observation",
+      SCORED_PROP_ID_INPUT: invalid,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.diagnostics, /exact existing scored_prop UUID/);
+  }
+  assert.notEqual(runContract({
+    MANUAL_OPERATION: "certification-one-observation",
+    FORCE_DISCOVERY_INPUT: "true",
+    SCORED_PROP_ID_INPUT: scoredPropId,
+  }).status, 0);
 });
 
-test("read-only exact-market preflight cannot fall through to the write-enabled refresh", () => {
-  assert.match(workflow, /exact-market-preflight\)[\s\S]*VALIDATION_SPORT_INPUT.*NFL[\s\S]*mode=manual-preflight/);
-  assert.match(workflow, /Run read-only schema and exact-market availability preflight/);
-  assert.match(workflow, /covered2-schema-contract-check\.ts/);
+test("read-only preflight is limited to one NFL market and cannot fall through to discovery", () => {
+  const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
+  assert.equal(allowed.status, 0);
+  assert.match(allowed.outputs, /^mode=manual-preflight$/m);
   assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\] \}\)/);
-  assert.match(workflow, /no_live_exact_market_opportunity/);
   assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
+    { FORCE_DISCOVERY_INPUT: "true" },
+  ]) {
+    assert.notEqual(runContract({ MANUAL_OPERATION: "exact-market-preflight", ...invalid }).status, 0);
+  }
 });
 
-test("the authorized one-off payload is NFL-only and process-locally bypasses only discovery cadence", () => {
-  assert.match(workflow, /MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"/);
-  assert.match(workflow, /REVIEWED_SHA="667c13ac455786210618ecfd9a9af65cfb56cad4"/);
-  assert.match(workflow, /FORCE_DISCOVERY: \$\{\{ github\.event\.client_payload\.manual_validation_force_discovery \}\}/);
-  assert.match(workflow, /\[ "\$FORCE_DISCOVERY" != "true" \] \|\| \[ "\$VALIDATION_SPORT" != "NFL" \]/);
-  assert.match(workflow, /force_discovery=true/);
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY:\s*\$\{\{\s*steps\.contract\.outputs\.force_discovery\s*\}\}/);
+test("superseded repository_dispatch manual payload is explicitly rejected; ordinary paused wakes still skip checkout", () => {
+  assert.doesNotMatch(workflow, new RegExp(retiredSha));
+  const retired = runContract({
+    TRIGGER: "repository_dispatch",
+    SCHEDULER_ENABLED: "false",
+    MANUAL_VALIDATION: "true",
+    EVENT_TYPE: "covered2-wnba-refresh",
+    SCHEMA: "covered2-manual-validation/v1",
+    SOURCE: "owner-manual-validation",
+    SENDER: "CoreyTenacity",
+    EXPECTED_SHA: retiredSha,
+  });
+  assert.notEqual(retired.status, 0);
+  assert.match(retired.diagnostics, /legacy repository_dispatch manual-validation contract is retired/);
+
+  const ordinary = runContract({ TRIGGER: "repository_dispatch", SCHEDULER_ENABLED: "false", MANUAL_VALIDATION: "false" });
+  assert.equal(ordinary.status, 0);
+  assert.match(ordinary.outputs, /^skip=true$/m);
+  const gate = workflow.indexOf("C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout.");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  assert.ok(gate >= 0 && checkout > gate);
+});
+
+test("certification uses the deployed private one-observation CLI and only process-local write permission", () => {
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_PERSISTENT_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
+  assert.match(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
+  assert.match(workflow, /run-covered2-certification-validation\.mjs --sport "\$SPORT" --market "\$MARKET" --scoredPropId "\$SCORED_PROP_ID"/);
+  assert.doesNotMatch(workflow, /buildCoveredPicksBoard|listCovered2CatalogProps/);
+  assert.match(workflow, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+});
+
+test("blocked readiness markets stay outside the receiver allowlist, including provisional WNBA Points", () => {
+  for (const pair of blockedPairs) assert.doesNotMatch(workflow, new RegExp(pair[0] + ":" + pair[1]));
+  assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
+});
+
+test("manual/scheduled concurrency remains isolated, non-cancelling, and no cron is added", () => {
+  assert.match(workflow, /group:\s*\$\{\{\s*github\.event\.client_payload\.manual_validation\s*==\s*true\s*&&\s*'covered2-wnba-refresh-manual-validation'\s*\|\|\s*'covered2-wnba-refresh'\s*\}\}/);
   assert.match(workflow, /cancel-in-progress:\s*false/);
-  assert.doesNotMatch(workflow, /COVERED2_[A-Z_]*(?:CAP|HORIZON|WINDOW)[A-Z_]*\s*:/i);
-  assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
-});
-
-test("force-discovery is explicit, NFL-only, one-off, and does not change provider or cadence limits", () => {
-  assert.match(workflow, /VALIDATION_MODE: \$\{\{ github\.event\.client_payload\.manual_validation_mode \}\}/);
-  assert.match(workflow, /force-discovery\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-force-discovery-20260925"[\s\S]*FORCE_DISCOVERY" != "true"[\s\S]*VALIDATION_SPORT" != "NFL"/);
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY:\s*\$\{\{\s*steps\.contract\.outputs\.force_discovery\s*\}\}/);
-  assert.doesNotMatch(workflow, /COVERED2_[A-Z_]*(?:CAP|HORIZON|WINDOW)[A-Z_]*\s*:/i);
-  assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
-  assert.match(workflow, /COVERED2_SCHEDULER_CADENCE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULER_CADENCE\s*\}\}/);
-});
-
-test("current-inventory validation is NFL-only and does not bypass ingestion cadence", () => {
-  assert.match(workflow, /current-inventory\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-current-inventory-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"/);
-  assert.match(workflow, /current-inventory\)[\s\S]*mode=manual-validation[\s\S]*force_discovery=false/);
-  assert.match(workflow, /SCHEDULER_ENABLED" != "false"/);
-  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED" != "false"/);
-});
-
-test("manual certification is a separate one-observation step and only sets a process-local ledger variable", () => {
-  assert.match(workflow, /certification-one-observation\)[\s\S]*MANUAL_VALIDATION_ID" != "covered-nfl-certification-one-20260925"[\s\S]*FORCE_DISCOVERY" != "false"[\s\S]*VALIDATION_SPORT" != "NFL"/);
-  assert.match(workflow, /mode == 'manual-certification'[\s\S]*buildCoveredPicksBoard/);
-  assert.match(workflow, /certification_expected_exactly_one_observation/);
-  assert.match(workflow, /certified: diagnostics\.certifiedCount/);
-  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
-  assert.match(workflow, /if:\s*steps\.contract\.outputs\.mode == 'manual-certification'/);
-  assert.match(workflow, /if:\s*steps\.contract\.outputs\.skip != 'true' && steps\.contract\.outputs\.mode != 'manual-certification'/);
-  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED" != "false"/);
-  assert.match(workflow, /SCHEDULER_ENABLED" != "false"/);
-});
-
-test("workflow does not change persistent gate values or enable certification", () => {
-  assert.doesNotMatch(workflow, /gh\s+variable\s+set|gh\s+api\s+--method\s+(PATCH|POST|PUT|DELETE)/i);
-  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"true"/);
-  assert.match(workflow, /CERTIFICATION_LEDGER_ENABLED: \$\{\{ vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED \}\}/);
+  assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
