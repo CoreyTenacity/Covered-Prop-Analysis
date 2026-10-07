@@ -42,6 +42,8 @@ test("workflow is manual-only and its one operation is the exact schedule comman
   assert.match(workflow, /Read-only NFL identity prerequisite check/);
   assert.match(workflow, /date -u --iso-8601=ns/);
   assert.match(workflow, /fetchFootballSportsWithTimeProbe/);
+  assert.match(workflow, /Check out the exact public workflow revision for its clock probe[\s\S]*?ref: \$\{\{ github\.sha \}\}[\s\S]*?path: public-diagnostics[\s\S]*?sparse-checkout: scripts\/supabase-time-probe\.mjs/);
+  assert.match(workflow, /\.\.\/public-diagnostics\/scripts\/supabase-time-probe\.mjs/);
   assert.match(workflow, /supabase-time-preflight/);
   assert.match(workflow, /supabase_read_only_time_preflight_failed/);
   assert.match(workflow, /Read-only 14-day future NFL event census/);

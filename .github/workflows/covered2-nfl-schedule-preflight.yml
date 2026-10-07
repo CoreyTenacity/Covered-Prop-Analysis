@@ -74,6 +74,16 @@ jobs:
         working-directory: private-covered
         run: pnpm install --frozen-lockfile
 
+      - name: Check out the exact public workflow revision for its clock probe
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: public-diagnostics
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/supabase-time-probe.mjs
+          sparse-checkout-cone-mode: false
+
       - name: Read-only NFL identity prerequisite check
         working-directory: private-covered
         env:
@@ -84,7 +94,7 @@ jobs:
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs
           --input-type=module -e '
           import { selectRows } from "./lib/db/supabase-server.ts";
-          import { fetchFootballSportsWithTimeProbe } from "../scripts/supabase-time-probe.mjs";
+          import { fetchFootballSportsWithTimeProbe } from "../public-diagnostics/scripts/supabase-time-probe.mjs";
           let sports;
           try {
             const probe = await fetchFootballSportsWithTimeProbe({ supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL, apiKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
