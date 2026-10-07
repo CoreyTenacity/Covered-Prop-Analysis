@@ -80,11 +80,21 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: >-
+          date -u --iso-8601=ns &&
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs
           --input-type=module -e '
           import { selectRows } from "./lib/db/supabase-server.ts";
-          const [sports, leagues, teams, mappings] = await Promise.all([
-            selectRows("sports", { select: "id,code", filters: [{ column: "id", value: "football" }], limit: 2 }),
+          import { fetchFootballSportsWithTimeProbe } from "../scripts/supabase-time-probe.mjs";
+          let sports;
+          try {
+            const probe = await fetchFootballSportsWithTimeProbe({ supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL, apiKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
+            console.log(JSON.stringify({ phase: "supabase-time-preflight", ...probe.diagnostics }));
+            sports = probe.rows;
+          } catch (error) {
+            console.log(JSON.stringify({ phase: "supabase-time-preflight", diagnostics: error?.diagnostics ?? null, failure: error?.code ?? "safe_probe_failed" }));
+            throw new Error("supabase_read_only_time_preflight_failed");
+          }
+          const [leagues, teams, mappings] = await Promise.all([
             selectRows("leagues", { select: "id,sport_id,code", filters: [{ column: "id", value: "nfl" }], limit: 2 }),
             selectRows("teams", { select: "id,sport_id,league_id,code,abbreviation,external_ids", filters: [{ column: "league_id", value: "nfl" }], limit: 65 }),
             selectRows("source_mappings", { select: "external_id,entity_id,league_id,provider,entity_type", filters: [{ column: "provider", value: "nflverse" }, { column: "entity_type", value: "team" }, { column: "league_id", value: "nfl" }], limit: 65 }),

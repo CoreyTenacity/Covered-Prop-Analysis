@@ -40,9 +40,24 @@ test("workflow is manual-only and its one operation is the exact schedule comman
   assert.doesNotMatch(workflow, /jobs:\n[\s\S]*?\n    env:\n[\s\S]*?SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(workflow, /Run the single bounded NFL schedule-only command[\s\S]*?SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(workflow, /Read-only NFL identity prerequisite check/);
+  assert.match(workflow, /date -u --iso-8601=ns/);
+  assert.match(workflow, /fetchFootballSportsWithTimeProbe/);
+  assert.match(workflow, /supabase-time-preflight/);
+  assert.match(workflow, /supabase_read_only_time_preflight_failed/);
   assert.match(workflow, /Read-only 14-day future NFL event census/);
   assert.match(workflow, /refreshableStatuses = new Set\(\["scheduled", "pre", "pregame"\]\)/);
   assert.equal(runGuard().status, 0);
+});
+
+test("time probe reports only clock metadata and fails closed on JWT/server skew", () => {
+  const probe = readFileSync(new URL("../../scripts/supabase-time-probe.mjs", import.meta.url), "utf8");
+  assert.match(probe, /MAX_RUNNER_SERVER_SKEW_MS = 30_000/);
+  assert.match(probe, /MAX_FUTURE_IAT_SKEW_MS = 5_000/);
+  assert.match(probe, /jwtIatUtc/);
+  assert.match(probe, /jwtExpUtc/);
+  assert.match(probe, /supabaseDateHeader/);
+  assert.doesNotMatch(probe, /console\.log\([^)]*apiKey/);
+  assert.doesNotMatch(probe, /console\.log\([^)]*response\.text/);
 });
 
 test("wrong actor/ref/SHA/pin or any enabled persistent gate is rejected", () => {
