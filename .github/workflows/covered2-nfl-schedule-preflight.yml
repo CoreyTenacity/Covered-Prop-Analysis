@@ -170,7 +170,7 @@ jobs:
           const refreshableStatuses = new Set(["scheduled", "pre", "pregame"]);
           const upcoming = rows.filter((row) => Date.parse(row.start_time) > now.getTime() && refreshableStatuses.has(String(row.status).toLowerCase())).sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time));
           const otherFutureStatusCount = rows.filter((row) => Date.parse(row.start_time) > now.getTime() && !refreshableStatuses.has(String(row.status).toLowerCase())).length;
-          const fmt = (value) => value ? new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", dateStyle: "medium", timeStyle: "short", timeZoneName: "short" }).format(new Date(value)) : null;
+          const fmt = (value) => value ? new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(value)) : null;
           console.log(JSON.stringify({ status: "read-only", windowStartET: dateInZone(now), windowEndET: dateInZone(end), futureCanonicalNflEvents: upcoming.length, earliestUpcomingET: fmt(upcoming[0]?.start_time), latestUpcomingET: fmt(upcoming.at(-1)?.start_time), excludedFutureEventsWithNonRefreshableStatus: otherFutureStatusCount, ambiguousIdentityCount, duplicateIdentityCount: duplicateCount, writes: 0 }));
           if (duplicateCount || ambiguousIdentityCount) throw new Error("future_nfl_event_identity_census_failed");
           '

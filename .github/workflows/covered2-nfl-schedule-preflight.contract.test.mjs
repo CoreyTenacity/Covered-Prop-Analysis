@@ -48,6 +48,8 @@ test("workflow is manual-only and its one operation is the exact schedule comman
   assert.match(workflow, /supabase_read_only_time_preflight_failed/);
   assert.match(workflow, /Read-only 14-day future NFL event census/);
   assert.match(workflow, /refreshableStatuses = new Set\(\["scheduled", "pre", "pregame"\]\)/);
+  assert.match(workflow, /month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short"/);
+  assert.doesNotMatch(workflow, /dateStyle: "medium", timeStyle: "short", timeZoneName: "short"/);
   assert.equal(runGuard().status, 0);
 });
 
