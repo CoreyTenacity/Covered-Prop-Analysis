@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_SHA="5fad14a219b164ac9cd99877b601048449c50952"
+          EXPECTED_SHA="8ad98c5f7ab7667fa0d2186be8ea76ee2adc0dba"
           test "$REF_NAME" = "main"
           test "$ACTOR" = "CoreyTenacity"
           test "$RELEASE_SHA" = "$EXPECTED_SHA"

@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-nfl-schedule-preflight.yml", import.meta.url), "utf8");
-const expectedSha = "5fad14a219b164ac9cd99877b601048449c50952";
+const expectedSha = "8ad98c5f7ab7667fa0d2186be8ea76ee2adc0dba";
 const start = workflow.indexOf("      - name: Validate owner, immutable release, and paused gates");
 const run = workflow.indexOf("        run: |\n", start);
 assert.notEqual(start, -1);
