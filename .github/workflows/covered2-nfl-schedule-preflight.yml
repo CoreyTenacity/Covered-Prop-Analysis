@@ -1,0 +1,160 @@
+name: Covered 2 — one-shot NFL schedule preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact deployed private Covered release SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: covered2-nfl-schedule-preflight
+  cancel-in-progress: false
+
+jobs:
+  schedule-preflight:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Validate owner, immutable release, and paused gates
+        env:
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          PRIVATE_PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          CERTIFICATION_WRITE_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_SHA="5fad14a219b164ac9cd99877b601048449c50952"
+          test "$REF_NAME" = "main"
+          test "$ACTOR" = "CoreyTenacity"
+          test "$RELEASE_SHA" = "$EXPECTED_SHA"
+          test "$PRIVATE_PIN" = "$EXPECTED_SHA"
+          test "$SCHEDULER_ENABLED" = "false"
+          test "$CERTIFICATION_WRITE_ENABLED" = "false"
+          echo "Accepted one owner-triggered NFL schedule-only preflight for the exact pinned release; recurring and certification-write gates remain false."
+
+      - name: Check out exact private release
+        uses: actions/checkout@v4
+        with:
+          repository: CoreyTenacity/Covered
+          ref: ${{ inputs.release_sha }}
+          token: ${{ secrets.COVERED_PRIVATE_REPO_TOKEN }}
+          path: private-covered
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact private checkout
+        working-directory: private-covered
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: private-covered/pnpm-lock.yaml
+
+      - name: Install pinned private runtime
+        working-directory: private-covered
+        run: pnpm install --frozen-lockfile
+
+      - name: Read-only NFL identity prerequisite check
+        working-directory: private-covered
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: >-
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs
+          --input-type=module -e '
+          import { selectRows } from "./lib/db/supabase-server.ts";
+          const [sports, leagues, teams, mappings] = await Promise.all([
+            selectRows("sports", { select: "id,code", filters: [{ column: "id", value: "football" }], limit: 2 }),
+            selectRows("leagues", { select: "id,sport_id,code", filters: [{ column: "id", value: "nfl" }], limit: 2 }),
+            selectRows("teams", { select: "id,sport_id,league_id,code,abbreviation,external_ids", filters: [{ column: "league_id", value: "nfl" }], limit: 65 }),
+            selectRows("source_mappings", { select: "external_id,entity_id,league_id,provider,entity_type", filters: [{ column: "provider", value: "nflverse" }, { column: "entity_type", value: "team" }, { column: "league_id", value: "nfl" }], limit: 65 }),
+          ]);
+          if (sports.length !== 1 || sports[0]?.id !== "football" || leagues.length !== 1 || leagues[0]?.sport_id !== "football") throw new Error("canonical_football_nfl_missing_or_ambiguous");
+          if (teams.length > 64 || mappings.length > 64) throw new Error("nfl_identity_read_cap_exceeded");
+          if (teams.some((row) => row.sport_id !== "football" || row.league_id !== "nfl")) throw new Error("noncanonical_nfl_team_row");
+          const teamIds = new Set(teams.map((row) => row.id));
+          const seenAliases = new Map();
+          for (const team of teams) for (const alias of [team.abbreviation, team.code, team.external_ids?.nflverse]) {
+            if (typeof alias !== "string" || !alias.trim()) continue;
+            const key = alias.trim().toUpperCase();
+            const owner = seenAliases.get(key);
+            if (owner && owner !== team.id) throw new Error("duplicate_or_ambiguous_nfl_team_alias");
+            seenAliases.set(key, team.id);
+          }
+          const mappingIds = new Set();
+          for (const mapping of mappings) {
+            if (!teamIds.has(mapping.entity_id) || !mapping.external_id || mappingIds.has(mapping.external_id)) throw new Error("dangling_or_duplicate_nflverse_team_mapping");
+            mappingIds.add(mapping.external_id);
+          }
+          console.log(JSON.stringify({ status: "passed", tablesRead: ["sports", "leagues", "teams", "source_mappings"], nflTeamRows: teams.length, nflverseTeamMappings: mappings.length, missingInWindowTeamsMayBeCreatedFromSource: true, writes: 0 }));
+          '
+
+      - name: Run the single bounded NFL schedule-only command
+        working-directory: private-covered
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+        run: pnpm run covered2:nfl-schedule-preflight
+
+      - name: Read-only 14-day future NFL event census
+        working-directory: private-covered
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: >-
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs
+          --input-type=module -e '
+          import { selectRows } from "./lib/db/supabase-server.ts";
+          const now = new Date();
+          const dateInZone = (date) => {
+            const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+            const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+            return `${values.year}-${values.month}-${values.day}`;
+          };
+          const end = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+          const rows = await selectRows("events", { select: "id,scheduled_date,start_time,status,home_team_id,away_team_id,provider_event_ids", filters: [{ column: "league_id", value: "nfl" }, { column: "scheduled_date", operator: "gte", value: dateInZone(now) }, { column: "scheduled_date", operator: "lte", value: dateInZone(end) }], orderBy: "start_time.asc", limit: 65 });
+          if (rows.length > 64) throw new Error("future_nfl_event_census_cap_exceeded");
+          const seenSourceIds = new Set(); const seenTeamDates = new Set(); let duplicateCount = 0; let ambiguousIdentityCount = 0;
+          for (const row of rows) {
+            const sourceId = row.provider_event_ids?.nflverse;
+            const teamDate = `${row.scheduled_date}|${row.away_team_id}|${row.home_team_id}`;
+            if (sourceId && seenSourceIds.has(sourceId)) duplicateCount++;
+            if (sourceId) seenSourceIds.add(sourceId);
+            if (seenTeamDates.has(teamDate)) duplicateCount++;
+            seenTeamDates.add(teamDate);
+            if (!row.home_team_id || !row.away_team_id || row.home_team_id === row.away_team_id) ambiguousIdentityCount++;
+          }
+          const refreshableStatuses = new Set(["scheduled", "pre", "pregame"]);
+          const upcoming = rows.filter((row) => Date.parse(row.start_time) > now.getTime() && refreshableStatuses.has(String(row.status).toLowerCase())).sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time));
+          const otherFutureStatusCount = rows.filter((row) => Date.parse(row.start_time) > now.getTime() && !refreshableStatuses.has(String(row.status).toLowerCase())).length;
+          const fmt = (value) => value ? new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", dateStyle: "medium", timeStyle: "short", timeZoneName: "short" }).format(new Date(value)) : null;
+          console.log(JSON.stringify({ status: "read-only", windowStartET: dateInZone(now), windowEndET: dateInZone(end), futureCanonicalNflEvents: upcoming.length, earliestUpcomingET: fmt(upcoming[0]?.start_time), latestUpcomingET: fmt(upcoming.at(-1)?.start_time), excludedFutureEventsWithNonRefreshableStatus: otherFutureStatusCount, ambiguousIdentityCount, duplicateIdentityCount: duplicateCount, writes: 0 }));
+          if (duplicateCount || ambiguousIdentityCount) throw new Error("future_nfl_event_identity_census_failed");
+          '
+
+      - name: Remove private checkout
+        if: always()
+        run: rm -rf private-covered
