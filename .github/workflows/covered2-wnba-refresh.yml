@@ -391,7 +391,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SPORT: ${{ steps.contract.outputs.sport }}
           MARKET: ${{ steps.contract.outputs.market }}
-        run: pnpm run covered2:certify-current-analysis -- --sport "$SPORT" --market "$MARKET"
+        run: node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-current-analysis-certification.mjs --sport "$SPORT" --market "$MARKET"
 
       - name: Remove the private checkout
         if: always()

@@ -155,7 +155,7 @@ test("current-analysis certification accepts only one exact NFL receiving-yards 
   assert.doesNotMatch(accepted.outputs, /^scored_prop_id=/m);
   assert.match(workflow, /mode != 'manual-current-analysis-certification'/);
   assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"false"/);
-  assert.ok(workflow.includes('run: pnpm run covered2:certify-current-analysis -- --sport "$SPORT" --market "$MARKET"'));
+  assert.ok(workflow.includes('run: node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-current-analysis-certification.mjs --sport "$SPORT" --market "$MARKET"'));
   for (const invalid of [
     { VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "rushing_yards" },
     { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
