@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "0d7551fb7ff0ed9bd410ea2b0cdd57f510bfee72";
+const reviewedSha = "35e5731252c51575bf3c662853feced647cb0233";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -140,6 +140,35 @@ test("all eight ready markets route to certification only with one exact existin
   }).status, 0);
 });
 
+test("current-analysis certification accepts only one exact NFL receiving-yards run and never discovers", () => {
+  const accepted = runContract({
+    MANUAL_OPERATION: "certification-one-current-analysis",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+    FORCE_DISCOVERY_INPUT: "false",
+    SCORED_PROP_ID_INPUT: "",
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-current-analysis-certification$/m);
+  assert.match(accepted.outputs, /^sport=NFL$/m);
+  assert.match(accepted.outputs, /^market=receiving_yards$/m);
+  assert.doesNotMatch(accepted.outputs, /^scored_prop_id=/m);
+  assert.match(workflow, /mode != 'manual-current-analysis-certification'/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*"false"/);
+  assert.ok(workflow.includes('run: pnpm run covered2:certify-current-analysis -- --sport "$SPORT" --market "$MARKET"'));
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "rushing_yards" },
+    { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
+    { FORCE_DISCOVERY_INPUT: "true" },
+    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
+  ]) {
+    const result = runContract({ MANUAL_OPERATION: "certification-one-current-analysis", ...invalid });
+    assert.notEqual(result.status, 0, JSON.stringify(invalid));
+    assert.match(result.diagnostics, /Current-analysis certification is restricted/);
+  }
+  assert.match(workflow, /Certify one current NFL receiving-yards analysis/);
+  assert.ok(workflow.includes("steps.contract.outputs.mode == 'manual-current-analysis-certification'"));
+});
 test("read-only preflight is limited to one NFL market and cannot fall through to discovery", () => {
   const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
   assert.equal(allowed.status, 0);

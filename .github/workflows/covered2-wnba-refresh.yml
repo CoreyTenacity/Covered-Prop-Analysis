@@ -38,6 +38,7 @@ on:
           - exact-market-preflight
           - exact-market-discovery
           - certification-one-observation
+          - certification-one-current-analysis
       release_sha:
         description: "Reviewed full Covered release SHA"
         required: true
@@ -143,7 +144,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="0d7551fb7ff0ed9bd410ea2b0cdd57f510bfee72"
+            REVIEWED_RELEASE_SHA="35e5731252c51575bf3c662853feced647cb0233"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
@@ -189,6 +190,16 @@ jobs:
                   exit 1
                 fi
                 echo "mode=manual-certification" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                ;;
+              certification-one-current-analysis)
+                if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "NFL:receiving_yards" ]; then
+                  echo "::error::Current-analysis certification is restricted to one fresh NFL receiving-yards candidate without discovery or an external scored-prop ID."
+                  exit 1
+                fi
+                echo "mode=manual-current-analysis-certification" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 ;;
               *) echo "::error::Unsupported exact-market operation."; exit 1 ;;
@@ -316,7 +327,7 @@ jobs:
           '
 
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-preflight'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -362,6 +373,25 @@ jobs:
           SCORED_PROP_ID: ${{ steps.contract.outputs.scored_prop_id }}
         run: |
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-certification-validation.mjs --sport "$SPORT" --market "$MARKET" --scoredPropId "$SCORED_PROP_ID"
+
+      - name: Certify one current NFL receiving-yards analysis
+        if: steps.contract.outputs.mode == 'manual-current-analysis-certification'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: "false"
+          COVERED2_CERTIFICATION_LEDGER_PERSISTENT_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          COVERED2_MANUAL_CERTIFICATION_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
+          COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SPORT: ${{ steps.contract.outputs.sport }}
+          MARKET: ${{ steps.contract.outputs.market }}
+        run: pnpm run covered2:certify-current-analysis -- --sport "$SPORT" --market "$MARKET"
 
       - name: Remove the private checkout
         if: always()
