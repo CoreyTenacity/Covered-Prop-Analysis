@@ -143,7 +143,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="8ad98c5f7ab7667fa0d2186be8ea76ee2adc0dba"
+            REVIEWED_RELEASE_SHA="0d7551fb7ff0ed9bd410ea2b0cdd57f510bfee72"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
