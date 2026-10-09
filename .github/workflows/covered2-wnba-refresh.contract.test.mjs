@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "84bba2b87264ec9da6081c8ab04474079642c4a8";
+const reviewedSha = "f79174e5b60216f482ea43587ab4fbdb33d79d3d";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -126,6 +126,7 @@ test("published board refresh is one owner-gated NFL receiving-yards run with sc
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:\s*\$\{\{\s*steps\.contract\.outputs\.publish_board\s*\}\}/);
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
   assert.match(workflow, /COVERED2_SCHEDULED_MARKET_SCOPE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULED_MARKET_SCOPE\s*\}\}/);
+  assert.match(workflow, /COVERED2_NFL_RECEIVING_PILOT_START_AT:\s*\$\{\{\s*vars\.COVERED2_NFL_RECEIVING_PILOT_START_AT\s*\}\}/);
   assert.match(workflow, /COVERED2_NFL_RECEIVING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'receiving_yards'.*'false'.*vars\.COVERED2_NFL_RECEIVING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_RUSHING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'rushing_yards'.*'false'.*vars\.COVERED2_NFL_RUSHING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_PASSING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'passing_yards'.*'false'.*vars\.COVERED2_NFL_PASSING_YARDS_REFRESH/);

@@ -110,6 +110,7 @@ jobs:
       COVERED2_EVENT_AWARE_RUNTIME_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_RUNTIME_ENABLED }}
       COVERED2_EVENT_AWARE_SHADOW_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_SHADOW_ENABLED }}
       COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+      COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
       COVERED2_REFRESH_RUNTIME: "github-actions-c2-wnba"
     steps:
       - name: Resolve and validate the C2 dispatch contract
@@ -146,7 +147,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="84bba2b87264ec9da6081c8ab04474079642c4a8"
+            REVIEWED_RELEASE_SHA="f79174e5b60216f482ea43587ab4fbdb33d79d3d"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
@@ -359,6 +360,7 @@ jobs:
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
           COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
+          COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
           COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
           COVERED2_MLB_MARKET_GAMELOG: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_GAMELOG }}
