@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "a87ff51725c4c1a6c4ff0c774afa99ca780eb736";
+const reviewedSha = "7ff5a569def51b35ffb66424d8b1e94ca9e6f541";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -54,6 +54,7 @@ function runContract(overrides = {}) {
     CADENCE: "0,30 11-23,0-4 * * *",
     DEPLOYMENT_AUTHORIZED: "true",
     CERTIFICATION_LEDGER_ENABLED: "false",
+    BOARD_BUILD_ENABLED: "true",
     MANUAL_OPERATION: "exact-market-discovery",
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
@@ -108,6 +109,38 @@ test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact disc
     assert.notEqual(result.status, 0, sport + "/" + market + " must fail closed");
     assert.match(result.diagnostics, /Unsupported exact sport\/market pair/);
   }
+});
+
+test("published board refresh is one owner-gated NFL receiving-yards run with scheduler and persistent writes off", () => {
+  const accepted = runContract({
+    MANUAL_OPERATION: "exact-market-board-refresh",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+    FORCE_DISCOVERY_INPUT: "true",
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-board-refresh$/m);
+  assert.match(accepted.outputs, /^manual_validation=true$/m);
+  assert.match(accepted.outputs, /^publish_board=true$/m);
+  assert.match(accepted.outputs, /^force_discovery=true$/m);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:\s*\$\{\{\s*steps\.contract\.outputs\.publish_board\s*\}\}/);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
+  assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "rushing_yards" },
+    { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
+    { FORCE_DISCOVERY_INPUT: "false" },
+    { BOARD_BUILD_ENABLED: "false" },
+  ]) {
+    const result = runContract({ MANUAL_OPERATION: "exact-market-board-refresh", ...invalid });
+    assert.notEqual(result.status, 0, JSON.stringify(invalid));
+    assert.match(result.diagnostics, /Published one-shot board refresh requires exact NFL receiving_yards/);
+  }
+  assert.match(workflow, /exact-market-board-refresh/);
+  assert.match(workflow, /BOARD_BUILD_ENABLED:\s*\$\{\{\s*vars\.COVERED2_PICKS_BOARD_BUILD\s*\}\}/);
+  assert.match(workflow, /cancel-in-progress:\s*false/);
+  assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
 
 test("all eight ready markets route to certification only with one exact existing scored_prop UUID and no bypass", () => {

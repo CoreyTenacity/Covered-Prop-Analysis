@@ -37,6 +37,7 @@ on:
         options:
           - exact-market-preflight
           - exact-market-discovery
+          - exact-market-board-refresh
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -136,6 +137,7 @@ jobs:
           CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
           CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          BOARD_BUILD_ENABLED: ${{ vars.COVERED2_PICKS_BOARD_BUILD }}
           MANUAL_OPERATION: ${{ inputs.operation }}
           RELEASE_SHA_INPUT: ${{ inputs.release_sha }}
           VALIDATION_SPORT_INPUT: ${{ inputs.validation_sport }}
@@ -144,7 +146,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="a87ff51725c4c1a6c4ff0c774afa99ca780eb736"
+            REVIEWED_RELEASE_SHA="7ff5a569def51b35ffb66424d8b1e94ca9e6f541"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
@@ -183,6 +185,17 @@ jobs:
                 echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=$FORCE_DISCOVERY_INPUT" >> "$GITHUB_OUTPUT"
                 ;;
+              exact-market-board-refresh)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "NFL:receiving_yards" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "true" ] \
+                  || [ "$BOARD_BUILD_ENABLED" != "true" ]; then
+                  echo "::error::Published one-shot board refresh requires exact NFL receiving_yards and the explicit one-off discovery control."
+                  exit 1
+                fi
+                echo "mode=manual-board-refresh" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=true" >> "$GITHUB_OUTPUT"
+                echo "publish_board=true" >> "$GITHUB_OUTPUT"
+                ;;
               certification-one-observation)
                 if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
                   || ! printf '%s' "$SCORED_PROP_ID_INPUT" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
@@ -210,6 +223,13 @@ jobs:
             if [ "$MANUAL_OPERATION" = "certification-one-observation" ]; then
               echo "scored_prop_id=$SCORED_PROP_ID_INPUT" >> "$GITHUB_OUTPUT"
             fi
+            if [ "$MANUAL_OPERATION" != "exact-market-board-refresh" ]; then
+              echo "publish_board=false" >> "$GITHUB_OUTPUT"
+            fi
+            case "$MANUAL_OPERATION" in
+              exact-market-discovery|exact-market-board-refresh) echo "manual_validation=true" >> "$GITHUB_OUTPUT" ;;
+              *) echo "manual_validation=false" >> "$GITHUB_OUTPUT" ;;
+            esac
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "exact_manual=true" >> "$GITHUB_OUTPUT"
             echo "EXACT MARKET dispatch accepted: one owner-gated operation, one reviewed release SHA, one sport, and one market."
@@ -332,11 +352,12 @@ jobs:
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
           INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
-          COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.mode == 'manual-validation' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
-          COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.mode == 'manual-validation' && 'true' || 'false' }}
+          COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.manual_validation == 'true' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
+          COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.manual_validation }}
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
+          COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
           COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
           COVERED2_MLB_MARKET_GAMELOG: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_GAMELOG }}
