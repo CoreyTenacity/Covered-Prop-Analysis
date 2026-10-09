@@ -358,6 +358,7 @@ jobs:
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
+          COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
           COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}
           COVERED2_MLB_MARKET_GAMELOG: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_GAMELOG }}

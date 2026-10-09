@@ -125,6 +125,7 @@ test("published board refresh is one owner-gated NFL receiving-yards run with sc
   assert.match(accepted.outputs, /^force_discovery=true$/m);
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:\s*\$\{\{\s*steps\.contract\.outputs\.publish_board\s*\}\}/);
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
+  assert.match(workflow, /COVERED2_SCHEDULED_MARKET_SCOPE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULED_MARKET_SCOPE\s*\}\}/);
   assert.match(workflow, /COVERED2_NFL_RECEIVING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'receiving_yards'.*'false'.*vars\.COVERED2_NFL_RECEIVING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_RUSHING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'rushing_yards'.*'false'.*vars\.COVERED2_NFL_RUSHING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_PASSING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'passing_yards'.*'false'.*vars\.COVERED2_NFL_PASSING_YARDS_REFRESH/);
