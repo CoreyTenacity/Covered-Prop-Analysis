@@ -146,7 +146,7 @@ jobs:
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="7ff5a569def51b35ffb66424d8b1e94ca9e6f541"
+            REVIEWED_RELEASE_SHA="84bba2b87264ec9da6081c8ab04474079642c4a8"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
@@ -364,10 +364,10 @@ jobs:
           COVERED2_MLB_MARKET_OPPONENT: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_MARKET_OPPONENT }}
           COVERED2_MLB_PLAYER_LOG_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_LOG_REFRESH }}
           COVERED2_MLB_LINEUP_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_LINEUP_REFRESH }}
-          COVERED2_NFL_RECEPTIONS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
-          COVERED2_NFL_RECEIVING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
-          COVERED2_NFL_RUSHING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
-          COVERED2_NFL_PASSING_YARDS_REFRESH: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'NFL' && 'false' || vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
+          COVERED2_NFL_RECEPTIONS_REFRESH: ${{ steps.contract.outputs.manual_validation == 'true' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'receptions' && 'true' || steps.contract.outputs.manual_validation == 'true' && 'false' || vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
+          COVERED2_NFL_RECEIVING_YARDS_REFRESH: ${{ steps.contract.outputs.manual_validation == 'true' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'receiving_yards' && 'true' || steps.contract.outputs.manual_validation == 'true' && 'false' || vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
+          COVERED2_NFL_RUSHING_YARDS_REFRESH: ${{ steps.contract.outputs.manual_validation == 'true' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'rushing_yards' && 'true' || steps.contract.outputs.manual_validation == 'true' && 'false' || vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
+          COVERED2_NFL_PASSING_YARDS_REFRESH: ${{ steps.contract.outputs.manual_validation == 'true' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'passing_yards' && 'true' || steps.contract.outputs.manual_validation == 'true' && 'false' || vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
         run: |
           if [ "$COVERED2_MANUAL_VALIDATION" = "true" ]; then
             echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
