@@ -68,6 +68,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -113,6 +114,109 @@ jobs:
       COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
       COVERED2_REFRESH_RUNTIME: "github-actions-c2-wnba"
     steps:
+      - name: Count bounded natural NFL Receiving Yards pilot attempts
+        id: pilot_attempt_guard
+        env:
+          TRIGGER: ${{ github.event_name }}
+          MANUAL_VALIDATION: ${{ github.event.client_payload.manual_validation }}
+          SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
+          RECEIVING_YARDS_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_YARDS_REFRESH }}
+          RECEPTIONS_ENABLED: ${{ vars.COVERED2_NFL_RECEPTIONS_REFRESH }}
+          RUSHING_YARDS_ENABLED: ${{ vars.COVERED2_NFL_RUSHING_YARDS_REFRESH }}
+          PASSING_YARDS_ENABLED: ${{ vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
+          CERTIFICATION_WRITE_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NBA_LIFECYCLE_ENABLED: ${{ vars.COVERED2_NBA_LIFECYCLE_ENABLED }}
+          PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Manual owner operations are governed by the contract step, not counted as natural pilot wakes.
+          if [ "$TRIGGER" != "repository_dispatch" ] || [ "$MANUAL_VALIDATION" = "true" ]; then
+            echo "pilot_attempt_guard=not_applicable" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$SCHEDULER_ENABLED" != "true" ]; then
+            echo "pilot_attempt_guard=scheduler_paused" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$MARKET_SCOPE" != "NFL:receiving_yards" ] \
+            || [ "$RECEIVING_YARDS_ENABLED" != "true" ] \
+            || [ "$RECEPTIONS_ENABLED" != "false" ] \
+            || [ "$RUSHING_YARDS_ENABLED" != "false" ] \
+            || [ "$PASSING_YARDS_ENABLED" != "false" ] \
+            || [ "$CERTIFICATION_WRITE_ENABLED" != "false" ] \
+            || [ "$NBA_LIFECYCLE_ENABLED" = "true" ]; then
+            echo "::error::Rejected bounded pilot: exact NFL receiving_yards scope and disabled sibling/write capabilities are required."
+            exit 1
+          fi
+
+          if ! printf '%s' "$PILOT_START_AT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?Z$'; then
+            echo "::error::Bounded NFL pilot start timestamp is missing or malformed."
+            exit 1
+          fi
+          START_EPOCH_MS="$(node -e 'const value = Date.parse(process.argv[1]); if (!Number.isFinite(value)) process.exit(1); process.stdout.write(String(value));' "$PILOT_START_AT")" || {
+            echo "::error::Bounded NFL pilot start timestamp is not a valid UTC instant."
+            exit 1
+          }
+          NOW_EPOCH_MS="$(node -e 'process.stdout.write(String(Date.now()))')"
+          if [ "$START_EPOCH_MS" -gt "$NOW_EPOCH_MS" ]; then
+            echo "::error::Bounded NFL pilot start timestamp is in the future."
+            exit 1
+          fi
+          if [ "$((NOW_EPOCH_MS - START_EPOCH_MS))" -ge 86400000 ]; then
+            echo "::error::Bounded NFL pilot window has expired."
+            exit 1
+          fi
+
+          API_URL="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/covered2-wnba-refresh.yml/runs"
+          RUN_HISTORY="$(curl --fail --silent --show-error --get \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --data-urlencode "event=repository_dispatch" \
+            --data-urlencode "created=>=$PILOT_START_AT" \
+            --data-urlencode "per_page=100" \
+            "$API_URL")" || {
+              echo "::error::Could not read bounded pilot wake history; failing closed before private checkout."
+              exit 1
+            }
+          ATTEMPT_SUMMARY="$(printf '%s' "$RUN_HISTORY" | node -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const [start, currentRunId] = process.argv.slice(1);
+            const result = JSON.parse(input);
+            if (!Array.isArray(result.workflow_runs) || !Number.isInteger(result.total_count) || result.total_count > 100) {
+              throw new Error("pilot_history_unbounded_or_invalid");
+            }
+            const startTime = Date.parse(start);
+            const runs = result.workflow_runs.filter((run) =>
+              run.event === "repository_dispatch" && Number.isFinite(Date.parse(run.created_at)) && Date.parse(run.created_at) >= startTime,
+            );
+            const attempts = runs.reduce((sum, run) => sum + Math.max(1, Number(run.run_attempt) || 1), 0);
+            const currentIncluded = runs.some((run) => String(run.id) === currentRunId);
+            process.stdout.write(`${attempts} ${currentIncluded ? "1" : "0"}`);
+          ' "$PILOT_START_AT" "$GITHUB_RUN_ID")" || {
+            echo "::error::Could not safely count bounded pilot wake history; failing closed before private checkout."
+            exit 1
+          }
+          read -r PRIOR_ATTEMPTS CURRENT_INCLUDED <<< "$ATTEMPT_SUMMARY"
+          if [ "$CURRENT_INCLUDED" = "1" ]; then
+            TOTAL_ATTEMPTS="$PRIOR_ATTEMPTS"
+          else
+            TOTAL_ATTEMPTS="$((PRIOR_ATTEMPTS + 1))"
+          fi
+          if [ "$TOTAL_ATTEMPTS" -gt 3 ]; then
+            echo "::error::Bounded NFL pilot exhausted its three natural wake attempts; refusing private checkout."
+            exit 1
+          fi
+          echo "pilot_attempt_guard=allowed" >> "$GITHUB_OUTPUT"
+          echo "pilot_attempt_number=$TOTAL_ATTEMPTS" >> "$GITHUB_OUTPUT"
+          echo "Bounded NFL pilot wake attempt $TOTAL_ATTEMPTS of 3 accepted; no pin value or token logged."
+
       - name: Resolve and validate the C2 dispatch contract
         id: contract
         env:
@@ -146,8 +250,8 @@ jobs:
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
+          REVIEWED_RELEASE_SHA="f79174e5b60216f482ea43587ab4fbdb33d79d3d"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
-            REVIEWED_RELEASE_SHA="f79174e5b60216f482ea43587ab4fbdb33d79d3d"
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
@@ -258,8 +362,16 @@ jobs:
             echo "::error::Rejected C2 dispatch slot."
             exit 1
           fi
-          if ! printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::Pinned private SHA is missing or malformed."
+          PIN_PRESENT=false
+          PIN_LENGTH="$(printf '%s' "$PIN" | wc -c | tr -d '[:space:]')"
+          PIN_FORMAT_VALID=false
+          PIN_MATCHES_REVIEWED=false
+          if [ -n "$PIN" ]; then PIN_PRESENT=true; fi
+          if printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then PIN_FORMAT_VALID=true; fi
+          if [ "$PIN" = "$REVIEWED_RELEASE_SHA" ]; then PIN_MATCHES_REVIEWED=true; fi
+          echo "C2 pin diagnostics: source=production_environment_variable present=$PIN_PRESENT length=$PIN_LENGTH format_valid=$PIN_FORMAT_VALID matches_reviewed_release=$PIN_MATCHES_REVIEWED"
+          if [ "$PIN_FORMAT_VALID" != "true" ] || [ "$PIN_MATCHES_REVIEWED" != "true" ]; then
+            echo "::error::Pinned private SHA is missing, malformed, or does not exactly match the reviewed release."
             exit 1
           fi
           if [ "$ALLOWLIST" != "corey093011@gmail.com" ] || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] || [ "$DEPLOYMENT_AUTHORIZED" != "true" ]; then
