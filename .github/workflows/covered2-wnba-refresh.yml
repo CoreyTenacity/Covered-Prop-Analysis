@@ -111,6 +111,7 @@ jobs:
       COVERED2_EVENT_AWARE_RUNTIME_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_RUNTIME_ENABLED }}
       COVERED2_EVENT_AWARE_SHADOW_ENABLED: ${{ vars.COVERED2_EVENT_AWARE_SHADOW_ENABLED }}
       COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+      COVERED2_NFL_RECEIVING_PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
       COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
       COVERED2_REFRESH_RUNTIME: "github-actions-c2-wnba"
     steps:
@@ -127,6 +128,7 @@ jobs:
           PASSING_YARDS_ENABLED: ${{ vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
           CERTIFICATION_WRITE_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
           NBA_LIFECYCLE_ENABLED: ${{ vars.COVERED2_NBA_LIFECYCLE_ENABLED }}
+          PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
           PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -151,6 +153,16 @@ jobs:
             || [ "$CERTIFICATION_WRITE_ENABLED" != "false" ] \
             || [ "$NBA_LIFECYCLE_ENABLED" = "true" ]; then
             echo "::error::Rejected bounded pilot: exact NFL receiving_yards scope and disabled sibling/write capabilities are required."
+            exit 1
+          fi
+
+          if [ "$PILOT_ENABLED" = "false" ]; then
+            echo "pilot_attempt_guard=normal_exact_market_recurrence" >> "$GITHUB_OUTPUT"
+            echo "Bounded NFL Receiving Yards pilot mode is explicitly disabled; exact-market normal recurrence remains gated by the validated scope and market capabilities."
+            exit 0
+          fi
+          if [ "$PILOT_ENABLED" != "true" ]; then
+            echo "::error::NFL Receiving Yards pilot mode must be exactly true or false."
             exit 1
           fi
 
@@ -250,7 +262,7 @@ jobs:
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
-          REVIEWED_RELEASE_SHA="f79174e5b60216f482ea43587ab4fbdb33d79d3d"
+          REVIEWED_RELEASE_SHA="398b5da02ac0554777738cc13d227f61e2267fc2"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -481,6 +493,7 @@ jobs:
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
           COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
+          COVERED2_NFL_RECEIVING_PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
           COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
           COVERED2_MLB_PLAYER_IDENTITY: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_PLAYER_IDENTITY }}

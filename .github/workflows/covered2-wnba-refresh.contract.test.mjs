@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "f79174e5b60216f482ea43587ab4fbdb33d79d3d";
+const reviewedSha = "398b5da02ac0554777738cc13d227f61e2267fc2";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -132,6 +132,7 @@ function runPilotGuard({ history = [], overrides = {} } = {}) {
     PASSING_YARDS_ENABLED: "false",
     CERTIFICATION_WRITE_ENABLED: "false",
     NBA_LIFECYCLE_ENABLED: "false",
+    PILOT_ENABLED: "true",
     PILOT_START_AT: start,
     MOCK_RUNS: JSON.stringify({ total_count: history.length, workflow_runs: history }),
     MOCK_CURL_MARKER: markerPath,
@@ -232,6 +233,20 @@ test("the outer pilot guard counts all natural wake attempts, including the curr
   assert.match(includesCurrent.outputs, /^pilot_attempt_number=1$/m);
 });
 
+test("normal exact-market recurrence requires explicit pilot=false and bypasses only the completed pilot counter", () => {
+  const normal = runPilotGuard({ overrides: { PILOT_ENABLED: "false", PILOT_START_AT: "2026-10-10T03:55:21.264Z" } });
+  assert.equal(normal.status, 0, normal.diagnostics);
+  assert.match(normal.outputs, /^pilot_attempt_guard=normal_exact_market_recurrence$/m);
+  assert.equal(normal.curlCalled, false, "normal recurrence must not query or consume bounded-pilot slots");
+
+  for (const value of ["", "TRUE", "yes", "0"]) {
+    const invalid = runPilotGuard({ overrides: { PILOT_ENABLED: value } });
+    assert.notEqual(invalid.status, 0, `pilot mode ${JSON.stringify(value)} must fail closed`);
+    assert.match(invalid.diagnostics, /pilot mode must be exactly true or false/);
+    assert.equal(invalid.curlCalled, false);
+  }
+});
+
 test("expired/invalid pilot windows, unsafe scope, and history failures fail closed before private checkout", () => {
   const expired = runPilotGuard({ overrides: { PILOT_START_AT: new Date(Date.now() - 86_401_000).toISOString() } });
   assert.notEqual(expired.status, 0);
@@ -296,6 +311,7 @@ test("published board refresh is one owner-gated NFL receiving-yards run with sc
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
   assert.match(workflow, /COVERED2_SCHEDULED_MARKET_SCOPE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULED_MARKET_SCOPE\s*\}\}/);
   assert.match(workflow, /COVERED2_NFL_RECEIVING_PILOT_START_AT:\s*\$\{\{\s*vars\.COVERED2_NFL_RECEIVING_PILOT_START_AT\s*\}\}/);
+  assert.match(workflow, /COVERED2_NFL_RECEIVING_PILOT_ENABLED:\s*\$\{\{\s*vars\.COVERED2_NFL_RECEIVING_PILOT_ENABLED\s*\}\}/);
   assert.match(workflow, /COVERED2_NFL_RECEIVING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'receiving_yards'.*'false'.*vars\.COVERED2_NFL_RECEIVING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_RUSHING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'rushing_yards'.*'false'.*vars\.COVERED2_NFL_RUSHING_YARDS_REFRESH/);
   assert.match(workflow, /COVERED2_NFL_PASSING_YARDS_REFRESH:.*manual_validation == 'true'.*market == 'passing_yards'.*'false'.*vars\.COVERED2_NFL_PASSING_YARDS_REFRESH/);
