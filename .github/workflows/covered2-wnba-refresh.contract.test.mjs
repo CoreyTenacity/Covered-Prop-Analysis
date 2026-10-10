@@ -454,3 +454,40 @@ test("manual/scheduled concurrency remains isolated, non-cancelling, and no cron
   assert.match(workflow, /cancel-in-progress:\s*false/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
+
+
+test("scheduled dispatch emits the complete explicit-false private validation contract", () => {
+  for (const manualValidation of ["", "false"]) {
+    const accepted = runContract(naturalWakeOverrides({ MANUAL_VALIDATION: manualValidation }));
+    assert.equal(accepted.status, 0, accepted.diagnostics);
+    assert.match(accepted.outputs, /^mode=scheduled$/m);
+    assert.match(accepted.outputs, /^manual_validation=false$/m);
+    assert.match(accepted.outputs, /^force_discovery=false$/m);
+    assert.match(accepted.outputs, /^publish_board=false$/m);
+    assert.match(accepted.outputs, /^sport=$/m);
+    assert.match(accepted.outputs, /^market=$/m);
+  }
+
+  for (const malformed of ["true", "yes", "0"]) {
+    const rejected = runContract(naturalWakeOverrides({ MANUAL_VALIDATION: malformed }));
+    assert.notEqual(rejected.status, 0, `manual_validation=${malformed} must fail before checkout`);
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+
+  assert.ok(workflow.includes('echo "manual_validation=false" >> "$GITHUB_OUTPUT"'));
+  assert.ok(workflow.includes('echo "force_discovery=false" >> "$GITHUB_OUTPUT"'));
+  assert.ok(workflow.includes('echo "publish_board=false" >> "$GITHUB_OUTPUT"'));
+  for (const [name, output] of [
+    ["COVERED2_MANUAL_VALIDATION", "manual_validation"],
+    ["COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY", "force_discovery"],
+    ["COVERED2_MANUAL_VALIDATION_SPORT", "sport"],
+    ["COVERED2_MANUAL_VALIDATION_MARKET", "market"],
+    ["COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD", "publish_board"],
+  ]) {
+    assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*steps\\.contract\\.outputs\\.${output}\\s*\\}\\}`));
+  }
+  const contractStep = workflow.indexOf("id: contract");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  const marketStep = workflow.indexOf("Run exactly one bounded C2 exact-market discovery");
+  assert.ok(contractStep >= 0 && checkout > contractStep && marketStep > checkout);
+});

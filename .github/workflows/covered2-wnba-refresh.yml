@@ -387,6 +387,8 @@ jobs:
           # repository_dispatch has no manual-validation input; pass the
           # private runner's required explicit false instead of an empty value.
           echo "manual_validation=false" >> "$GITHUB_OUTPUT"
+          echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+          echo "publish_board=false" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
           echo "release_sha=$PIN" >> "$GITHUB_OUTPUT"
           echo "sport=" >> "$GITHUB_OUTPUT"
