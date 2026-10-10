@@ -340,6 +340,10 @@ jobs:
             echo "EXACT MARKET dispatch accepted: one owner-gated operation, one reviewed release SHA, one sport, and one market."
             exit 0
           fi
+          if [ "$MANUAL_VALIDATION" != "" ] && [ "$MANUAL_VALIDATION" != "true" ] && [ "$MANUAL_VALIDATION" != "false" ]; then
+            echo "::error::manual_validation must be exactly true or false when provided."
+            exit 1
+          fi
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             if [ "$MANUAL_VALIDATION" = "true" ]; then
               echo "::error::The legacy repository_dispatch manual-validation contract is retired. Use the owner-gated workflow_dispatch exact operation on main."
@@ -380,6 +384,9 @@ jobs:
           fi
           echo "Accepted bounded C2 WNBA slot; immutable configuration validated without printing secrets."
           echo "mode=scheduled" >> "$GITHUB_OUTPUT"
+          # repository_dispatch has no manual-validation input; pass the
+          # private runner's required explicit false instead of an empty value.
+          echo "manual_validation=false" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
           echo "release_sha=$PIN" >> "$GITHUB_OUTPUT"
           echo "sport=" >> "$GITHUB_OUTPUT"

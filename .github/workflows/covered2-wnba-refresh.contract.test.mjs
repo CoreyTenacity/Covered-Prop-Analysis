@@ -98,7 +98,7 @@ function naturalWakeOverrides(overrides = {}) {
     SOURCE: "cloudflare-cron",
     SLOT: "2026-10-09T20:30Z",
     DELIVERY_KEY: "covered2:wnba:2026-10-09T20:30Z",
-    MANUAL_VALIDATION: "false",
+    MANUAL_VALIDATION: "",
     ...overrides,
   };
 }
@@ -412,6 +412,27 @@ test("superseded repository_dispatch manual payload is explicitly rejected; ordi
   const gate = workflow.indexOf("C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout.");
   const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
   assert.ok(gate >= 0 && checkout > gate);
+});
+
+test("scheduled wakes pass explicit false to the pinned private runner and reject malformed manual flags before checkout", () => {
+  for (const value of ["", "false"]) {
+    const accepted = runContract(naturalWakeOverrides({ MANUAL_VALIDATION: value }));
+    assert.equal(accepted.status, 0, accepted.diagnostics);
+    assert.match(accepted.outputs, /^mode=scheduled$/m);
+    assert.match(accepted.outputs, /^manual_validation=false$/m);
+  }
+
+  for (const value of ["true", "yes", "0"]) {
+    const rejected = runContract(naturalWakeOverrides({ MANUAL_VALIDATION: value }));
+    assert.notEqual(rejected.status, 0, `manual_validation=${value} must not enter scheduled execution`);
+    assert.equal(rejected.outputs.includes("release_sha="), false, "rejected input must not authorize checkout");
+  }
+
+  assert.ok(workflow.includes('echo "manual_validation=false" >> "$GITHUB_OUTPUT"'));
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
+  const contract = workflow.indexOf("id: contract");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  assert.ok(contract >= 0 && checkout > contract, "invalid flags fail before private checkout/provider code can run");
 });
 
 test("certification uses the deployed private one-observation CLI and only process-local write permission", () => {
