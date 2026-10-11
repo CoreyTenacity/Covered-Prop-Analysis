@@ -50,6 +50,70 @@ function extractPilotGuardShell() {
 
 const pilotGuardShell = extractPilotGuardShell();
 
+function extractSchedulerPreflightShell() {
+  const gateStep = workflow.indexOf("        id: scheduler_gate");
+  assert.notEqual(gateStep, -1, "repository scheduler preflight exists");
+  const runStart = workflow.indexOf("        run: |\n", gateStep);
+  assert.notEqual(runStart, -1, "repository scheduler preflight has an inline shell");
+  const bodyStart = runStart + "        run: |\n".length;
+  const nextJob = workflow.indexOf("\n\n  refresh:", bodyStart);
+  assert.notEqual(nextJob, -1, "preflight is a separate job before refresh");
+  return workflow.slice(bodyStart, nextJob).split("\n").map((line) => line.replace(/^ {10}/, "")).join("\n");
+}
+
+const schedulerPreflightShell = extractSchedulerPreflightShell();
+
+function runSchedulerPreflight({
+  trigger = "repository_dispatch",
+  repositoryValue,
+  apiResponse,
+  apiExitCode = 0,
+  actor = "CoreyTenacity",
+  refName = "main",
+} = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "c2-scheduler-preflight-"));
+  const bin = join(directory, "bin");
+  mkdirSync(bin);
+  const curlPath = join(bin, "curl");
+  const curlMarker = join(directory, "curl-called.txt");
+  writeFileSync(curlPath, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$MOCK_CURL_MARKER\"\nprintf '%s' \"$MOCK_CURL_RESPONSE\"\nexit \"$MOCK_CURL_EXIT\"\n");
+  chmodSync(curlPath, 0o755);
+  const outputPath = join(directory, "github-output.txt");
+  writeFileSync(outputPath, "");
+  const response = apiResponse ?? JSON.stringify({ name: "COVERED2_WNBA_SCHEDULER_ENABLED", value: repositoryValue ?? "" });
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    GITHUB_OUTPUT: outputPath,
+    TRIGGER: trigger,
+    ACTOR: actor,
+    REF_NAME: refName,
+    GITHUB_TOKEN: "test-only-token",
+    GITHUB_API_URL: "https://api.github.test",
+    GITHUB_REPOSITORY: "CoreyTenacity/Covered-Prop-Analysis",
+    MOCK_CURL_MARKER: curlMarker,
+    MOCK_CURL_RESPONSE: response,
+    MOCK_CURL_EXIT: String(apiExitCode),
+  };
+  try {
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", schedulerPreflightShell], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    return {
+      ...result,
+      diagnostics: (result.stdout ?? "") + (result.stderr ?? ""),
+      outputs: readFileSync(outputPath, "utf8"),
+      curlCalled: existsSync(curlMarker),
+      curlArgs: existsSync(curlMarker) ? readFileSync(curlMarker, "utf8") : "",
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runContract(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "c2-receiver-contract-"));
   const outputPath = join(directory, "github-output.txt");
@@ -471,6 +535,87 @@ test("manual/scheduled concurrency remains isolated, non-cancelling, and no cron
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
 
+test("repository-level scheduler preflight blocks a natural wake before the Production job", () => {
+  const preflight = workflow.slice(workflow.indexOf("  scheduler_preflight:"), workflow.indexOf("\n  refresh:"));
+  assert.match(preflight, /actions\/variables\/COVERED2_WNBA_SCHEDULER_ENABLED/);
+  assert.match(preflight, /GITHUB_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+  assert.doesNotMatch(preflight, /^\s*environment:/m);
+  assert.doesNotMatch(preflight, /uses:\s*actions\/checkout|SUPABASE|SHARPAPI|BBS_API|secrets\./i);
+  assert.doesNotMatch(preflight, /provider call|certif(?:y|ication)|database write|private-covered/i);
+  assert.doesNotMatch(preflight, /COVERED_GITHUB_SCHEDULER_ENABLED/);
+  assert.match(workflow, /refresh:\s*\n\s+needs:\s*scheduler_preflight\s*\n\s+if:\s*needs\.scheduler_preflight\.outputs\.allow_refresh\s*==\s*'true'/);
+  assert.ok(workflow.indexOf("  scheduler_preflight:") < workflow.indexOf("  refresh:"));
+  assert.match(workflow, /environment:\s*production/);
+  assert.match(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
+
+  const falseRepoGate = runSchedulerPreflight({ repositoryValue: "false" });
+  assert.equal(falseRepoGate.status, 0, falseRepoGate.diagnostics);
+  assert.equal(falseRepoGate.curlCalled, true);
+  assert.match(falseRepoGate.curlArgs, /\/repos\/CoreyTenacity\/Covered-Prop-Analysis\/actions\/variables\/COVERED2_WNBA_SCHEDULER_ENABLED/);
+  assert.match(falseRepoGate.outputs, /^allow_refresh=false$/m);
+  assert.match(falseRepoGate.diagnostics, /blocked before Production environment/);
+});
+
+test("only exact repository true authorizes natural recurrence and Production gate remains independently required", () => {
+  const missing = runSchedulerPreflight({ apiExitCode: 22, apiResponse: "" });
+  assert.equal(missing.status, 0, missing.diagnostics);
+  assert.match(missing.outputs, /^allow_refresh=false$/m);
+
+  for (const repositoryValue of ["", "false", "TRUE", "yes", "1"]) {
+    const blocked = runSchedulerPreflight({ repositoryValue });
+    assert.equal(blocked.status, 0, blocked.diagnostics);
+    assert.match(blocked.outputs, /^allow_refresh=false$/m);
+  }
+
+  const malformed = runSchedulerPreflight({ apiResponse: "not-json" });
+  assert.equal(malformed.status, 0, malformed.diagnostics);
+  assert.match(malformed.outputs, /^allow_refresh=false$/m);
+
+  const wrongVariable = runSchedulerPreflight({ apiResponse: JSON.stringify({ name: "OTHER", value: "true" }) });
+  assert.equal(wrongVariable.status, 0, wrongVariable.diagnostics);
+  assert.match(wrongVariable.outputs, /^allow_refresh=false$/m);
+
+  const allowedRepository = runSchedulerPreflight({ repositoryValue: "true" });
+  assert.equal(allowedRepository.status, 0, allowedRepository.diagnostics);
+  assert.match(allowedRepository.outputs, /^allow_refresh=true$/m);
+
+  const productionPaused = runContract(naturalWakeOverrides({ SCHEDULER_ENABLED: "false" }));
+  assert.equal(productionPaused.status, 0, productionPaused.diagnostics);
+  assert.match(productionPaused.outputs, /^skip=true$/m);
+  assert.doesNotMatch(productionPaused.outputs, /^release_sha=/m);
+
+  const bothGatesOpen = runContract(naturalWakeOverrides({ SCHEDULER_ENABLED: "true" }));
+  assert.equal(bothGatesOpen.status, 0, bothGatesOpen.diagnostics);
+  assert.match(bothGatesOpen.outputs, /^skip=false$/m);
+  assert.match(bothGatesOpen.outputs, /^mode=scheduled$/m);
+});
+
+test("manual owner dispatch bypasses only the recurring repository gate and remains under the existing exact-operation contract", () => {
+  const preflight = runSchedulerPreflight({ trigger: "workflow_dispatch", repositoryValue: "false" });
+  assert.equal(preflight.status, 0, preflight.diagnostics);
+  assert.equal(preflight.curlCalled, false, "manual operations do not read or depend on the recurring gate");
+  assert.match(preflight.outputs, /^allow_refresh=true$/m);
+
+  for (const identity of [{ actor: "someone-else" }, { refName: "feature" }]) {
+    const rejected = runSchedulerPreflight({ trigger: "workflow_dispatch", ...identity });
+    assert.equal(rejected.status, 0, rejected.diagnostics);
+    assert.equal(rejected.curlCalled, false);
+    assert.match(rejected.outputs, /^allow_refresh=false$/m);
+  }
+
+  const acceptedManual = runContract({ TRIGGER: "workflow_dispatch", SCHEDULER_ENABLED: "false" });
+  assert.equal(acceptedManual.status, 0, acceptedManual.diagnostics);
+  assert.match(acceptedManual.outputs, /^exact_manual=true$/m);
+
+  const invalidManual = runContract({
+    TRIGGER: "workflow_dispatch",
+    SCHEDULER_ENABLED: "false",
+    VALIDATION_MARKET_INPUT: "unsupported_market",
+  });
+  assert.notEqual(invalidManual.status, 0);
+  assert.match(invalidManual.diagnostics, /Unsupported exact sport\/market pair/);
+});
+
 
 test("scheduled dispatch emits the complete explicit-false private validation contract", () => {
   for (const manualValidation of ["", "false"]) {
@@ -507,3 +652,4 @@ test("scheduled dispatch emits the complete explicit-false private validation co
   const marketStep = workflow.indexOf("Run exactly one bounded C2 exact-market discovery");
   assert.ok(contractStep >= 0 && checkout > contractStep && marketStep > checkout);
 });
+

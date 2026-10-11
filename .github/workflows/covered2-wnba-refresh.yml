@@ -14,7 +14,7 @@
 # Trigger chain, proven 2026-08-28:
 #   Cloudflare Worker `covered-github-dispatcher`, cron "0,30 11-23,0-4 * * *" UTC
 #     -> repository_dispatch `covered2-wnba-refresh`  (event type UNCHANGED on purpose)
-#     -> this workflow, gated by COVERED2_WNBA_SCHEDULER_ENABLED
+#     -> this workflow; repository-level preflight and Production gate must both authorize recurrence
 #     -> the private Covered repo checked out at COVERED_PRIVATE_PIPELINE_SHA_V2
 #
 # The event type and file path are deliberately NOT renamed: the dispatcher
@@ -76,7 +76,77 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  scheduler_preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      allow_refresh: ${{ steps.scheduler_gate.outputs.allow_refresh }}
+    steps:
+      - name: Fail closed on the repository-level recurring scheduler gate
+        id: scheduler_gate
+        env:
+          TRIGGER: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Manual operations proceed only to the existing Production-environment
+          # owner/SHA/operation contract, and only from the owner's main ref.
+          if [ "$TRIGGER" = "workflow_dispatch" ]; then
+            if [ "$ACTOR" = "CoreyTenacity" ] && [ "$REF_NAME" = "main" ]; then
+              echo "allow_refresh=true" >> "$GITHUB_OUTPUT"
+              echo "Owner main-ref dispatch deferred to its existing exact-operation contract."
+            else
+              echo "allow_refresh=false" >> "$GITHUB_OUTPUT"
+              echo "Manual dispatch is not from the authorized owner on main; blocked before Production environment."
+            fi
+            exit 0
+          fi
+
+          if [ "$TRIGGER" != "repository_dispatch" ]; then
+            echo "allow_refresh=false" >> "$GITHUB_OUTPUT"
+            echo "Unsupported trigger; blocked before Production environment."
+            exit 0
+          fi
+
+          VARIABLE_URL="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/variables/COVERED2_WNBA_SCHEDULER_ENABLED"
+          VARIABLE_RESPONSE="$(curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$VARIABLE_URL")" || {
+              echo "allow_refresh=false" >> "$GITHUB_OUTPUT"
+              echo "Repository-level scheduler variable could not be read; recurrence blocked before Production environment."
+              exit 0
+            }
+          REPOSITORY_SCHEDULER_VALUE="$(printf '%s' "$VARIABLE_RESPONSE" | node -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const variable = JSON.parse(input);
+            if (variable.name !== "COVERED2_WNBA_SCHEDULER_ENABLED" || typeof variable.value !== "string") {
+              throw new Error("repository_scheduler_variable_invalid");
+            }
+            process.stdout.write(variable.value);
+          ')" || {
+              echo "allow_refresh=false" >> "$GITHUB_OUTPUT"
+              echo "Repository-level scheduler variable response was invalid; recurrence blocked before Production environment."
+              exit 0
+            }
+
+          if [ "$REPOSITORY_SCHEDULER_VALUE" = "true" ]; then
+            echo "allow_refresh=true" >> "$GITHUB_OUTPUT"
+            echo "Repository recurring gate explicitly allows this wake; Production gate remains required."
+            exit 0
+          fi
+
+          echo "allow_refresh=false" >> "$GITHUB_OUTPUT"
+          echo "Repository recurring gate is absent, malformed, or not true; blocked before Production environment."
+
   refresh:
+    needs: scheduler_preflight
+    if: needs.scheduler_preflight.outputs.allow_refresh == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -557,3 +627,4 @@ jobs:
 
 # No scoring, board, publication, grading, snapshot, Automatic Picks, MLB,
 # NBA, NFL, artifact upload, cache, or private source export belongs here.
+
