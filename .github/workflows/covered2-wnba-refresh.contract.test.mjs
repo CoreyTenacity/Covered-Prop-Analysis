@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "599e526560861ebecdb3ae6a691b0ac3bc56d101";
+const reviewedSha = "feb84f04573c64fe766400353e288554cdc6b456";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -226,6 +226,9 @@ test("only the exact reviewed SHA, main ref, owner actor, matching production pi
   assert.match(workflow, /\[ "\$PIN" != "\$REVIEWED_RELEASE_SHA" \]/);
   for (const invalid of [
     { RELEASE_SHA_INPUT: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
+    { RELEASE_SHA_INPUT: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
+    { PIN: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
+    { RELEASE_SHA_INPUT: "codex/public-repo-repair" },
     { RELEASE_SHA_INPUT: retiredSha },
     { PIN: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
     { SCHEDULER_ENABLED: "true" },
