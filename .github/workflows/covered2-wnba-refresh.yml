@@ -332,7 +332,7 @@ jobs:
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
         run: |
-          REVIEWED_RELEASE_SHA="e1ae88ea0a0d0d44751dec07187c32edd1b710f6"
+          REVIEWED_RELEASE_SHA="5fd3a4f3e4dfc930a14073160149f964c66f3bcb"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
