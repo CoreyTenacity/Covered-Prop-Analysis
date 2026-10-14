@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "5fd3a4f3e4dfc930a14073160149f964c66f3bcb";
+const reviewedSha = "41822390a1c1caddd1c0b46088d0e9572c9f2af1";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -137,6 +137,12 @@ function runContract(overrides = {}) {
     VALIDATION_MARKET_INPUT: "receiving_yards",
     FORCE_DISCOVERY_INPUT: "false",
     SCORED_PROP_ID_INPUT: "",
+    MLB_EVENT_DATE_INPUT: "",
+    MLB_EVENT_START_TIME_INPUT: "",
+    MLB_HOME_TEAM_ID_INPUT: "",
+    MLB_AWAY_TEAM_ID_INPUT: "",
+    MLB_GAME_TYPE_INPUT: "",
+    MLB_SERIES_DESCRIPTION_INPUT: "",
     ...overrides,
   };
   try {
@@ -474,6 +480,63 @@ test("read-only preflight is limited to one NFL market and cannot fall through t
   }
 });
 
+test("one-shot MLB postseason event hydration is exact, owner-only, and cannot enter the market pipeline", () => {
+  const accepted = runContract({
+    MANUAL_OPERATION: "mlb-event-hydration",
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "batter_total_bases",
+    FORCE_DISCOVERY_INPUT: "false",
+    MLB_EVENT_DATE_INPUT: "2026-10-14",
+    MLB_EVENT_START_TIME_INPUT: "2026-10-15T00:00:00.000Z",
+    MLB_HOME_TEAM_ID_INPUT: "119",
+    MLB_AWAY_TEAM_ID_INPUT: "158",
+    MLB_GAME_TYPE_INPUT: "L",
+    MLB_SERIES_DESCRIPTION_INPUT: "National League Championship Series",
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-mlb-event-hydration$/m);
+  assert.match(accepted.outputs, /^manual_validation=false$/m);
+  assert.match(accepted.outputs, /^mlb_event_date=2026-10-14$/m);
+  assert.match(accepted.outputs, /^mlb_game_type=L$/m);
+  assert.match(workflow, /- mlb-event-hydration/);
+  assert.match(workflow, /COVERED2_MANUAL_MLB_EVENT_HYDRATION:\s*"true"/);
+  assert.match(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
+  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
+  assert.match(workflow, /run-covered2-mlb-event-hydration\.mjs/);
+  assert.match(workflow, /mode != 'manual-mlb-event-hydration'/);
+  assert.doesNotMatch(workflow, /schedule:\s*\n/);
+  assert.match(workflow, /environment:\s*production/);
+
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "NFL" },
+    { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
+    { FORCE_DISCOVERY_INPUT: "true" },
+    { MLB_EVENT_DATE_INPUT: "2026-10-14\n::warning::bad" },
+    { MLB_EVENT_START_TIME_INPUT: "tomorrow" },
+    { MLB_HOME_TEAM_ID_INPUT: "119\n" },
+    { MLB_AWAY_TEAM_ID_INPUT: "119" },
+    { MLB_GAME_TYPE_INPUT: "R" },
+    { MLB_SERIES_DESCRIPTION_INPUT: "" },
+    { CERTIFICATION_LEDGER_ENABLED: "true" },
+  ]) {
+    const result = runContract({
+      MANUAL_OPERATION: "mlb-event-hydration",
+      VALIDATION_SPORT_INPUT: "MLB",
+      VALIDATION_MARKET_INPUT: "batter_total_bases",
+      FORCE_DISCOVERY_INPUT: "false",
+      MLB_EVENT_DATE_INPUT: "2026-10-14",
+      MLB_EVENT_START_TIME_INPUT: "2026-10-15T00:00:00.000Z",
+      MLB_HOME_TEAM_ID_INPUT: "119",
+      MLB_AWAY_TEAM_ID_INPUT: "158",
+      MLB_GAME_TYPE_INPUT: "L",
+      MLB_SERIES_DESCRIPTION_INPUT: "National League Championship Series",
+      ...invalid,
+    });
+    assert.notEqual(result.status, 0, JSON.stringify(invalid));
+    assert.doesNotMatch(result.outputs, /^release_sha=/m, "invalid event contract must fail before private checkout");
+  }
+});
+
 test("superseded repository_dispatch manual payload is explicitly rejected; ordinary paused wakes still skip checkout", () => {
   assert.doesNotMatch(workflow, new RegExp(retiredSha));
   const retired = runContract({
@@ -655,4 +718,3 @@ test("scheduled dispatch emits the complete explicit-false private validation co
   const marketStep = workflow.indexOf("Run exactly one bounded C2 exact-market discovery");
   assert.ok(contractStep >= 0 && checkout > contractStep && marketStep > checkout);
 });
-

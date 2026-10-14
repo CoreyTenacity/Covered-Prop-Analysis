@@ -38,6 +38,7 @@ on:
           - exact-market-preflight
           - exact-market-discovery
           - exact-market-board-refresh
+          - mlb-event-hydration
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -64,6 +65,30 @@ on:
         type: boolean
       scored_prop_id:
         description: "Exact existing scored_props UUID; required only for certification-one-observation"
+        required: false
+        type: string
+      mlb_event_date:
+        description: "Exact MLB official date for one current postseason event"
+        required: false
+        type: string
+      mlb_event_start_time:
+        description: "Exact expected MLB event start instant in UTC"
+        required: false
+        type: string
+      mlb_home_team_id:
+        description: "Exact expected MLB Stats API home team ID"
+        required: false
+        type: string
+      mlb_away_team_id:
+        description: "Exact expected MLB Stats API away team ID"
+        required: false
+        type: string
+      mlb_game_type:
+        description: "Exact MLB postseason game type (F, D, L, or W)"
+        required: false
+        type: string
+      mlb_series_description:
+        description: "Exact series description from MLB Stats API"
         required: false
         type: string
 
@@ -331,8 +356,14 @@ jobs:
           VALIDATION_MARKET_INPUT: ${{ inputs.validation_market }}
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
+          MLB_EVENT_DATE_INPUT: ${{ inputs.mlb_event_date }}
+          MLB_EVENT_START_TIME_INPUT: ${{ inputs.mlb_event_start_time }}
+          MLB_HOME_TEAM_ID_INPUT: ${{ inputs.mlb_home_team_id }}
+          MLB_AWAY_TEAM_ID_INPUT: ${{ inputs.mlb_away_team_id }}
+          MLB_GAME_TYPE_INPUT: ${{ inputs.mlb_game_type }}
+          MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
         run: |
-          REVIEWED_RELEASE_SHA="5fd3a4f3e4dfc930a14073160149f964c66f3bcb"
+          REVIEWED_RELEASE_SHA="41822390a1c1caddd1c0b46088d0e9572c9f2af1"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -382,6 +413,34 @@ jobs:
                 echo "mode=manual-board-refresh" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=true" >> "$GITHUB_OUTPUT"
                 echo "publish_board=true" >> "$GITHUB_OUTPUT"
+                ;;
+              mlb-event-hydration)
+                for event_input in "$MLB_EVENT_DATE_INPUT" "$MLB_EVENT_START_TIME_INPUT" "$MLB_HOME_TEAM_ID_INPUT" "$MLB_AWAY_TEAM_ID_INPUT" "$MLB_GAME_TYPE_INPUT" "$MLB_SERIES_DESCRIPTION_INPUT"; do
+                  case "$event_input" in
+                    *$'\n'*|*$'\r'*) echo "::error::MLB event inputs may not contain line breaks."; exit 1 ;;
+                  esac
+                done
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$MLB_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                  || ! printf '%s' "$MLB_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
+                  || ! printf '%s' "$MLB_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
+                  || ! printf '%s' "$MLB_AWAY_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
+                  || [ "$MLB_HOME_TEAM_ID_INPUT" = "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || ! printf '%s' "$MLB_GAME_TYPE_INPUT" | grep -Eq '^[FDLW]$' \
+                  || ! printf '%s' "$MLB_SERIES_DESCRIPTION_INPUT" | grep -Eq "^[A-Za-z0-9 ,.'-]{3,80}$" \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB event hydration requires one exact postseason event, paused scheduler, disabled certification writes, and no discovery bypass."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-event-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_start_time=$MLB_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_home_team_id=$MLB_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_away_team_id=$MLB_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_type=$MLB_GAME_TYPE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_series_description=$MLB_SERIES_DESCRIPTION_INPUT" >> "$GITHUB_OUTPUT"
                 ;;
               certification-one-observation)
                 if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
@@ -551,7 +610,7 @@ jobs:
           '
 
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-event-hydration'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -580,6 +639,29 @@ jobs:
             echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
           fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
+
+      - name: Hydrate exactly one current MLB postseason event only
+        if: steps.contract.outputs.mode == 'manual-mlb-event-hydration'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_MANUAL_MLB_EVENT_HYDRATION: "true"
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MLB_EVENT_DATE: ${{ steps.contract.outputs.mlb_event_date }}
+          MLB_EVENT_START_TIME: ${{ steps.contract.outputs.mlb_event_start_time }}
+          MLB_HOME_TEAM_ID: ${{ steps.contract.outputs.mlb_home_team_id }}
+          MLB_AWAY_TEAM_ID: ${{ steps.contract.outputs.mlb_away_team_id }}
+          MLB_GAME_TYPE: ${{ steps.contract.outputs.mlb_game_type }}
+          MLB_SERIES_DESCRIPTION: ${{ steps.contract.outputs.mlb_series_description }}
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-mlb-event-hydration.mjs \
+            --official-date "$MLB_EVENT_DATE" --start-time "$MLB_EVENT_START_TIME" \
+            --home-team-id "$MLB_HOME_TEAM_ID" --away-team-id "$MLB_AWAY_TEAM_ID" \
+            --game-type "$MLB_GAME_TYPE" --series-description "$MLB_SERIES_DESCRIPTION"
 
       - name: Certify one existing exact-market observation
         if: steps.contract.outputs.mode == 'manual-certification'
@@ -625,6 +707,7 @@ jobs:
         if: always()
         run: rm -rf private-covered
 
-# No scoring, board, publication, grading, snapshot, Automatic Picks, MLB,
-# NBA, NFL, artifact upload, cache, or private source export belongs here.
-
+# Outside the explicit owner-gated manual MLB event-hydration operation above,
+# this workflow must not perform arbitrary MLB writes. No NBA, NFL, scoring,
+# board, publication, grading, snapshot, Automatic Picks, or source export is
+# added by that one-shot schedule-only path.
