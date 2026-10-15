@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "388fe3919898ae2a9b5510132aa1957d106bf042";
+const reviewedSha = "d305d927d77f9080fe47b0493ef2cfcfcf7d4988";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -143,6 +143,7 @@ function runContract(overrides = {}) {
     MLB_AWAY_TEAM_ID_INPUT: "",
     MLB_GAME_TYPE_INPUT: "",
     MLB_SERIES_DESCRIPTION_INPUT: "",
+    MLB_GAME_PK_INPUT: "",
     ...overrides,
   };
   try {
@@ -248,7 +249,6 @@ test("only the exact reviewed SHA, main ref, owner actor, matching production pi
   }
   assert.equal(runContract().status, 0);
 });
-
 test("the recurring pin comes only from the production environment variable and is exact, 40-hex, and non-secret diagnosed", () => {
   const envIndex = workflow.indexOf("    environment: production");
   const guardIndex = workflow.indexOf("id: pilot_attempt_guard");
@@ -353,7 +353,7 @@ test("expired/invalid pilot windows, unsafe scope, and history failures fail clo
 
 test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact discovery", () => {
   for (const [sport, market] of readyPairs) {
-    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market });
+    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market, ...(sport === "MLB" && market === "batter_total_bases" ? { MLB_GAME_PK_INPUT: "849810" } : {}) });
     assert.equal(result.status, 0, sport + "/" + market + ": " + result.diagnostics);
     assert.match(result.outputs, /^mode=manual-validation$/m);
     assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
@@ -366,6 +366,35 @@ test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact disc
     assert.notEqual(result.status, 0, sport + "/" + market + " must fail closed");
     assert.match(result.diagnostics, /Unsupported exact sport\/market pair/);
   }
+});
+
+test("MLB Batter Total Bases manual discovery requires and forwards only gamePk 849810", () => {
+  const accepted = runContract({
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "batter_total_bases",
+    MLB_GAME_PK_INPUT: "849810",
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-validation$/m);
+  assert.match(accepted.outputs, /^manual_validation=true$/m);
+  assert.match(accepted.outputs, /^mlb_game_pk=849810$/m);
+  assert.match(workflow, /mlb_game_pk:\s*\n\s*description:.*one-event Batter Total Bases proof/);
+  assert.match(workflow, /COVERED2_MANUAL_MLB_GAME_PK:\s*\$\{\{\s*steps\.contract\.outputs\.mlb_game_pk\s*\}\}/);
+  for (const invalid of ["", "849811", "84x810"]) {
+    const rejected = runContract({
+      VALIDATION_SPORT_INPUT: "MLB",
+      VALIDATION_MARKET_INPUT: "batter_total_bases",
+      MLB_GAME_PK_INPUT: invalid,
+    });
+    assert.notEqual(rejected.status, 0, `gamePk ${JSON.stringify(invalid)} must fail closed`);
+  }
+  const wrongMarket = runContract({
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "pitcher_strikeouts",
+    MLB_GAME_PK_INPUT: "849810",
+  });
+  assert.notEqual(wrongMarket.status, 0);
+  assert.match(wrongMarket.diagnostics, /valid only for the exact MLB Batter Total Bases manual proof/);
 });
 
 test("published board refresh is one owner-gated NFL receiving-yards run with scheduler and persistent writes off", () => {

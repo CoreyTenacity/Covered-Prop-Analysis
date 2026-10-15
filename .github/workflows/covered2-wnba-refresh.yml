@@ -92,6 +92,10 @@ on:
         description: "Exact series description from MLB Stats API"
         required: false
         type: string
+      mlb_game_pk:
+        description: "Exact MLB gamePk for the one-event Batter Total Bases proof"
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -363,8 +367,9 @@ jobs:
           MLB_AWAY_TEAM_ID_INPUT: ${{ inputs.mlb_away_team_id }}
           MLB_GAME_TYPE_INPUT: ${{ inputs.mlb_game_type }}
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
+          MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
         run: |
-          REVIEWED_RELEASE_SHA="388fe3919898ae2a9b5510132aa1957d106bf042"
+          REVIEWED_RELEASE_SHA="d305d927d77f9080fe47b0493ef2cfcfcf7d4988"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -399,6 +404,16 @@ jobs:
                 fi
                 if [ "$FORCE_DISCOVERY_INPUT" != "true" ] && [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
                   echo "::error::force_discovery must be exactly true or false."
+                  exit 1
+                fi
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" = "MLB:batter_total_bases" ]; then
+                  if [ "$MLB_GAME_PK_INPUT" != "849810" ]; then
+                    echo "::error::MLB Batter Total Bases manual proof requires the exact authorized gamePk 849810."
+                    exit 1
+                  fi
+                  echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
+                elif [ -n "$MLB_GAME_PK_INPUT" ]; then
+                  echo "::error::mlb_game_pk is valid only for the exact MLB Batter Total Bases manual proof."
                   exit 1
                 fi
                 echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
@@ -632,6 +647,7 @@ jobs:
           COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.manual_validation }}
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
+          COVERED2_MANUAL_MLB_GAME_PK: ${{ steps.contract.outputs.mlb_game_pk }}
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
           COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
