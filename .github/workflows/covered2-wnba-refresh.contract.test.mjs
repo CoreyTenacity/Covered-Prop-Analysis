@@ -537,6 +537,65 @@ test("one-shot MLB postseason event hydration is exact, owner-only, and cannot e
   }
 });
 
+test("MLB identity diagnostic is owner-only, exact-date, read-only, and isolated from market discovery", () => {
+  const accepted = runContract({
+    MANUAL_OPERATION: "mlb-game-identity-diagnostic",
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "batter_total_bases",
+    FORCE_DISCOVERY_INPUT: "false",
+    MLB_EVENT_DATE_INPUT: "2026-10-15",
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-mlb-game-identity-diagnostic$/m);
+  assert.match(accepted.outputs, /^mlb_event_date=2026-10-15$/m);
+  assert.match(accepted.outputs, /^manual_validation=false$/m);
+  assert.match(accepted.outputs, /^force_discovery=false$/m);
+
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "NFL" },
+    { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
+    { FORCE_DISCOVERY_INPUT: "true" },
+    { MLB_EVENT_DATE_INPUT: "2026-10-14" },
+    { CERTIFICATION_LEDGER_ENABLED: "true" },
+    { SCHEDULER_ENABLED: "true" },
+  ]) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "mlb-game-identity-diagnostic",
+      VALIDATION_SPORT_INPUT: "MLB",
+      VALIDATION_MARKET_INPUT: "batter_total_bases",
+      FORCE_DISCOVERY_INPUT: "false",
+      MLB_EVENT_DATE_INPUT: "2026-10-15",
+      ...invalid,
+    });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+
+  assert.match(workflow, /- mlb-game-identity-diagnostic/);
+  assert.match(workflow, /mode != 'manual-mlb-game-identity-diagnostic'/);
+  const start = workflow.indexOf("- name: Read exact official MLB game identity without writes");
+  const end = workflow.indexOf("- name: Hydrate exactly one current MLB postseason event only", start);
+  assert.ok(start >= 0 && end > start);
+  const step = workflow.slice(start, end);
+  assert.match(step, /if: steps\.contract\.outputs\.mode == 'manual-mlb-game-identity-diagnostic'/);
+  assert.match(step, /run-covered2-mlb-event-hydration\.mjs/);
+  assert.match(step, /ensureTeam: async \(\) => \{ throw new Error\("diagnostic_stop_before_write"\); \}/);
+  assert.match(step, /ensureEvent: async \(\) => \{ throw new Error\("diagnostic_stop_before_write"\); \}/);
+  assert.match(step, /scheduleRequestCount !== 0/);
+  assert.match(step, /searchParams\.get\("startDate"\) !== officialDate/);
+  assert.match(step, /searchParams\.get\("endDate"\) !== officialDate/);
+  assert.match(step, /searchParams\.get\("sportId"\) !== "1"/);
+  assert.match(step, /searchParams\.get\("hydrate"\) !== "team"/);
+  assert.match(step, /COVERED2_ALLOWED_EMAILS: ""/);
+  assert.match(step, /NEXT_PUBLIC_SUPABASE_URL: ""/);
+  assert.match(step, /SUPABASE_SERVICE_ROLE_KEY: ""/);
+  assert.match(step, /SHARPAPI_KEY: ""/);
+  assert.match(step, /BBS_API_KEY: ""/);
+  assert.doesNotMatch(step, /run-covered2-wnba-refresh\.mjs|--write/);
+  assert.match(step, /targetRows\.length !== 1/);
+  assert.match(step, /officialGames: rows\.map\(project\)/);
+});
+
 test("superseded repository_dispatch manual payload is explicitly rejected; ordinary paused wakes still skip checkout", () => {
   assert.doesNotMatch(workflow, new RegExp(retiredSha));
   const retired = runContract({

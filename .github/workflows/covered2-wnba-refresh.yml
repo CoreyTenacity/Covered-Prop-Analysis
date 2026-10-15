@@ -38,6 +38,7 @@ on:
           - exact-market-preflight
           - exact-market-discovery
           - exact-market-board-refresh
+          - mlb-game-identity-diagnostic
           - mlb-event-hydration
           - certification-one-observation
           - certification-one-current-analysis
@@ -414,6 +415,18 @@ jobs:
                 echo "force_discovery=true" >> "$GITHUB_OUTPUT"
                 echo "publish_board=true" >> "$GITHUB_OUTPUT"
                 ;;
+              mlb-game-identity-diagnostic)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ "$MLB_EVENT_DATE_INPUT" != "2026-10-15" ] \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB identity diagnostic requires the exact target date/market, no discovery bypass, and disabled certification writes."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-game-identity-diagnostic" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
               mlb-event-hydration)
                 for event_input in "$MLB_EVENT_DATE_INPUT" "$MLB_EVENT_START_TIME_INPUT" "$MLB_HOME_TEAM_ID_INPUT" "$MLB_AWAY_TEAM_ID_INPUT" "$MLB_GAME_TYPE_INPUT" "$MLB_SERIES_DESCRIPTION_INPUT"; do
                   case "$event_input" in
@@ -610,7 +623,7 @@ jobs:
           '
 
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-event-hydration'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -639,6 +652,123 @@ jobs:
             echo "MANUAL VALIDATION execution run_id=${GITHUB_RUN_ID} runtime=${COVERED2_REFRESH_RUNTIME} expected_sha=${EXPECTED_SHA}"
           fi
           node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-refresh.mjs --write --expectedSha "$EXPECTED_SHA" --invocationId "$INVOCATION_ID"
+
+      - name: Read exact official MLB game identity without writes
+        if: steps.contract.outputs.mode == 'manual-mlb-game-identity-diagnostic'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_MANUAL_MLB_EVENT_HYDRATION: "true"
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          MLB_EVENT_DATE: ${{ steps.contract.outputs.mlb_event_date }}
+          COVERED2_ALLOWED_EMAILS: ""
+          NEXT_PUBLIC_SUPABASE_URL: ""
+          SUPABASE_SECRET_KEY: ""
+          SUPABASE_SERVICE_ROLE_KEY: ""
+          SHARPAPI_KEY: ""
+          BBS_API_KEY: ""
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs --input-type=module <<'NODE'
+          import { main } from "./scripts/run-covered2-mlb-event-hydration.mjs";
+
+          const officialDate = process.env.MLB_EVENT_DATE;
+          if (officialDate !== "2026-10-15") throw new Error("mlb_identity_diagnostic_target_date_mismatch");
+          const failedSelector = {
+            officialDate,
+            expectedStartTime: "2026-10-16T00:00:00.000Z",
+            homeTeamProviderId: "119",
+            awayTeamProviderId: "158",
+            gameType: "L",
+            seriesDescription: "National League Championship Series",
+          };
+          const nativeFetch = globalThis.fetch;
+          let scheduleRequestCount = 0;
+          let sourcePayload;
+          globalThis.fetch = async (input, init) => {
+            const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url);
+            if (url.origin !== "https://statsapi.mlb.com" || url.pathname !== "/api/v1/schedule"
+              || url.searchParams.get("sportId") !== "1"
+              || url.searchParams.get("startDate") !== officialDate
+              || url.searchParams.get("endDate") !== officialDate
+              || url.searchParams.get("hydrate") !== "team"
+              || (init?.method ?? "GET") !== "GET"
+              || scheduleRequestCount !== 0) {
+              throw new Error("mlb_identity_diagnostic_unexpected_request");
+            }
+            scheduleRequestCount += 1;
+            const response = await nativeFetch(input, init);
+            sourcePayload = JSON.parse(await response.clone().text());
+            return response;
+          };
+
+          let selectorOutcome = "selected_then_stopped_before_write";
+          try {
+            await main([
+              "--official-date", failedSelector.officialDate,
+              "--start-time", failedSelector.expectedStartTime,
+              "--home-team-id", failedSelector.homeTeamProviderId,
+              "--away-team-id", failedSelector.awayTeamProviderId,
+              "--game-type", failedSelector.gameType,
+              "--series-description", failedSelector.seriesDescription,
+            ], process.env, {
+              now: new Date("2026-10-15T12:00:00.000Z"),
+              ensureTeam: async () => { throw new Error("diagnostic_stop_before_write"); },
+              ensureEvent: async () => { throw new Error("diagnostic_stop_before_write"); },
+            });
+          } catch (error) {
+            selectorOutcome = error instanceof Error ? error.message : "unknown_selector_error";
+          } finally {
+            globalThis.fetch = nativeFetch;
+          }
+
+          if (scheduleRequestCount !== 1 || !sourcePayload || !Array.isArray(sourcePayload.dates)) {
+            throw new Error("mlb_identity_diagnostic_source_unavailable");
+          }
+          const postseasonTypes = new Set(["F", "D", "L", "W"]);
+          const allGames = sourcePayload.dates.flatMap((date) => Array.isArray(date.games) ? date.games : []);
+          const rows = allGames.filter((game) => game.officialDate === officialDate && postseasonTypes.has(game.gameType)).slice(0, 16);
+          const project = (game) => ({
+            gamePk: game.gamePk ?? null,
+            officialDate: game.officialDate ?? null,
+            gameDate: game.gameDate ?? null,
+            gameType: game.gameType ?? null,
+            seriesDescription: game.seriesDescription ?? null,
+            seriesGameNumber: game.seriesGameNumber ?? null,
+            awayTeamId: game.teams?.away?.team?.id ?? null,
+            awayTeamName: game.teams?.away?.team?.name ?? null,
+            homeTeamId: game.teams?.home?.team?.id ?? null,
+            homeTeamName: game.teams?.home?.team?.name ?? null,
+            status: game.status?.detailedState ?? null,
+            scheduledStartTime: game.gameDate ?? null,
+          });
+          const identity = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+          const targetRows = rows.filter((game) => identity(game.teams?.away?.team?.name) === "milwaukee brewers"
+            && identity(game.teams?.home?.team?.name) === "los angeles dodgers");
+          const official = targetRows.length === 1 ? targetRows[0] : null;
+          const comparisons = official ? [
+            ["officialDate", failedSelector.officialDate, official.officialDate, failedSelector.officialDate === official.officialDate],
+            ["gameType", failedSelector.gameType, official.gameType, failedSelector.gameType === official.gameType],
+            ["seriesDescription", failedSelector.seriesDescription, official.seriesDescription, failedSelector.seriesDescription === String(official.seriesDescription ?? "").trim()],
+            ["seriesGameNumber", "not used by selector", official.seriesGameNumber ?? null, null],
+            ["awayTeamId", failedSelector.awayTeamProviderId, official.teams?.away?.team?.id ?? null, String(failedSelector.awayTeamProviderId) === String(official.teams?.away?.team?.id ?? "")],
+            ["awayTeamName", "not used by selector", official.teams?.away?.team?.name ?? null, null],
+            ["homeTeamId", failedSelector.homeTeamProviderId, official.teams?.home?.team?.id ?? null, String(failedSelector.homeTeamProviderId) === String(official.teams?.home?.team?.id ?? "")],
+            ["homeTeamName", "not used by selector", official.teams?.home?.team?.name ?? null, null],
+            ["gameDate/start-time", failedSelector.expectedStartTime, official.gameDate ?? null,
+              Number.isFinite(Date.parse(official.gameDate ?? "")) && Math.abs(Date.parse(official.gameDate) - Date.parse(failedSelector.expectedStartTime)) <= 60_000],
+          ].map(([field, failedValue, officialValue, matches]) => ({ field, failedValue, officialValue, result: matches === null ? "not_used_by_selector" : matches ? "match" : "mismatch" })) : [];
+          process.stdout.write(`${JSON.stringify({
+            operation: "mlb-game-identity-diagnostic",
+            scheduleRequestCount,
+            selectorOutcome,
+            targetRecordCount: targetRows.length,
+            officialGames: rows.map(project),
+            targetComparisons: comparisons,
+          })}\n`);
+          if (targetRows.length !== 1) throw new Error("mlb_identity_diagnostic_target_not_unambiguous");
+          NODE
 
       - name: Hydrate exactly one current MLB postseason event only
         if: steps.contract.outputs.mode == 'manual-mlb-event-hydration'
@@ -707,7 +837,6 @@ jobs:
         if: always()
         run: rm -rf private-covered
 
-# Outside the explicit owner-gated manual MLB event-hydration operation above,
-# this workflow must not perform arbitrary MLB writes. No NBA, NFL, scoring,
-# board, publication, grading, snapshot, Automatic Picks, or source export is
-# added by that one-shot schedule-only path.
+# The owner-gated MLB identity diagnostic above is read-only; event hydration
+# remains the only manual MLB schedule write. No NBA, NFL, scoring, board,
+# publication, grading, snapshot, Automatic Picks, or source export is added.
