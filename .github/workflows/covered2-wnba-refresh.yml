@@ -40,6 +40,7 @@ on:
           - exact-market-board-refresh
           - mlb-game-identity-diagnostic
           - mlb-event-hydration
+          - mlb-player-history-hydration
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -369,7 +370,7 @@ jobs:
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
           MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
         run: |
-          REVIEWED_RELEASE_SHA="e9a73fa16cb85f31ae41071a26d4110576faf59d"
+          REVIEWED_RELEASE_SHA="739b821c09575f7baf4e2d77465e38a8422778f1"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -469,6 +470,25 @@ jobs:
                 echo "mlb_away_team_id=$MLB_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
                 echo "mlb_game_type=$MLB_GAME_TYPE_INPUT" >> "$GITHUB_OUTPUT"
                 echo "mlb_series_description=$MLB_SERIES_DESCRIPTION_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              mlb-player-history-hydration)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ "$MLB_GAME_PK_INPUT" != "849810" ] \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ -n "$MLB_EVENT_DATE_INPUT" ] \
+                  || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_GAME_TYPE_INPUT" ] \
+                  || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB player-history hydration is restricted to the exact Total Bases event, with no discovery bypass or other operation inputs."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-player-history-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
                 ;;
               certification-one-observation)
                 if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
@@ -638,7 +658,7 @@ jobs:
           '
 
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -786,6 +806,22 @@ jobs:
           if (targetRows.length !== 1) throw new Error("mlb_identity_diagnostic_target_not_unambiguous");
           NODE
 
+      - name: Hydrate exact-target MLB Total Bases player history only
+        if: steps.contract.outputs.mode == 'manual-mlb-player-history-hydration'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED2_MANUAL_MLB_PLAYER_HISTORY_HYDRATION: "true"
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ""
+          BBS_API_KEY: ""
+          MLB_GAME_PK: ${{ steps.contract.outputs.mlb_game_pk }}
+        run: node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-mlb-player-history-hydration.mjs --game-pk "$MLB_GAME_PK"
+
       - name: Hydrate exactly one current MLB postseason event only
         if: steps.contract.outputs.mode == 'manual-mlb-event-hydration'
         working-directory: private-covered
@@ -854,5 +890,6 @@ jobs:
         run: rm -rf private-covered
 
 # The owner-gated MLB identity diagnostic above is read-only; event hydration
-# remains the only manual MLB schedule write. No NBA, NFL, scoring, board,
+# writes one canonical schedule target, and player-history hydration writes only
+# bounded target-player logs. No NBA, NFL, scoring, board,
 # publication, grading, snapshot, Automatic Picks, or source export is added.
