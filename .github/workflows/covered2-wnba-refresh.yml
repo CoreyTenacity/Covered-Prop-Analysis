@@ -625,7 +625,7 @@ jobs:
             const { refreshNflMarkets } = await import("./lib/knowledge/covered2/nfl-refresh/production.ts");
             const market = process.env.PREFLIGHT_MARKET;
             if (!["passing_yards", "receiving_yards", "rushing_yards"].includes(market)) throw new Error("unsupported_preflight_market");
-            const result = await refreshNflMarkets({ write: false, markets: [market] });
+            const result = await refreshNflMarkets({ write: false, markets: [market], includeReadOnlyDiagnostics: true });
             const manifest = result.byMarket[market]?.manifest;
             const evidence = {
               status: result.status,
@@ -635,6 +635,8 @@ jobs:
               marketRows: manifest?.marketRows ?? 0,
               lineRows: manifest?.lineRows ?? 0,
               unresolvedRows: manifest?.unresolvedRows ?? 0,
+              rejectionReasons: manifest?.rejectionReasons ?? {},
+              providerMarketTypeCounts: manifest?.providerMarketTypeCounts ?? {},
               eventCount: manifest?.events?.length ?? 0,
               currentPropKeyCount: manifest?.currentPropKeys?.length ?? 0,
             };
