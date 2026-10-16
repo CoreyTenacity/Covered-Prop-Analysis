@@ -126,8 +126,7 @@ function runContract(overrides = {}) {
     ACTOR: "CoreyTenacity",
     SCHEDULER_ENABLED: "false",
     RELEASE_SHA_INPUT: reviewedSha,
-    PIN: reviewedSha,
-    ALLOWLIST: "corey093011@gmail.com",
+        ALLOWLIST: "corey093011@gmail.com",
     CADENCE: "0,30 11-23,0-4 * * *",
     DEPLOYMENT_AUTHORIZED: "true",
     CERTIFICATION_LEDGER_ENABLED: "false",
@@ -228,16 +227,15 @@ function runPilotGuard({ history = [], overrides = {} } = {}) {
   }
 }
 
-test("only the exact reviewed SHA, main ref, owner actor, matching production pin, and paused persistent gates are accepted", () => {
+test("only the public-reviewed immutable SHA is executable; manual callers cannot inject another ref", () => {
   assert.match(workflow, new RegExp("REVIEWED_RELEASE_SHA=\"" + reviewedSha + "\""));
-  assert.match(workflow, /\[ "\$PIN" != "\$REVIEWED_RELEASE_SHA" \]/);
+  assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
+  assert.doesNotMatch(contractShell, /\$PIN/);
   for (const invalid of [
     { RELEASE_SHA_INPUT: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
     { RELEASE_SHA_INPUT: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
-    { PIN: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
     { RELEASE_SHA_INPUT: "codex/public-repo-repair" },
     { RELEASE_SHA_INPUT: retiredSha },
-    { PIN: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
     { SCHEDULER_ENABLED: "true" },
     { CERTIFICATION_LEDGER_ENABLED: "true" },
     { ACTOR: "not-the-owner" },
@@ -247,37 +245,26 @@ test("only the exact reviewed SHA, main ref, owner actor, matching production pi
     assert.notEqual(result.status, 0, JSON.stringify(invalid));
     assert.match(result.diagnostics, /Rejected exact-market workflow dispatch/);
   }
-  assert.equal(runContract().status, 0);
-});
-test("the recurring pin comes only from the production environment variable and is exact, 40-hex, and non-secret diagnosed", () => {
-  const envIndex = workflow.indexOf("    environment: production");
-  const guardIndex = workflow.indexOf("id: pilot_attempt_guard");
-  const contractIndex = workflow.indexOf("id: contract");
-  assert.ok(envIndex >= 0 && envIndex < guardIndex && guardIndex < contractIndex);
-  assert.ok(workflow.includes("PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}"));
-  assert.doesNotMatch(workflow, /PIN:\s*\$\{\{\s*secrets\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
-  assert.equal(reviewedSha.length, 40);
-  assert.match(workflow, new RegExp(`REVIEWED_RELEASE_SHA="${reviewedSha}"`));
-
-  const accepted = runContract(naturalWakeOverrides({ PIN: reviewedSha }));
+  const accepted = runContract({ PIN: "" });
   assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.diagnostics, /source=production_environment_variable present=true length=40 format_valid=true matches_reviewed_release=true/);
-  assert.doesNotMatch(accepted.diagnostics, new RegExp(reviewedSha));
-
-  const invalidPins = [
-    ["missing", "", /present=false length=0 format_valid=false matches_reviewed_release=false/],
-    ["malformed", reviewedSha.slice(0, -1), /present=true length=39 format_valid=false matches_reviewed_release=false/],
-    ["whitespace-wrapped", ` ${reviewedSha} `, /format_valid=false matches_reviewed_release=false/],
-    ["stale", "e51d02ebe61d8e6eab998cb20d3814e8f14827cd", /format_valid=true matches_reviewed_release=false/],
-  ];
-  for (const [name, pin, diagnostic] of invalidPins) {
-    const result = runContract(naturalWakeOverrides({ PIN: pin }));
-    assert.notEqual(result.status, 0, `${name} pin must fail closed`);
-    assert.match(result.diagnostics, diagnostic);
-    if (pin.length > 0) assert.doesNotMatch(result.diagnostics, new RegExp(pin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
+  assert.match(accepted.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+  assert.equal(reviewedSha.length, 40);
+  assert.equal(runContract({ RELEASE_SHA_INPUT: retiredSha }).status, 1);
 });
-
+test("scheduled execution derives the private checkout and runner SHA only from the reviewed public release", () => {
+  assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
+  assert.doesNotMatch(workflow, /PIN:\s*\$\{\{/);
+  assert.match(workflow, /ref:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+  assert.match(workflow, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+  assert.match(contractShell, /echo "release_sha=\$REVIEWED_RELEASE_SHA" >> "\$GITHUB_OUTPUT"/);
+  const acceptedWithoutPin = runContract(naturalWakeOverrides({ PIN: "" }));
+  assert.equal(acceptedWithoutPin.status, 0, acceptedWithoutPin.diagnostics);
+  assert.match(acceptedWithoutPin.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+  const staleUnusedPin = runContract(naturalWakeOverrides({ PIN: "f".repeat(40) }));
+  assert.equal(staleUnusedPin.status, 0, staleUnusedPin.diagnostics);
+  assert.match(staleUnusedPin.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+  assert.doesNotMatch(workflow, /(?:vars|secrets)\.COVERED_GITHUB_SCHEDULER_ENABLED|COVERED_GITHUB_SCHEDULER_ENABLED:\s*\$\{\{/);
+});
 test("the outer pilot guard counts all natural wake attempts, including the current run, and stops before checkout after three", () => {
   const now = Date.now();
   const history = (count) => Array.from({ length: count }, (_, index) => ({
@@ -344,7 +331,7 @@ test("expired/invalid pilot windows, unsafe scope, and history failures fail clo
   const apiFailure = runPilotGuard({ overrides: { MOCK_CURL_FAIL: "true" } });
   assert.notEqual(apiFailure.status, 0);
   assert.match(apiFailure.diagnostics, /Could not read bounded pilot wake history/);
-  assert.match(workflow, /id: pilot_attempt_guard[\s\S]*?id: contract[\s\S]*?Check out PRIVATE Covered at the immutable production pin/);
+  assert.match(workflow, /id: pilot_attempt_guard[\s\S]*?id: contract[\s\S]*?Check out PRIVATE Covered at the public-reviewed immutable release SHA/);
   assert.match(workflow, /group:.*'covered2-wnba-refresh'/);
   assert.match(workflow, /cancel-in-progress:\s*false/);
   assert.match(workflow, /actions:\s*read/);
@@ -697,11 +684,11 @@ test("superseded repository_dispatch manual payload is explicitly rejected; ordi
   assert.equal(ordinary.status, 0);
   assert.match(ordinary.outputs, /^skip=true$/m);
   const gate = workflow.indexOf("C2 global scheduler gate is false; scheduled and ordinary repository_dispatch wakes exit before private checkout.");
-  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the public-reviewed immutable release SHA");
   assert.ok(gate >= 0 && checkout > gate);
 });
 
-test("scheduled wakes pass explicit false to the pinned private runner and reject malformed manual flags before checkout", () => {
+test("scheduled wakes pass explicit false to the public-reviewed private runner and reject malformed manual flags before checkout", () => {
   for (const value of ["", "false"]) {
     const accepted = runContract(naturalWakeOverrides({ MANUAL_VALIDATION: value }));
     assert.equal(accepted.status, 0, accepted.diagnostics);
@@ -718,7 +705,7 @@ test("scheduled wakes pass explicit false to the pinned private runner and rejec
   assert.ok(workflow.includes('echo "manual_validation=false" >> "$GITHUB_OUTPUT"'));
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
   const contract = workflow.indexOf("id: contract");
-  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the public-reviewed immutable release SHA");
   assert.ok(contract >= 0 && checkout > contract, "invalid flags fail before private checkout/provider code can run");
 });
 
@@ -855,7 +842,7 @@ test("scheduled dispatch emits the complete explicit-false private validation co
     assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*steps\\.contract\\.outputs\\.${output}\\s*\\}\\}`));
   }
   const contractStep = workflow.indexOf("id: contract");
-  const checkout = workflow.indexOf("Check out PRIVATE Covered at the immutable production pin");
+  const checkout = workflow.indexOf("Check out PRIVATE Covered at the public-reviewed immutable release SHA");
   const marketStep = workflow.indexOf("Run exactly one bounded C2 exact-market discovery");
   assert.ok(contractStep >= 0 && checkout > contractStep && marketStep > checkout);
 });
