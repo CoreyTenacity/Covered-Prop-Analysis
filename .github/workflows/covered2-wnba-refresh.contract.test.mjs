@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "739b821c09575f7baf4e2d77465e38a8422778f1";
+const reviewedSha = "b223298fb0b1a2dc31552b5c03f3cea8896f6235";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -340,7 +340,7 @@ test("expired/invalid pilot windows, unsafe scope, and history failures fail clo
 
 test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact discovery", () => {
   for (const [sport, market] of readyPairs) {
-    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market, ...(sport === "MLB" && market === "batter_total_bases" ? { MLB_GAME_PK_INPUT: "849810" } : {}) });
+    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market, ...(sport === "MLB" && market === "batter_total_bases" ? { MLB_GAME_PK_INPUT: "849817" } : {}) });
     assert.equal(result.status, 0, sport + "/" + market + ": " + result.diagnostics);
     assert.match(result.outputs, /^mode=manual-validation$/m);
     assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
@@ -355,19 +355,19 @@ test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact disc
   }
 });
 
-test("MLB Batter Total Bases manual discovery requires and forwards only gamePk 849810", () => {
+test("MLB Batter Total Bases manual discovery requires and forwards one bounded exact event gamePk", () => {
   const accepted = runContract({
     VALIDATION_SPORT_INPUT: "MLB",
     VALIDATION_MARKET_INPUT: "batter_total_bases",
-    MLB_GAME_PK_INPUT: "849810",
+    MLB_GAME_PK_INPUT: "849817",
   });
   assert.equal(accepted.status, 0, accepted.diagnostics);
   assert.match(accepted.outputs, /^mode=manual-validation$/m);
   assert.match(accepted.outputs, /^manual_validation=true$/m);
-  assert.match(accepted.outputs, /^mlb_game_pk=849810$/m);
-  assert.match(workflow, /mlb_game_pk:\s*\n\s*description:.*one-event Batter Total Bases proof/);
+  assert.match(accepted.outputs, /^mlb_game_pk=849817$/m);
+  assert.match(workflow, /mlb_game_pk:\s*\n\s*description:.*one-event Batter Total Bases (?:discovery or history hydration|proof)/);
   assert.match(workflow, /COVERED2_MANUAL_MLB_GAME_PK:\s*\$\{\{\s*steps\.contract\.outputs\.mlb_game_pk\s*\}\}/);
-  for (const invalid of ["", "849811", "84x810"]) {
+  for (const invalid of ["", "84x817", "0849817", "1234567890123"]) {
     const rejected = runContract({
       VALIDATION_SPORT_INPUT: "MLB",
       VALIDATION_MARKET_INPUT: "batter_total_bases",
@@ -378,7 +378,7 @@ test("MLB Batter Total Bases manual discovery requires and forwards only gamePk 
   const wrongMarket = runContract({
     VALIDATION_SPORT_INPUT: "MLB",
     VALIDATION_MARKET_INPUT: "pitcher_strikeouts",
-    MLB_GAME_PK_INPUT: "849810",
+    MLB_GAME_PK_INPUT: "849817",
   });
   assert.notEqual(wrongMarket.status, 0);
   assert.match(wrongMarket.diagnostics, /valid only for the exact MLB Batter Total Bases manual proof/);
@@ -559,17 +559,17 @@ test("MLB player-history hydration is exact-event, exact-market, write-bounded, 
     VALIDATION_SPORT_INPUT: "MLB",
     VALIDATION_MARKET_INPUT: "batter_total_bases",
     FORCE_DISCOVERY_INPUT: "false",
-    MLB_GAME_PK_INPUT: "849810",
+    MLB_GAME_PK_INPUT: "849817",
   });
   assert.equal(accepted.status, 0, accepted.diagnostics);
   assert.match(accepted.outputs, /^mode=manual-mlb-player-history-hydration$/m);
   assert.match(accepted.outputs, /^manual_validation=false$/m);
-  assert.match(accepted.outputs, /^mlb_game_pk=849810$/m);
+  assert.match(accepted.outputs, /^mlb_game_pk=849817$/m);
 
   for (const invalid of [
     { VALIDATION_SPORT_INPUT: "NFL" },
     { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
-    { MLB_GAME_PK_INPUT: "849811" },
+    { MLB_GAME_PK_INPUT: "84x817" },
     { FORCE_DISCOVERY_INPUT: "true" },
     { MLB_EVENT_DATE_INPUT: "2026-10-15" },
     { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
@@ -581,7 +581,7 @@ test("MLB player-history hydration is exact-event, exact-market, write-bounded, 
       VALIDATION_SPORT_INPUT: "MLB",
       VALIDATION_MARKET_INPUT: "batter_total_bases",
       FORCE_DISCOVERY_INPUT: "false",
-      MLB_GAME_PK_INPUT: "849810",
+    MLB_GAME_PK_INPUT: "849817",
       ...invalid,
     });
     assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
