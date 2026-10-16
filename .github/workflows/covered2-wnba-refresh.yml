@@ -15,7 +15,7 @@
 #   Cloudflare Worker `covered-github-dispatcher`, cron "0,30 11-23,0-4 * * *" UTC
 #     -> repository_dispatch `covered2-wnba-refresh`  (event type UNCHANGED on purpose)
 #     -> this workflow; repository-level preflight and Production gate must both authorize recurrence
-#     -> the private Covered repo checked out at COVERED_PRIVATE_PIPELINE_SHA_V2
+#     -> the private Covered repo checked out at the immutable SHA reviewed here
 #
 # The event type and file path are deliberately NOT renamed: the dispatcher
 # sends this exact event, and renaming either would break the only production
@@ -184,7 +184,6 @@ jobs:
     env:
       NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
       COVERED2_ALLOWED_EMAILS: ${{ secrets.COVERED2_ALLOWED_EMAILS }}
-      COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
       COVERED2_SCHEDULER_CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
       COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
       COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
@@ -351,7 +350,6 @@ jobs:
           SENDER: ${{ github.event.sender.login }}
           SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           ALLOWLIST: ${{ secrets.COVERED2_ALLOWED_EMAILS }}
-          PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
           CADENCE: ${{ vars.COVERED2_SCHEDULER_CADENCE }}
           DEPLOYMENT_AUTHORIZED: ${{ vars.COVERED2_PRODUCTION_DEPLOYMENT_AUTHORIZED }}
           CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
@@ -377,7 +375,6 @@ jobs:
               || [ "$SCHEDULER_ENABLED" != "false" ] \
               || [ "$RELEASE_SHA_INPUT" != "$REVIEWED_RELEASE_SHA" ] \
               || ! printf '%s' "$RELEASE_SHA_INPUT" | grep -Eq '^[0-9a-f]{40}$' \
-              || [ "$PIN" != "$REVIEWED_RELEASE_SHA" ] \
               || [ "$ALLOWLIST" != "corey093011@gmail.com" ] \
               || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] \
               || [ "$DEPLOYMENT_AUTHORIZED" != "true" ] \
@@ -555,18 +552,6 @@ jobs:
             echo "::error::Rejected C2 dispatch slot."
             exit 1
           fi
-          PIN_PRESENT=false
-          PIN_LENGTH="$(printf '%s' "$PIN" | wc -c | tr -d '[:space:]')"
-          PIN_FORMAT_VALID=false
-          PIN_MATCHES_REVIEWED=false
-          if [ -n "$PIN" ]; then PIN_PRESENT=true; fi
-          if printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then PIN_FORMAT_VALID=true; fi
-          if [ "$PIN" = "$REVIEWED_RELEASE_SHA" ]; then PIN_MATCHES_REVIEWED=true; fi
-          echo "C2 pin diagnostics: source=production_environment_variable present=$PIN_PRESENT length=$PIN_LENGTH format_valid=$PIN_FORMAT_VALID matches_reviewed_release=$PIN_MATCHES_REVIEWED"
-          if [ "$PIN_FORMAT_VALID" != "true" ] || [ "$PIN_MATCHES_REVIEWED" != "true" ]; then
-            echo "::error::Pinned private SHA is missing, malformed, or does not exactly match the reviewed release."
-            exit 1
-          fi
           if [ "$ALLOWLIST" != "corey093011@gmail.com" ] || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] || [ "$DEPLOYMENT_AUTHORIZED" != "true" ]; then
             echo "::error::C2 production activation configuration is incomplete."
             exit 1
@@ -579,12 +564,12 @@ jobs:
           echo "force_discovery=false" >> "$GITHUB_OUTPUT"
           echo "publish_board=false" >> "$GITHUB_OUTPUT"
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
-          echo "release_sha=$PIN" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$REVIEWED_RELEASE_SHA" >> "$GITHUB_OUTPUT"
           echo "sport=" >> "$GITHUB_OUTPUT"
           echo "market=" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      - name: Check out PRIVATE Covered at the immutable production pin
+      - name: Check out PRIVATE Covered at the public-reviewed immutable release SHA
         if: steps.contract.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
@@ -595,7 +580,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Verify private checkout exactly matches the immutable pin
+      - name: Verify private checkout exactly matches the public-reviewed release SHA
         if: steps.contract.outputs.skip != 'true'
         working-directory: private-covered
         env:
@@ -603,7 +588,7 @@ jobs:
         run: |
           GOT="$(git rev-parse HEAD)"
           if [ "$GOT" != "$EXPECTED_SHA" ]; then
-            echo "::error::Private checkout does not match the immutable production pin."
+            echo "::error::Private checkout does not match the public-reviewed immutable release SHA."
             exit 1
           fi
           echo "Private checkout pin verified."
@@ -694,7 +679,7 @@ jobs:
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
-          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
           COVERED2_MANUAL_MLB_EVENT_HYDRATION: "true"
           COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
@@ -811,7 +796,7 @@ jobs:
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
-          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
           COVERED2_MANUAL_MLB_PLAYER_HISTORY_HYDRATION: "true"
           COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
@@ -827,7 +812,7 @@ jobs:
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
-          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
           COVERED2_MANUAL_MLB_EVENT_HYDRATION: "true"
           COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
           COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
