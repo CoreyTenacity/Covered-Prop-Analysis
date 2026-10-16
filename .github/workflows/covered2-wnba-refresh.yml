@@ -368,7 +368,7 @@ jobs:
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
           MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
         run: |
-          REVIEWED_RELEASE_SHA="b223298fb0b1a2dc31552b5c03f3cea8896f6235"
+          REVIEWED_RELEASE_SHA="e9ba276cae8beff25ba94c374a0ff8c98ab38f81"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -625,7 +625,7 @@ jobs:
             const { refreshNflMarkets } = await import("./lib/knowledge/covered2/nfl-refresh/production.ts");
             const market = process.env.PREFLIGHT_MARKET;
             if (!["passing_yards", "receiving_yards", "rushing_yards"].includes(market)) throw new Error("unsupported_preflight_market");
-            const result = await refreshNflMarkets({ write: false, markets: [market] });
+            const result = await refreshNflMarkets({ write: false, markets: [market], includeReadOnlyDiagnostics: true });
             const manifest = result.byMarket[market]?.manifest;
             const evidence = {
               status: result.status,
@@ -635,6 +635,8 @@ jobs:
               marketRows: manifest?.marketRows ?? 0,
               lineRows: manifest?.lineRows ?? 0,
               unresolvedRows: manifest?.unresolvedRows ?? 0,
+              rejectionReasons: manifest?.rejectionReasons ?? {},
+              providerMarketTypeCounts: manifest?.providerMarketTypeCounts ?? {},
               eventCount: manifest?.events?.length ?? 0,
               currentPropKeyCount: manifest?.currentPropKeys?.length ?? 0,
             };

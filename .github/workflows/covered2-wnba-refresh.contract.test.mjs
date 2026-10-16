@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "b223298fb0b1a2dc31552b5c03f3cea8896f6235";
+const reviewedSha = "e9ba276cae8beff25ba94c374a0ff8c98ab38f81";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -486,7 +486,9 @@ test("read-only preflight is limited to one NFL market and cannot fall through t
   const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
   assert.equal(allowed.status, 0);
   assert.match(allowed.outputs, /^mode=manual-preflight$/m);
-  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\] \}\)/);
+  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
+  assert.match(workflow, /rejectionReasons: manifest\?\.rejectionReasons \?\? \{\}/);
+  assert.match(workflow, /providerMarketTypeCounts: manifest\?\.providerMarketTypeCounts \?\? \{\}/);
   assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
   for (const invalid of [
     { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
