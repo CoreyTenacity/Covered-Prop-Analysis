@@ -647,6 +647,7 @@ jobs:
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
           INVOCATION_ID: gha-c2-${{ steps.contract.outputs.mode }}-${{ github.run_id }}
           COVERED2_REFRESH_RUNTIME: ${{ steps.contract.outputs.manual_validation == 'true' && 'github-actions-c2-manual-validation' || 'github-actions-c2-wnba' }}
           COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.manual_validation }}
