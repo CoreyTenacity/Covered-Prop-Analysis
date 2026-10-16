@@ -846,3 +846,13 @@ test("scheduled dispatch emits the complete explicit-false private validation co
   const marketStep = workflow.indexOf("Run exactly one bounded C2 exact-market discovery");
   assert.ok(contractStep >= 0 && checkout > contractStep && marketStep > checkout);
 });
+
+test("manual exact-market discovery passes the reviewed release SHA into the private runtime contract", () => {
+  const start = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
+  assert.notEqual(start, -1);
+  const end = workflow.indexOf("\n      - name:", start + 1);
+  assert.notEqual(end, -1);
+  const discoveryStep = workflow.slice(start, end);
+  assert.match(discoveryStep, /EXPECTED_SHA:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+  assert.match(discoveryStep, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+});
