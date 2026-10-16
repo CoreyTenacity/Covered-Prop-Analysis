@@ -94,7 +94,7 @@ on:
         required: false
         type: string
       mlb_game_pk:
-        description: "Exact MLB gamePk for the one-event Batter Total Bases proof"
+        description: "Exact MLB gamePk for one-event Batter Total Bases discovery or history hydration"
         required: false
         type: string
 
@@ -368,7 +368,7 @@ jobs:
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
           MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
         run: |
-          REVIEWED_RELEASE_SHA="739b821c09575f7baf4e2d77465e38a8422778f1"
+          REVIEWED_RELEASE_SHA="b223298fb0b1a2dc31552b5c03f3cea8896f6235"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -405,8 +405,8 @@ jobs:
                   exit 1
                 fi
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" = "MLB:batter_total_bases" ]; then
-                  if [ "$MLB_GAME_PK_INPUT" != "849810" ]; then
-                    echo "::error::MLB Batter Total Bases manual proof requires the exact authorized gamePk 849810."
+                  if ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$'; then
+                    echo "::error::MLB Batter Total Bases manual operation requires one bounded positive numeric gamePk."
                     exit 1
                   fi
                   echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
@@ -471,7 +471,7 @@ jobs:
               mlb-player-history-hydration)
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
                   || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
-                  || [ "$MLB_GAME_PK_INPUT" != "849810" ] \
+                  || ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$' \
                   || [ -n "$SCORED_PROP_ID_INPUT" ] \
                   || [ -n "$MLB_EVENT_DATE_INPUT" ] \
                   || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
