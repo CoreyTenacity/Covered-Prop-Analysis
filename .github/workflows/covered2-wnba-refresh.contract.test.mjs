@@ -486,7 +486,9 @@ test("read-only preflight is limited to one NFL market and cannot fall through t
   const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
   assert.equal(allowed.status, 0);
   assert.match(allowed.outputs, /^mode=manual-preflight$/m);
-  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\] \}\)/);
+  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
+  assert.match(workflow, /rejectionReasons: manifest\?\.rejectionReasons \?\? \{\}/);
+  assert.match(workflow, /providerMarketTypeCounts: manifest\?\.providerMarketTypeCounts \?\? \{\}/);
   assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
   for (const invalid of [
     { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
