@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "1c069df82d2ae8a585c4d915f84c9b02a1ddb91f";
+const reviewedSha = "2f5bb6c11c6803f1b7d20dfb8dac9eb8aa0947cf";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
