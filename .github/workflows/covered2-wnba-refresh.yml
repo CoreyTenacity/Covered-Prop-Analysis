@@ -41,6 +41,7 @@ on:
           - mlb-game-identity-diagnostic
           - mlb-event-hydration
           - mlb-player-history-hydration
+          - wnba-event-hydration
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -95,6 +96,26 @@ on:
         type: string
       mlb_game_pk:
         description: "Exact MLB gamePk for one-event Batter Total Bases discovery or history hydration"
+        required: false
+        type: string
+      wnba_event_id:
+        description: "Exact ESPN event ID for one upcoming WNBA postseason event"
+        required: false
+        type: string
+      wnba_event_date:
+        description: "Exact official WNBA event date in Eastern Time"
+        required: false
+        type: string
+      wnba_event_start_time:
+        description: "Exact expected WNBA event start instant in canonical UTC"
+        required: false
+        type: string
+      wnba_home_team_id:
+        description: "Exact expected ESPN WNBA home team ID"
+        required: false
+        type: string
+      wnba_away_team_id:
+        description: "Exact expected ESPN WNBA away team ID"
         required: false
         type: string
 
@@ -367,6 +388,11 @@ jobs:
           MLB_GAME_TYPE_INPUT: ${{ inputs.mlb_game_type }}
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
           MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
+          WNBA_EVENT_ID_INPUT: ${{ inputs.wnba_event_id }}
+          WNBA_EVENT_DATE_INPUT: ${{ inputs.wnba_event_date }}
+          WNBA_EVENT_START_TIME_INPUT: ${{ inputs.wnba_event_start_time }}
+          WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
+          WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
           REVIEWED_RELEASE_SHA="66bd2fbfedee4637a700a28f2ec69f0b04a41a78"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
@@ -486,6 +512,41 @@ jobs:
                 echo "mode=manual-mlb-player-history-hydration" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              wnba-event-hydration)
+                for event_input in "$WNBA_EVENT_ID_INPUT" "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT" "$WNBA_HOME_TEAM_ID_INPUT" "$WNBA_AWAY_TEAM_ID_INPUT"; do
+                  case "$event_input" in
+                    *$'\n'*|*$'\r'*) echo "::error::WNBA event inputs may not contain line breaks."; exit 1 ;;
+                  esac
+                done
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "WNBA:rebounds" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$WNBA_EVENT_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19}$' \
+                  || ! printf '%s' "$WNBA_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                  || ! printf '%s' "$WNBA_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
+                  || ! printf '%s' "$WNBA_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]+$' \
+                  || ! printf '%s' "$WNBA_AWAY_TEAM_ID_INPUT" | grep -Eq '^[0-9]+$' \
+                  || [ "$WNBA_HOME_TEAM_ID_INPUT" = "$WNBA_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ -n "$MLB_EVENT_DATE_INPUT" ] \
+                  || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_GAME_TYPE_INPUT" ] \
+                  || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] \
+                  || [ -n "$MLB_GAME_PK_INPUT" ] \
+                  || [ "$SCHEDULER_ENABLED" != "false" ] \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::WNBA event hydration requires one exact upcoming-event target, paused scheduler, disabled certification writes, no discovery bypass, and no other operation inputs."
+                  exit 1
+                fi
+                echo "mode=manual-wnba-event-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "wnba_event_id=$WNBA_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "wnba_event_date=$WNBA_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "wnba_event_start_time=$WNBA_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                echo "wnba_home_team_id=$WNBA_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "wnba_away_team_id=$WNBA_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
                 ;;
               certification-one-observation)
                 if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
@@ -645,7 +706,7 @@ jobs:
           '
 
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration' && steps.contract.outputs.mode != 'manual-wnba-event-hydration'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -832,6 +893,30 @@ jobs:
             --official-date "$MLB_EVENT_DATE" --start-time "$MLB_EVENT_START_TIME" \
             --home-team-id "$MLB_HOME_TEAM_ID" --away-team-id "$MLB_AWAY_TEAM_ID" \
             --game-type "$MLB_GAME_TYPE" --series-description "$MLB_SERIES_DESCRIPTION"
+
+      - name: Admit exactly one upcoming WNBA postseason event only
+        if: steps.contract.outputs.mode == 'manual-wnba-event-hydration'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
+          COVERED2_MANUAL_WNBA_EVENT_HYDRATION: "true"
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ""
+          BBS_API_KEY: ""
+          WNBA_EVENT_ID: ${{ steps.contract.outputs.wnba_event_id }}
+          WNBA_EVENT_DATE: ${{ steps.contract.outputs.wnba_event_date }}
+          WNBA_EVENT_START_TIME: ${{ steps.contract.outputs.wnba_event_start_time }}
+          WNBA_HOME_TEAM_ID: ${{ steps.contract.outputs.wnba_home_team_id }}
+          WNBA_AWAY_TEAM_ID: ${{ steps.contract.outputs.wnba_away_team_id }}
+        run: |
+          node --experimental-strip-types --loader ./scripts/ts-path-loader.mjs ./scripts/run-covered2-wnba-event-hydration.mjs \
+            --event-id "$WNBA_EVENT_ID" --official-date "$WNBA_EVENT_DATE" \
+            --start-time "$WNBA_EVENT_START_TIME" \
+            --home-team-id "$WNBA_HOME_TEAM_ID" --away-team-id "$WNBA_AWAY_TEAM_ID"
 
       - name: Certify one existing exact-market observation
         if: steps.contract.outputs.mode == 'manual-certification'
