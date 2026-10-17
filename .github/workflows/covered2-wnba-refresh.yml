@@ -368,7 +368,7 @@ jobs:
           MLB_SERIES_DESCRIPTION_INPUT: ${{ inputs.mlb_series_description }}
           MLB_GAME_PK_INPUT: ${{ inputs.mlb_game_pk }}
         run: |
-          REVIEWED_RELEASE_SHA="2f5bb6c11c6803f1b7d20dfb8dac9eb8aa0947cf"
+          REVIEWED_RELEASE_SHA="66bd2fbfedee4637a700a28f2ec69f0b04a41a78"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
