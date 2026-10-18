@@ -529,12 +529,12 @@ test("one-shot MLB postseason event hydration is exact, owner-only, and cannot e
   assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
   assert.match(workflow, /run-covered2-mlb-event-hydration\.mjs/);
   const hydrationStart = workflow.indexOf("- name: Hydrate exactly one current MLB postseason event only");
-  const hydrationEnd = workflow.indexOf("\\n      - name:", hydrationStart + 1);
+  const hydrationEnd = workflow.indexOf("\n      - name:", hydrationStart + 1);
   assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart);
   const hydrationStep = workflow.slice(hydrationStart, hydrationEnd);
-  assert.match(hydrationStep, /MLB_GAME_PK:\\s*\\$\\{\\{\\s*steps\\.contract\\.outputs\\.mlb_game_pk\\s*\\}\\}/);
-  assert.match(hydrationStep, /--game-pk "\\$MLB_GAME_PK"/);
-  assert.doesNotMatch(hydrationStep, /SHARPAPI_KEY:\\s*\\$\\{\\{/);
+  assert.match(hydrationStep, /MLB_GAME_PK:\s*\$\{\{\s*steps\.contract\.outputs\.mlb_game_pk\s*\}\}/);
+  assert.match(hydrationStep, /--game-pk "\$MLB_GAME_PK"/);
+  assert.doesNotMatch(hydrationStep, /SHARPAPI_KEY:\s*\$\{\{/);
   assert.match(workflow, /mode != 'manual-mlb-event-hydration'/);
   assert.doesNotMatch(workflow, /schedule:\s*\n/);
   assert.match(workflow, /environment:\s*production/);
@@ -546,6 +546,7 @@ test("one-shot MLB postseason event hydration is exact, owner-only, and cannot e
     { MLB_GAME_PK_INPUT: "" },
     { MLB_GAME_PK_INPUT: "0" },
     { MLB_GAME_PK_INPUT: "84x817" },
+    { SCHEDULER_ENABLED: "true" },
     { MLB_EVENT_DATE_INPUT: "2026-10-14\n::warning::bad" },
     { MLB_EVENT_START_TIME_INPUT: "tomorrow" },
     { MLB_HOME_TEAM_ID_INPUT: "119\n" },
@@ -560,7 +561,7 @@ test("one-shot MLB postseason event hydration is exact, owner-only, and cannot e
       VALIDATION_MARKET_INPUT: "batter_total_bases",
       FORCE_DISCOVERY_INPUT: "false",
       MLB_GAME_PK_INPUT: "849817",
-    MLB_EVENT_DATE_INPUT: "2026-10-14",
+      MLB_EVENT_DATE_INPUT: "2026-10-14",
       MLB_EVENT_START_TIME_INPUT: "2026-10-15T00:00:00.000Z",
       MLB_HOME_TEAM_ID_INPUT: "119",
       MLB_AWAY_TEAM_ID_INPUT: "158",
@@ -656,10 +657,10 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
   assert.match(operation, /COVERED2_MANUAL_WNBA_EVENT_HYDRATION:\s*"true"/);
   assert.match(operation, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
   assert.match(operation, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.match(operation, /if \\[ -n "\\$WNBA_EVENT_ID" \\]; then/);
-  assert.match(operation, /WNBA_EVENT_ARGS=\\(--event-id "\\$WNBA_EVENT_ID"/);
-  assert.match(operation, /run-covered2-wnba-event-hydration\\.mjs "\\$\\{WNBA_EVENT_ARGS\\[@\\]\\}"/);
-  assert.doesNotMatch(operation, /run-covered2-wnba-event-hydration\\.mjs \\\\?\\s*--event-id/);
+  assert.ok(operation.includes('if [ -n "$WNBA_EVENT_ID" ]; then'));
+  assert.ok(operation.includes('WNBA_EVENT_ARGS=(--event-id "$WNBA_EVENT_ID" "${WNBA_EVENT_ARGS[@]}")'));
+  assert.ok(operation.includes('run-covered2-wnba-event-hydration.mjs "${WNBA_EVENT_ARGS[@]}"'));
+  assert.doesNotMatch(operation, /run-covered2-wnba-event-hydration\.mjs \s*--event-id/);
   assert.match(operation, /--official-date "\$WNBA_EVENT_DATE"/);
   assert.match(operation, /--start-time "\$WNBA_EVENT_START_TIME"/);
   assert.match(operation, /--home-team-id "\$WNBA_HOME_TEAM_ID"/);
@@ -676,6 +677,16 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
   assert.equal(scheduled.status, 0, scheduled.diagnostics);
   assert.match(scheduled.outputs, /^skip=true$/m);
   assert.doesNotMatch(scheduled.outputs, /manual-wnba-event-hydration|wnba_event_id=/);
+
+  const naturalMlbHydration = runContract(naturalWakeOverrides({
+    MANUAL_OPERATION: "mlb-event-hydration",
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "batter_total_bases",
+    MLB_GAME_PK_INPUT: "849817",
+  }));
+  assert.equal(naturalMlbHydration.status, 0, naturalMlbHydration.diagnostics);
+  assert.match(naturalMlbHydration.outputs, /^mode=scheduled$/m);
+  assert.doesNotMatch(naturalMlbHydration.outputs, /manual-mlb-event-hydration|mlb_game_pk=/);
 
   const naturalWnbaHydration = runContract(naturalWakeOverrides({
     MANUAL_OPERATION: "wnba-event-hydration",

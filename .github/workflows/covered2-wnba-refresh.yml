@@ -474,28 +474,7 @@ jobs:
                 done
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
                   || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
-                  || ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11} | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
-                  || ! printf '%s' "$MLB_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
-                  || ! printf '%s' "$MLB_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
-                  || ! printf '%s' "$MLB_AWAY_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
-                  || [ "$MLB_HOME_TEAM_ID_INPUT" = "$MLB_AWAY_TEAM_ID_INPUT" ] \
-                  || ! printf '%s' "$MLB_GAME_TYPE_INPUT" | grep -Eq '^[FDLW]$' \
-                  || ! printf '%s' "$MLB_SERIES_DESCRIPTION_INPUT" | grep -Eq "^[A-Za-z0-9 ,.'-]{3,80}$" \
-                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                  echo "::error::MLB event hydration requires one exact postseason event, paused scheduler, disabled certification writes, and no discovery bypass."
-                  exit 1
-                fi
-                echo "mode=manual-mlb-event-hydration" >> "$GITHUB_OUTPUT"
-                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
-                echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_event_start_time=$MLB_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_home_team_id=$MLB_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_away_team_id=$MLB_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_game_type=$MLB_GAME_TYPE_INPUT" >> "$GITHUB_OUTPUT"
-                echo "mlb_series_description=$MLB_SERIES_DESCRIPTION_INPUT" >> "$GITHUB_OUTPUT"
-                ;;
- \
+                  || ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$' \
                   || ! printf '%s' "$MLB_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
                   || ! printf '%s' "$MLB_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
                   || ! printf '%s' "$MLB_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
@@ -509,6 +488,7 @@ jobs:
                 fi
                 echo "mode=manual-mlb-event-hydration" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
                 echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
                 echo "mlb_event_start_time=$MLB_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
                 echo "mlb_home_team_id=$MLB_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
@@ -543,33 +523,7 @@ jobs:
                 done
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "WNBA:rebounds" ] \
                   || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
-                  || { [ -n "$WNBA_EVENT_ID_INPUT" ] && ! printf '%s' "$WNBA_EVENT_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19} | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
-                  || ! printf '%s' "$WNBA_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
-                  || ! printf '%s' "$WNBA_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]+$' \
-                  || ! printf '%s' "$WNBA_AWAY_TEAM_ID_INPUT" | grep -Eq '^[0-9]+$' \
-                  || [ "$WNBA_HOME_TEAM_ID_INPUT" = "$WNBA_AWAY_TEAM_ID_INPUT" ] \
-                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
-                  || [ -n "$MLB_EVENT_DATE_INPUT" ] \
-                  || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
-                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] \
-                  || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
-                  || [ -n "$MLB_GAME_TYPE_INPUT" ] \
-                  || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] \
-                  || [ -n "$MLB_GAME_PK_INPUT" ] \
-                  || [ "$SCHEDULER_ENABLED" != "false" ] \
-                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                  echo "::error::WNBA event hydration requires one exact upcoming-event target, paused scheduler, disabled certification writes, no discovery bypass, and no other operation inputs."
-                  exit 1
-                fi
-                echo "mode=manual-wnba-event-hydration" >> "$GITHUB_OUTPUT"
-                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
-                echo "wnba_event_id=$WNBA_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "wnba_event_date=$WNBA_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
-                echo "wnba_event_start_time=$WNBA_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
-                echo "wnba_home_team_id=$WNBA_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "wnba_away_team_id=$WNBA_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-                ;;
-; } \
+                  || { [ -n "$WNBA_EVENT_ID_INPUT" ] && ! printf '%s' "$WNBA_EVENT_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19}$'; } \
                   || ! printf '%s' "$WNBA_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
                   || ! printf '%s' "$WNBA_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
                   || ! printf '%s' "$WNBA_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]+$' \
