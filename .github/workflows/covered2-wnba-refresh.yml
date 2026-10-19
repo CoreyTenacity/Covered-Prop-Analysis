@@ -394,7 +394,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="084f7425d4811f623c2cda48c032dc2b8b5954a8"
+          REVIEWED_RELEASE_SHA="f95a02e67970255bfc0a5314f82a95b40f98c392"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
