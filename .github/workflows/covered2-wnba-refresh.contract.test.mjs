@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "f95a02e67970255bfc0a5314f82a95b40f98c392";
+const reviewedSha = "64e08ff5f386d51d69aacf76dcaee9144330cd4a";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -637,7 +637,7 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
     ["WNBA_HOME_TEAM_ID_INPUT", "wnba_home_team_id"],
     ["WNBA_AWAY_TEAM_ID_INPUT", "wnba_away_team_id"],
   ]) assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}`));
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="f95a02e67970255bfc0a5314f82a95b40f98c392"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="64e08ff5f386d51d69aacf76dcaee9144330cd4a"/);
   assert.match(workflow, /mode != 'manual-wnba-event-hydration'/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 
