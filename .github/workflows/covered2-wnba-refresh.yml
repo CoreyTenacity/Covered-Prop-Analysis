@@ -394,7 +394,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="f075e783be51c2d6eab743b37d00068f2ea8fb48"
+          REVIEWED_RELEASE_SHA="6b4e293103e2072d364999ed778c2ccaac632987"
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
@@ -422,12 +422,64 @@ jobs:
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 ;;
               exact-market-discovery)
-                if [ "$FORCE_DISCOVERY_INPUT" = "true" ] && [ "$VALIDATION_SPORT_INPUT" != "NFL" ]; then
-                  echo "::error::The discovery-cadence bypass is restricted to one NFL market."
-                  exit 1
-                fi
                 if [ "$FORCE_DISCOVERY_INPUT" != "true" ] && [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
                   echo "::error::force_discovery must be exactly true or false."
+                  exit 1
+                fi
+                if [ "$FORCE_DISCOVERY_INPUT" = "true" ] \
+                  && [ "$VALIDATION_SPORT_INPUT" != "NFL" ] \
+                  && [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "WNBA:rebounds" ]; then
+                  echo "::error::The discovery-cadence bypass is restricted to an existing NFL operation or one exact-event WNBA Rebounds proof."
+                  exit 1
+                fi
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" = "WNBA:rebounds" ] \
+                  && [ "$FORCE_DISCOVERY_INPUT" = "true" ]; then
+                  for event_input in "$WNBA_EVENT_ID_INPUT" "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT" "$WNBA_HOME_TEAM_ID_INPUT" "$WNBA_AWAY_TEAM_ID_INPUT"; do
+                    case "$event_input" in
+                      *$'\n'*|*$'\r'*) echo "::error::WNBA proof inputs may not contain line breaks."; exit 1 ;;
+                    esac
+                  done
+                  if ! printf '%s' "$WNBA_EVENT_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19}$' \
+                    || ! printf '%s' "$WNBA_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                    || ! printf '%s' "$WNBA_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
+                    || ! printf '%s' "$WNBA_HOME_TEAM_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19}$' \
+                    || ! printf '%s' "$WNBA_AWAY_TEAM_ID_INPUT" | grep -Eq '^[1-9][0-9]{0,19}$' \
+                    || [ "$WNBA_HOME_TEAM_ID_INPUT" = "$WNBA_AWAY_TEAM_ID_INPUT" ] \
+                    || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                    || [ -n "$MLB_EVENT_DATE_INPUT" ] \
+                    || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                    || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] \
+                    || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                    || [ -n "$MLB_GAME_TYPE_INPUT" ] \
+                    || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] \
+                    || [ -n "$MLB_GAME_PK_INPUT" ] \
+                    || [ "$SCHEDULER_ENABLED" != "false" ] \
+                    || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                    echo "::error::Forced WNBA Rebounds proof requires one complete exact event tuple, paused scheduler, disabled certification writes, and no incompatible operation inputs."
+                    exit 1
+                  fi
+                  if ! node -e '
+                    const [date, start] = process.argv.slice(1);
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/.test(start)) process.exit(1);
+                    const dateCheck = new Date(`${date}T00:00:00.000Z`);
+                    const startCheck = new Date(start);
+                    if (!Number.isFinite(dateCheck.getTime()) || dateCheck.toISOString().slice(0, 10) !== date
+                      || !Number.isFinite(startCheck.getTime()) || startCheck.toISOString() !== start) process.exit(1);
+                  ' "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT"; then
+                    echo "::error::WNBA proof date and start time must be valid canonical UTC values."
+                    exit 1
+                  fi
+                  echo "wnba_event_id=$WNBA_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_event_date=$WNBA_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_event_start_time=$WNBA_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_home_team_id=$WNBA_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_away_team_id=$WNBA_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                elif [ -n "$WNBA_EVENT_ID_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_DATE_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$WNBA_HOME_TEAM_ID_INPUT" ] \
+                  || [ -n "$WNBA_AWAY_TEAM_ID_INPUT" ]; then
+                  echo "::error::WNBA event tuple inputs are valid only for forced exact-event WNBA Rebounds discovery or WNBA event hydration."
                   exit 1
                 fi
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" = "MLB:batter_total_bases" ]; then
@@ -721,6 +773,11 @@ jobs:
           COVERED2_MANUAL_MLB_GAME_PK: ${{ steps.contract.outputs.mlb_game_pk }}
           COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
           COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
+          COVERED2_MANUAL_WNBA_EVENT_ID: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_event_id || '' }}
+          COVERED2_MANUAL_WNBA_EVENT_DATE: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_event_date || '' }}
+          COVERED2_MANUAL_WNBA_EVENT_START_TIME: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_event_start_time || '' }}
+          COVERED2_MANUAL_WNBA_HOME_TEAM_ID: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_home_team_id || '' }}
+          COVERED2_MANUAL_WNBA_AWAY_TEAM_ID: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_away_team_id || '' }}
           COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
           COVERED2_NFL_RECEIVING_PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
           COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
