@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "f075e783be51c2d6eab743b37d00068f2ea8fb48";
+const reviewedSha = "6b4e293103e2072d364999ed778c2ccaac632987";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -389,6 +389,139 @@ test("MLB Batter Total Bases manual discovery requires and forwards one bounded 
   assert.match(wrongMarket.diagnostics, /valid only for the exact MLB Batter Total Bases manual proof/);
 });
 
+test("forced WNBA Rebounds discovery requires one exact event tuple and forwards it only to the manual proof", () => {
+  const valid = {
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "WNBA",
+    VALIDATION_MARKET_INPUT: "rebounds",
+    FORCE_DISCOVERY_INPUT: "true",
+    WNBA_EVENT_ID_INPUT: "401918307",
+    WNBA_EVENT_DATE_INPUT: "2026-10-21",
+    WNBA_EVENT_START_TIME_INPUT: "2026-10-22T00:00:00.000Z",
+    WNBA_HOME_TEAM_ID_INPUT: "20",
+    WNBA_AWAY_TEAM_ID_INPUT: "129689",
+  };
+  const accepted = runContract(valid);
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-validation$/m);
+  assert.match(accepted.outputs, /^manual_validation=true$/m);
+  assert.match(accepted.outputs, /^force_discovery=true$/m);
+  for (const [output, value] of [
+    ["wnba_event_id", "401918307"],
+    ["wnba_event_date", "2026-10-21"],
+    ["wnba_event_start_time", "2026-10-22T00:00:00.000Z"],
+    ["wnba_home_team_id", "20"],
+    ["wnba_away_team_id", "129689"],
+  ]) assert.match(accepted.outputs, new RegExp(`^${output}=${value.replaceAll(".", "\\.")}$`, "m"));
+
+  const tupleInputs = [
+    "WNBA_EVENT_ID_INPUT",
+    "WNBA_EVENT_DATE_INPUT",
+    "WNBA_EVENT_START_TIME_INPUT",
+    "WNBA_HOME_TEAM_ID_INPUT",
+    "WNBA_AWAY_TEAM_ID_INPUT",
+  ];
+  for (const missing of tupleInputs) {
+    const rejected = runContract({ ...valid, [missing]: "" });
+    assert.notEqual(rejected.status, 0, `${missing} is required`);
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+  for (const invalid of [
+    { WNBA_EVENT_ID_INPUT: "0" },
+    { WNBA_EVENT_ID_INPUT: "4018x" },
+    { WNBA_EVENT_DATE_INPUT: "2026-02-30" },
+    { WNBA_EVENT_DATE_INPUT: "tomorrow" },
+    { WNBA_EVENT_START_TIME_INPUT: "2026-10-22T00:00:00Z" },
+    { WNBA_EVENT_START_TIME_INPUT: "2026-10-22T25:00:00.000Z" },
+    { WNBA_HOME_TEAM_ID_INPUT: "0" },
+    { WNBA_HOME_TEAM_ID_INPUT: "team-20" },
+    { WNBA_AWAY_TEAM_ID_INPUT: "0" },
+    { WNBA_AWAY_TEAM_ID_INPUT: "129x" },
+    { WNBA_AWAY_TEAM_ID_INPUT: "20" },
+    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
+    { MLB_GAME_PK_INPUT: "849817" },
+    { MLB_EVENT_DATE_INPUT: "2026-10-21" },
+    { MLB_EVENT_START_TIME_INPUT: "2026-10-22T00:00:00.000Z" },
+    { MLB_HOME_TEAM_ID_INPUT: "114" },
+    { MLB_AWAY_TEAM_ID_INPUT: "139" },
+    { MLB_GAME_TYPE_INPUT: "L" },
+    { MLB_SERIES_DESCRIPTION_INPUT: "AL Championship Series" },
+    { SCHEDULER_ENABLED: "true" },
+    { CERTIFICATION_LEDGER_ENABLED: "true" },
+  ]) {
+    const rejected = runContract({ ...valid, ...invalid });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m, "invalid tuple must fail before private checkout");
+  }
+
+  for (const invalidScope of [
+    { VALIDATION_SPORT_INPUT: "WNBA", VALIDATION_MARKET_INPUT: "points" },
+    { VALIDATION_SPORT_INPUT: "WNBA", VALIDATION_MARKET_INPUT: "assists" },
+    { VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "rebounds" },
+    { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
+  ]) {
+    const rejected = runContract({ ...valid, ...invalidScope });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalidScope));
+  }
+
+  const ordinaryWnba = runContract({
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "WNBA",
+    VALIDATION_MARKET_INPUT: "rebounds",
+    FORCE_DISCOVERY_INPUT: "false",
+  });
+  assert.equal(ordinaryWnba.status, 0, ordinaryWnba.diagnostics);
+  assert.match(ordinaryWnba.outputs, /^force_discovery=false$/m);
+  assert.doesNotMatch(ordinaryWnba.outputs, /^wnba_event_id=/m);
+
+  const nflForced = runContract({
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+    FORCE_DISCOVERY_INPUT: "true",
+  });
+  assert.equal(nflForced.status, 0, nflForced.diagnostics);
+  assert.match(nflForced.outputs, /^force_discovery=true$/m);
+
+  const mlbForced = runContract({
+    VALIDATION_SPORT_INPUT: "MLB",
+    VALIDATION_MARKET_INPUT: "batter_total_bases",
+    FORCE_DISCOVERY_INPUT: "true",
+    MLB_GAME_PK_INPUT: "849817",
+  });
+  assert.notEqual(mlbForced.status, 0, "existing MLB force-discovery prohibition remains unchanged");
+
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="6b4e293103e2072d364999ed778c2ccaac632987"/);
+  const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
+  const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
+  assert.ok(discoveryStart >= 0 && discoveryEnd > discoveryStart);
+  const discoveryStep = workflow.slice(discoveryStart, discoveryEnd);
+  for (const [name, output] of [
+    ["COVERED2_MANUAL_WNBA_EVENT_ID", "wnba_event_id"],
+    ["COVERED2_MANUAL_WNBA_EVENT_DATE", "wnba_event_date"],
+    ["COVERED2_MANUAL_WNBA_EVENT_START_TIME", "wnba_event_start_time"],
+    ["COVERED2_MANUAL_WNBA_HOME_TEAM_ID", "wnba_home_team_id"],
+    ["COVERED2_MANUAL_WNBA_AWAY_TEAM_ID", "wnba_away_team_id"],
+  ]) {
+    assert.match(discoveryStep, new RegExp(`${name}:.*mode == 'manual-validation'.*sport == 'WNBA'.*market == 'rebounds'.*force_discovery == 'true'.*steps\\.contract\\.outputs\\.${output}`));
+  }
+  assert.match(discoveryStep, /steps\.contract\.outputs\.mode == 'manual-validation'/);
+  assert.match(discoveryStep, /steps\.contract\.outputs\.market == 'rebounds'/);
+  assert.match(discoveryStep, /steps\.contract\.outputs\.force_discovery == 'true'/);
+  assert.doesNotMatch(discoveryStep, /run-covered2-wnba-event-hydration\.mjs|sharpapi/i);
+
+  const scheduled = runContract(naturalWakeOverrides({
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "WNBA",
+    VALIDATION_MARKET_INPUT: "rebounds",
+    FORCE_DISCOVERY_INPUT: "true",
+    ...Object.fromEntries(Object.entries(valid).filter(([key]) => key.endsWith("_INPUT"))),
+  }));
+  assert.equal(scheduled.status, 0, scheduled.diagnostics);
+  assert.match(scheduled.outputs, /^mode=scheduled$/m);
+  assert.match(scheduled.outputs, /^force_discovery=false$/m);
+  assert.doesNotMatch(scheduled.outputs, /wnba_event_id=|manual-validation/);
+});
+
 test("published board refresh is one owner-gated NFL receiving-yards run with scheduler and persistent writes off", () => {
   const accepted = runContract({
     MANUAL_OPERATION: "exact-market-board-refresh",
@@ -637,7 +770,7 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
     ["WNBA_HOME_TEAM_ID_INPUT", "wnba_home_team_id"],
     ["WNBA_AWAY_TEAM_ID_INPUT", "wnba_away_team_id"],
   ]) assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}`));
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="f075e783be51c2d6eab743b37d00068f2ea8fb48"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="6b4e293103e2072d364999ed778c2ccaac632987"/);
   assert.match(workflow, /mode != 'manual-wnba-event-hydration'/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 
@@ -646,7 +779,14 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
   assert.ok(genericStart >= 0 && genericEnd > genericStart);
   const generic = workflow.slice(genericStart, genericEnd);
   assert.match(generic, /mode != 'manual-wnba-event-hydration'/);
-  assert.doesNotMatch(generic, /WNBA_EVENT|run-covered2-wnba-event-hydration/);
+  assert.doesNotMatch(generic, /run-covered2-wnba-event-hydration/);
+  for (const name of [
+    "COVERED2_MANUAL_WNBA_EVENT_ID",
+    "COVERED2_MANUAL_WNBA_EVENT_DATE",
+    "COVERED2_MANUAL_WNBA_EVENT_START_TIME",
+    "COVERED2_MANUAL_WNBA_HOME_TEAM_ID",
+    "COVERED2_MANUAL_WNBA_AWAY_TEAM_ID",
+  ]) assert.match(generic, new RegExp(`${name}:.*mode == 'manual-validation'.*sport == 'WNBA'.*market == 'rebounds'.*force_discovery == 'true'`));
 
   const operationStart = workflow.indexOf("      - name: Admit exactly one upcoming WNBA postseason event only");
   const operationEnd = workflow.indexOf("\n      - name:", operationStart + 1);
