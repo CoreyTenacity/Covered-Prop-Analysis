@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "6afc03dd23acfc51263fdc6452ee043c5502e5ee";
+const reviewedSha = "19f52b9a88abdf5c0623a97ca9108bcd964883be";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -512,7 +512,7 @@ test("forced WNBA Rebounds discovery requires one exact event tuple and forwards
   });
   assert.notEqual(mlbForced.status, 0, "existing MLB force-discovery prohibition remains unchanged");
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="6afc03dd23acfc51263fdc6452ee043c5502e5ee"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"/);
   const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
   const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
   assert.ok(discoveryStart >= 0 && discoveryEnd > discoveryStart);
@@ -899,7 +899,7 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
     ["WNBA_HOME_TEAM_ID_INPUT", "wnba_home_team_id"],
     ["WNBA_AWAY_TEAM_ID_INPUT", "wnba_away_team_id"],
   ]) assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}`));
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="6afc03dd23acfc51263fdc6452ee043c5502e5ee"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"/);
   assert.match(workflow, /mode != 'manual-wnba-event-hydration'/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 

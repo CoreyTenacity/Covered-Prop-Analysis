@@ -439,7 +439,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="6afc03dd23acfc51263fdc6452ee043c5502e5ee"
+          REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"
           NFL_TARGET_SUPPLIED="false"
           for nfl_target_input in "$NFL_CANONICAL_EVENT_ID_INPUT" "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_PROVIDER_EVENT_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
             case "$nfl_target_input" in
