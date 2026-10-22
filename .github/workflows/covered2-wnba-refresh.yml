@@ -42,6 +42,7 @@ on:
           - mlb-event-hydration
           - mlb-player-history-hydration
           - wnba-event-hydration
+          - manual-nfl-event-hydration
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -59,7 +60,7 @@ on:
           - NBA
       validation_market:
         description: "Exact market key"
-        required: true
+        required: false
         type: string
       force_discovery:
         description: "Use the one-off NFL discovery-cadence bypass"
@@ -439,7 +440,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"
+          REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"
           NFL_TARGET_SUPPLIED="false"
           for nfl_target_input in "$NFL_CANONICAL_EVENT_ID_INPUT" "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_PROVIDER_EVENT_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
             case "$nfl_target_input" in
@@ -498,14 +499,21 @@ jobs:
               echo "::error::Rejected exact-market workflow dispatch; owner, repair ref, reviewed SHA, paused scheduler, and persistent gates are required."
               exit 1
             fi
-            case "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
-              NFL:receiving_yards|NFL:rushing_yards|MLB:batter_total_bases|MLB:pitcher_strikeouts|WNBA:rebounds|NBA:points|NBA:rebounds|NBA:assists) ;;
-              *) echo "::error::Unsupported exact sport/market pair."; exit 1 ;;
-            esac
+            if [ "$MANUAL_OPERATION" = "manual-nfl-event-hydration" ]; then
+              if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] || [ -n "$VALIDATION_MARKET_INPUT" ]; then
+                echo "::error::NFL event hydration is sport-only and does not accept a market selection."
+                exit 1
+              fi
+            else
+              case "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
+                NFL:receiving_yards|NFL:rushing_yards|MLB:batter_total_bases|MLB:pitcher_strikeouts|WNBA:rebounds|NBA:points|NBA:rebounds|NBA:assists) ;;
+                *) echo "::error::Unsupported exact sport/market pair."; exit 1 ;;
+              esac
+            fi
             if [ "$NFL_TARGET_SUPPLIED" = "true" ]; then
               case "$MANUAL_OPERATION:$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
                 exact-market-preflight:NFL:*) echo "::error::Read-only NFL preflight rejects exact-event tuple inputs."; exit 1 ;;
-                exact-market-discovery:NFL:receiving_yards|exact-market-discovery:NFL:rushing_yards|exact-market-board-refresh:NFL:receiving_yards) ;;
+                exact-market-discovery:NFL:receiving_yards|exact-market-discovery:NFL:rushing_yards|exact-market-board-refresh:NFL:receiving_yards|manual-nfl-event-hydration:NFL:*) ;;
                 *) echo "::error::NFL exact-event inputs are allowed only for write-capable manual NFL Receiving/Rushing operations."; exit 1 ;;
               esac
             fi
@@ -517,6 +525,65 @@ jobs:
                 fi
                 echo "mode=manual-preflight" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                ;;
+              manual-nfl-event-hydration)
+                hydration_values=("$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT")
+                for value in "${hydration_values[@]}"; do
+                  case "$value" in
+                    *$'\n'*|*$'\r'*) echo "::error::NFL hydration inputs may not contain line breaks."; exit 1 ;;
+                    "") echo "::error::NFL event hydration requires the complete seven-field exact-event tuple."; exit 1 ;;
+                  esac
+                done
+                for value in "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
+                  if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'; then
+                    echo "::error::NFL hydration identifiers must be safe non-empty identifiers."; exit 1
+                  fi
+                done
+                if ! printf '%s' "$NFL_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                  || ! printf '%s' "$NFL_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
+                  || ! printf '%s' "$NFL_HOME_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
+                  || ! printf '%s' "$NFL_AWAY_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
+                  || [ "$NFL_HOME_TEAM_INPUT" = "$NFL_AWAY_TEAM_INPUT" ] \
+                  || [ "$NFL_HOME_TEAM_ID_INPUT" = "$NFL_AWAY_TEAM_ID_INPUT" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ -n "$NFL_CANONICAL_EVENT_ID_INPUT" ] \
+                  || [ -n "$NFL_PROVIDER_EVENT_ID_INPUT" ] \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ -n "$MLB_EVENT_DATE_INPUT" ] || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_GAME_TYPE_INPUT" ] || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] || [ -n "$MLB_GAME_PK_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_ID_INPUT" ] || [ -n "$WNBA_EVENT_DATE_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_START_TIME_INPUT" ] || [ -n "$WNBA_HOME_TEAM_ID_INPUT" ] || [ -n "$WNBA_AWAY_TEAM_ID_INPUT" ] \
+                  || [ "$SCHEDULER_ENABLED" != "false" ] || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::NFL event hydration requires one complete NFL tuple, false safety gates, no market/force/board/scored-prop inputs, and no cross-sport identity inputs."
+                  exit 1
+                fi
+                if ! node -e '
+                  const [date, start] = process.argv.slice(1);
+                  const dateValue = new Date(`${date}T00:00:00.000Z`);
+                  const startValue = new Date(start);
+                  if (!Number.isFinite(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== date
+                    || !Number.isFinite(startValue.getTime()) || startValue.toISOString() !== start) process.exit(1);
+                ' "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT"; then
+                  echo "::error::NFL hydration date and kickoff must be valid canonical UTC values."; exit 1
+                fi
+                echo "mode=manual-nfl-event-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "sport=NFL" >> "$GITHUB_OUTPUT"
+                echo "market=" >> "$GITHUB_OUTPUT"
+                echo "manual_validation=true" >> "$GITHUB_OUTPUT"
+                echo "publish_board=false" >> "$GITHUB_OUTPUT"
+                echo "nfl_nflverse_game_id=$NFL_NFLVERSE_GAME_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_event_date=$NFL_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_event_start_time=$NFL_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_home_team=$NFL_HOME_TEAM_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_away_team=$NFL_AWAY_TEAM_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_home_team_id=$NFL_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "nfl_away_team_id=$NFL_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "skip=false" >> "$GITHUB_OUTPUT"
+                echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+                echo "exact_manual=true" >> "$GITHUB_OUTPUT"
+                exit 0
                 ;;
               exact-market-discovery)
                 if [ "$FORCE_DISCOVERY_INPUT" != "true" ] && [ "$FORCE_DISCOVERY_INPUT" != "false" ]; then
@@ -858,8 +925,34 @@ jobs:
             if (evidence.lineRows < 1 || evidence.eventCount < 1 || evidence.currentPropKeyCount < 1) throw new Error("no_live_exact_market_opportunity");
           '
 
+      - name: Admit exactly one NFL event using the dedicated event-only runner
+        if: steps.contract.outputs.mode == 'manual-nfl-event-hydration'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
+          COVERED2_MANUAL_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION_SPORT: NFL
+          COVERED2_MANUAL_VALIDATION_OPERATION: manual-nfl-event-hydration
+          COVERED2_MANUAL_NFLVERSE_GAME_ID: ${{ steps.contract.outputs.nfl_nflverse_game_id }}
+          COVERED2_MANUAL_NFL_EVENT_DATE: ${{ steps.contract.outputs.nfl_event_date }}
+          COVERED2_MANUAL_NFL_EVENT_START_TIME: ${{ steps.contract.outputs.nfl_event_start_time }}
+          COVERED2_MANUAL_NFL_HOME_TEAM: ${{ steps.contract.outputs.nfl_home_team }}
+          COVERED2_MANUAL_NFL_AWAY_TEAM: ${{ steps.contract.outputs.nfl_away_team }}
+          COVERED2_MANUAL_NFL_HOME_TEAM_ID: ${{ steps.contract.outputs.nfl_home_team_id }}
+          COVERED2_MANUAL_NFL_AWAY_TEAM_ID: ${{ steps.contract.outputs.nfl_away_team_id }}
+          COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: ${{ steps.contract.outputs.force_discovery }}
+          COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: ${{ steps.contract.outputs.publish_board }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ""
+          BBS_API_KEY: ""
+        run: pnpm run covered2:nfl-event-hydration
+
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration' && steps.contract.outputs.mode != 'manual-wnba-event-hydration'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration' && steps.contract.outputs.mode != 'manual-wnba-event-hydration' && steps.contract.outputs.mode != 'manual-nfl-event-hydration'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
@@ -1138,5 +1231,6 @@ jobs:
 
 # The owner-gated MLB identity diagnostic above is read-only; event hydration
 # writes one canonical schedule target, and player-history hydration writes only
-# bounded target-player logs. No NBA, NFL, scoring, board,
+# bounded target-player logs. NFL event hydration writes one exact schedule
+# event/mapping only. No NBA, NFL market discovery, scoring, board,
 # publication, grading, snapshot, Automatic Picks, or source export is added.
