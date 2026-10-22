@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "6b4e293103e2072d364999ed778c2ccaac632987";
+const reviewedSha = "6afc03dd23acfc51263fdc6452ee043c5502e5ee";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -36,6 +36,18 @@ function extractContractShell() {
 }
 
 const contractShell = extractContractShell();
+
+const validNflTarget = {
+  NFL_CANONICAL_EVENT_ID_INPUT: "event-2026-chi-ne",
+  NFL_NFLVERSE_GAME_ID_INPUT: "2026_08_CHI_NE",
+  NFL_PROVIDER_EVENT_ID_INPUT: "provider-event-chi-ne",
+  NFL_EVENT_DATE_INPUT: "2026-10-22",
+  NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00.000Z",
+  NFL_HOME_TEAM_INPUT: "CHI",
+  NFL_AWAY_TEAM_INPUT: "NE",
+  NFL_HOME_TEAM_ID_INPUT: "canonical-bears",
+  NFL_AWAY_TEAM_ID_INPUT: "canonical-patriots",
+};
 
 function extractPilotGuardShell() {
   const guardStep = workflow.indexOf("        id: pilot_attempt_guard");
@@ -135,6 +147,15 @@ function runContract(overrides = {}) {
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
     FORCE_DISCOVERY_INPUT: "false",
+    NFL_CANONICAL_EVENT_ID_INPUT: "",
+    NFL_NFLVERSE_GAME_ID_INPUT: "",
+    NFL_PROVIDER_EVENT_ID_INPUT: "",
+    NFL_EVENT_DATE_INPUT: "",
+    NFL_EVENT_START_TIME_INPUT: "",
+    NFL_HOME_TEAM_INPUT: "",
+    NFL_AWAY_TEAM_INPUT: "",
+    NFL_HOME_TEAM_ID_INPUT: "",
+    NFL_AWAY_TEAM_ID_INPUT: "",
     SCORED_PROP_ID_INPUT: "",
     MLB_EVENT_DATE_INPUT: "",
     MLB_EVENT_START_TIME_INPUT: "",
@@ -250,7 +271,7 @@ test("only the public-reviewed immutable SHA is executable; manual callers canno
     assert.notEqual(result.status, 0, JSON.stringify(invalid));
     assert.match(result.diagnostics, /Rejected exact-market workflow dispatch/);
   }
-  const accepted = runContract({ PIN: "" });
+  const accepted = runContract({ PIN: "", ...validNflTarget });
   assert.equal(accepted.status, 0, accepted.diagnostics);
   assert.match(accepted.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
   assert.equal(reviewedSha.length, 40);
@@ -345,7 +366,7 @@ test("expired/invalid pilot windows, unsafe scope, and history failures fail clo
 
 test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact discovery", () => {
   for (const [sport, market] of readyPairs) {
-    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market, ...(sport === "MLB" && market === "batter_total_bases" ? { MLB_GAME_PK_INPUT: "849817" } : {}) });
+    const result = runContract({ VALIDATION_SPORT_INPUT: sport, VALIDATION_MARKET_INPUT: market, ...(sport === "MLB" && market === "batter_total_bases" ? { MLB_GAME_PK_INPUT: "849817" } : {}), ...(sport === "NFL" ? validNflTarget : {}) });
     assert.equal(result.status, 0, sport + "/" + market + ": " + result.diagnostics);
     assert.match(result.outputs, /^mode=manual-validation$/m);
     assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
@@ -478,6 +499,7 @@ test("forced WNBA Rebounds discovery requires one exact event tuple and forwards
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
     FORCE_DISCOVERY_INPUT: "true",
+    ...validNflTarget,
   });
   assert.equal(nflForced.status, 0, nflForced.diagnostics);
   assert.match(nflForced.outputs, /^force_discovery=true$/m);
@@ -490,7 +512,7 @@ test("forced WNBA Rebounds discovery requires one exact event tuple and forwards
   });
   assert.notEqual(mlbForced.status, 0, "existing MLB force-discovery prohibition remains unchanged");
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="6b4e293103e2072d364999ed778c2ccaac632987"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="6afc03dd23acfc51263fdc6452ee043c5502e5ee"/);
   const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
   const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
   assert.ok(discoveryStart >= 0 && discoveryEnd > discoveryStart);
@@ -522,18 +544,20 @@ test("forced WNBA Rebounds discovery requires one exact event tuple and forwards
   assert.doesNotMatch(scheduled.outputs, /wnba_event_id=|manual-validation/);
 });
 
-test("published board refresh is one owner-gated NFL receiving-yards run with scheduler and persistent writes off", () => {
+test("published board refresh requires and forwards an exact NFL receiving event", () => {
   const accepted = runContract({
     MANUAL_OPERATION: "exact-market-board-refresh",
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
     FORCE_DISCOVERY_INPUT: "true",
+    ...validNflTarget,
   });
   assert.equal(accepted.status, 0, accepted.diagnostics);
   assert.match(accepted.outputs, /^mode=manual-board-refresh$/m);
   assert.match(accepted.outputs, /^manual_validation=true$/m);
   assert.match(accepted.outputs, /^publish_board=true$/m);
   assert.match(accepted.outputs, /^force_discovery=true$/m);
+  assert.match(accepted.outputs, /^nfl_canonical_event_id=event-2026-chi-ne$/m);
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:\s*\$\{\{\s*steps\.contract\.outputs\.publish_board\s*\}\}/);
   assert.match(workflow, /COVERED2_MANUAL_VALIDATION:\s*\$\{\{\s*steps\.contract\.outputs\.manual_validation\s*\}\}/);
   assert.match(workflow, /COVERED2_SCHEDULED_MARKET_SCOPE:\s*\$\{\{\s*vars\.COVERED2_SCHEDULED_MARKET_SCOPE\s*\}\}/);
@@ -545,6 +569,7 @@ test("published board refresh is one owner-gated NFL receiving-yards run with sc
   assert.match(workflow, /COVERED2_NFL_RECEPTIONS_REFRESH:.*manual_validation == 'true'.*market == 'receptions'.*'false'.*vars\.COVERED2_NFL_RECEPTIONS_REFRESH/);
   assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
   assert.doesNotMatch(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*"true"/);
+  const missingTarget=runContract({MANUAL_OPERATION:"exact-market-board-refresh",VALIDATION_SPORT_INPUT:"NFL",VALIDATION_MARKET_INPUT:"receiving_yards",FORCE_DISCOVERY_INPUT:"true"}); assert.notEqual(missingTarget.status,0); assert.doesNotMatch(missingTarget.outputs,/^release_sha=/m);
   for (const invalid of [
     { VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "rushing_yards" },
     { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
@@ -620,8 +645,112 @@ test("current-analysis certification accepts only one exact NFL receiving-yards 
   assert.match(workflow, /Certify one current NFL receiving-yards analysis/);
   assert.ok(workflow.includes("steps.contract.outputs.mode == 'manual-current-analysis-certification'"));
 });
+test("manual NFL exact-event tuple is mandatory only for write-capable Receiving/Rushing discovery", () => {
+  const fields = [
+    ["nfl_canonical_event_id", "NFL_CANONICAL_EVENT_ID_INPUT"],
+    ["nfl_nflverse_game_id", "NFL_NFLVERSE_GAME_ID_INPUT"],
+    ["nfl_provider_event_id", "NFL_PROVIDER_EVENT_ID_INPUT"],
+    ["nfl_event_date", "NFL_EVENT_DATE_INPUT"],
+    ["nfl_event_start_time", "NFL_EVENT_START_TIME_INPUT"],
+    ["nfl_home_team", "NFL_HOME_TEAM_INPUT"],
+    ["nfl_away_team", "NFL_AWAY_TEAM_INPUT"],
+    ["nfl_home_team_id", "NFL_HOME_TEAM_ID_INPUT"],
+    ["nfl_away_team_id", "NFL_AWAY_TEAM_ID_INPUT"],
+  ];
+  for (const market of ["receiving_yards", "rushing_yards"]) {
+    const accepted = runContract({
+      MANUAL_OPERATION: "exact-market-discovery",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: market,
+      ...validNflTarget,
+    });
+    assert.equal(accepted.status, 0, market + ": " + accepted.diagnostics);
+    for (const [output, input] of fields) {
+      assert.match(accepted.outputs, new RegExp("^" + output + "=" + validNflTarget[input] + "$", "m"));
+      const workflowInput = "nfl_" + input.replace(/^NFL_/, "").replace(/_INPUT$/, "").toLowerCase();
+      assert.match(workflow, new RegExp("^      " + workflowInput + ":$", "m"));
+      assert.match(workflow, new RegExp("inputs\\." + workflowInput + "\\s*\\}\\}"));
+    }
+  }
+
+  for (const missing of Object.keys(validNflTarget)) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "exact-market-discovery",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: "receiving_yards",
+      ...validNflTarget,
+      [missing]: "",
+    });
+    assert.notEqual(rejected.status, 0, missing + " is required");
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+
+  const invalidInputs = [
+    ...["NFL_CANONICAL_EVENT_ID_INPUT", "NFL_NFLVERSE_GAME_ID_INPUT", "NFL_PROVIDER_EVENT_ID_INPUT", "NFL_HOME_TEAM_ID_INPUT", "NFL_AWAY_TEAM_ID_INPUT"]
+      .map((key) => ({ [key]: "unsafe/id" })),
+    { NFL_EVENT_DATE_INPUT: "2026-02-30" },
+    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00Z" },
+    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T25:15:00.000Z" },
+    { NFL_HOME_TEAM_INPUT: "Chi" },
+    { NFL_AWAY_TEAM_INPUT: "CHI" },
+    { NFL_HOME_TEAM_ID_INPUT: "same", NFL_AWAY_TEAM_ID_INPUT: "same" },
+    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
+    { MLB_GAME_PK_INPUT: "849817" },
+    { MLB_EVENT_DATE_INPUT: "2026-10-22" },
+    { WNBA_EVENT_ID_INPUT: "401918307" },
+  ];
+  for (const invalid of invalidInputs) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "exact-market-discovery",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: "receiving_yards",
+      ...validNflTarget,
+      ...invalid,
+    });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+
+  const passing = runContract({
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "passing_yards",
+    ...validNflTarget,
+  });
+  assert.notEqual(passing.status, 0, "Passing remains blocked");
+  assert.ok(passing.diagnostics.includes("Unsupported exact sport/market pair"));
+
+  for (const [key, output] of [
+    ["CANONICAL_EVENT_ID", "canonical_event_id"],
+    ["NFLVERSE_GAME_ID", "nflverse_game_id"],
+    ["PROVIDER_EVENT_ID", "provider_event_id"],
+    ["EVENT_DATE", "event_date"],
+    ["EVENT_START_TIME", "event_start_time"],
+    ["HOME_TEAM", "home_team"],
+    ["AWAY_TEAM", "away_team"],
+    ["HOME_TEAM_ID", "home_team_id"],
+    ["AWAY_TEAM_ID", "away_team_id"],
+  ]) {
+    const line = workflow.split("\n").find((value) => value.includes("COVERED2_MANUAL_NFL_" + key + ":"));
+    assert.ok(line);
+    assert.match(line, /mode == 'manual-validation'/);
+    assert.match(line, new RegExp("steps\\.contract\\.outputs\\.nfl_" + output));
+    assert.match(line, /mode == 'manual-board-refresh'/);
+  }
+
+  const scheduled = runContract(naturalWakeOverrides({
+    ...validNflTarget,
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+  }));
+  assert.equal(scheduled.status, 0, scheduled.diagnostics);
+  assert.match(scheduled.outputs, /^mode=scheduled$/m);
+  assert.doesNotMatch(scheduled.outputs, /^nfl_/m);
+});
 test("read-only preflight is limited to one NFL market and cannot fall through to discovery", () => {
   const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
+  const tupleRejected=runContract({MANUAL_OPERATION:"exact-market-preflight",...validNflTarget}); assert.notEqual(tupleRejected.status,0); assert.match(tupleRejected.diagnostics,/preflight rejects exact-event tuple/);
   assert.equal(allowed.status, 0);
   assert.match(allowed.outputs, /^mode=manual-preflight$/m);
   assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
@@ -770,7 +899,7 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
     ["WNBA_HOME_TEAM_ID_INPUT", "wnba_home_team_id"],
     ["WNBA_AWAY_TEAM_ID_INPUT", "wnba_away_team_id"],
   ]) assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}`));
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="6b4e293103e2072d364999ed778c2ccaac632987"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="6afc03dd23acfc51263fdc6452ee043c5502e5ee"/);
   assert.match(workflow, /mode != 'manual-wnba-event-hydration'/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 
@@ -1094,7 +1223,7 @@ test("manual owner dispatch bypasses only the recurring repository gate and rema
     assert.match(rejected.outputs, /^allow_refresh=false$/m);
   }
 
-  const acceptedManual = runContract({ TRIGGER: "workflow_dispatch", SCHEDULER_ENABLED: "false" });
+  const acceptedManual = runContract({ TRIGGER: "workflow_dispatch", SCHEDULER_ENABLED: "false", ...validNflTarget });
   assert.equal(acceptedManual.status, 0, acceptedManual.diagnostics);
   assert.match(acceptedManual.outputs, /^exact_manual=true$/m);
 
