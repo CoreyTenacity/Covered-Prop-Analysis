@@ -6,7 +6,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "19f52b9a88abdf5c0623a97ca9108bcd964883be";
+const reviewedSha = "a57d76cb6b72039724ed4832d25c4e1e4ef04547";
+const priorReviewedSha = "19f52b9a88abdf5c0623a97ca9108bcd964883be";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
@@ -41,6 +42,16 @@ const validNflTarget = {
   NFL_CANONICAL_EVENT_ID_INPUT: "event-2026-chi-ne",
   NFL_NFLVERSE_GAME_ID_INPUT: "2026_08_CHI_NE",
   NFL_PROVIDER_EVENT_ID_INPUT: "provider-event-chi-ne",
+  NFL_EVENT_DATE_INPUT: "2026-10-22",
+  NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00.000Z",
+  NFL_HOME_TEAM_INPUT: "CHI",
+  NFL_AWAY_TEAM_INPUT: "NE",
+  NFL_HOME_TEAM_ID_INPUT: "canonical-bears",
+  NFL_AWAY_TEAM_ID_INPUT: "canonical-patriots",
+};
+
+const validNflHydrationTarget = {
+  NFL_NFLVERSE_GAME_ID_INPUT: "2026_08_CHI_NE",
   NFL_EVENT_DATE_INPUT: "2026-10-22",
   NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00.000Z",
   NFL_HOME_TEAM_INPUT: "CHI",
@@ -512,7 +523,8 @@ test("forced WNBA Rebounds discovery requires one exact event tuple and forwards
   });
   assert.notEqual(mlbForced.status, 0, "existing MLB force-discovery prohibition remains unchanged");
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"/);
+  assert.match(workflow, new RegExp(`REVIEWED_RELEASE_SHA="${reviewedSha}"`));
+  assert.doesNotMatch(workflow, new RegExp(priorReviewedSha));
   const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
   const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
   assert.ok(discoveryStart >= 0 && discoveryEnd > discoveryStart);
@@ -731,7 +743,9 @@ test("manual NFL exact-event tuple is mandatory only for write-capable Receiving
     ["HOME_TEAM_ID", "home_team_id"],
     ["AWAY_TEAM_ID", "away_team_id"],
   ]) {
-    const line = workflow.split("\n").find((value) => value.includes("COVERED2_MANUAL_NFL_" + key + ":"));
+    const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
+    const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
+    const line = workflow.slice(discoveryStart, discoveryEnd).split("\n").find((value) => value.includes("COVERED2_MANUAL_NFL_" + key + ":"));
     assert.ok(line);
     assert.match(line, /mode == 'manual-validation'/);
     assert.match(line, new RegExp("steps\\.contract\\.outputs\\.nfl_" + output));
@@ -747,6 +761,127 @@ test("manual NFL exact-event tuple is mandatory only for write-capable Receiving
   assert.equal(scheduled.status, 0, scheduled.diagnostics);
   assert.match(scheduled.outputs, /^mode=scheduled$/m);
   assert.doesNotMatch(scheduled.outputs, /^nfl_/m);
+});
+
+test("manual NFL event hydration accepts only its seven-field event tuple and a dedicated event-only runner", () => {
+  const accepted = runContract({
+    MANUAL_OPERATION: "manual-nfl-event-hydration",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "",
+    FORCE_DISCOVERY_INPUT: "false",
+    ...validNflHydrationTarget,
+  });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^mode=manual-nfl-event-hydration$/m);
+  assert.match(accepted.outputs, /^sport=NFL$/m);
+  assert.match(accepted.outputs, /^market=$/m);
+  assert.match(accepted.outputs, /^manual_validation=true$/m);
+  assert.match(accepted.outputs, /^force_discovery=false$/m);
+  assert.match(accepted.outputs, /^publish_board=false$/m);
+  assert.doesNotMatch(accepted.outputs, /^nfl_canonical_event_id=/m);
+  assert.doesNotMatch(accepted.outputs, /^nfl_provider_event_id=/m);
+  for (const [output, input] of [
+    ["nfl_nflverse_game_id", "NFL_NFLVERSE_GAME_ID_INPUT"],
+    ["nfl_event_date", "NFL_EVENT_DATE_INPUT"],
+    ["nfl_event_start_time", "NFL_EVENT_START_TIME_INPUT"],
+    ["nfl_home_team", "NFL_HOME_TEAM_INPUT"],
+    ["nfl_away_team", "NFL_AWAY_TEAM_INPUT"],
+    ["nfl_home_team_id", "NFL_HOME_TEAM_ID_INPUT"],
+    ["nfl_away_team_id", "NFL_AWAY_TEAM_ID_INPUT"],
+  ]) assert.match(accepted.outputs, new RegExp(`^${output}=${validNflHydrationTarget[input]}$`, "m"));
+
+  assert.match(workflow, /^          - manual-nfl-event-hydration$/m);
+  const marketInput = workflow.match(/^      validation_market:\n([\s\S]*?)(?=^      [a-z_]+:\n)/m)?.[1] ?? "";
+  assert.match(marketInput, /^        required: false$/m, "hydration does not require a market selection");
+  const stepStart = workflow.indexOf("      - name: Admit exactly one NFL event using the dedicated event-only runner");
+  const stepEnd = workflow.indexOf("\n      - name:", stepStart + 1);
+  assert.ok(stepStart >= 0 && stepEnd > stepStart);
+  const step = workflow.slice(stepStart, stepEnd);
+  assert.match(step, /if: steps\.contract\.outputs\.mode == 'manual-nfl-event-hydration'/);
+  assert.match(step, /run: pnpm run covered2:nfl-event-hydration/);
+  assert.match(step, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
+  assert.match(step, /COVERED2_MANUAL_VALIDATION:\s*"true"/);
+  assert.match(step, /COVERED2_MANUAL_VALIDATION_SPORT:\s*NFL/);
+  assert.match(step, /COVERED2_MANUAL_VALIDATION_OPERATION:\s*manual-nfl-event-hydration/);
+  for (const [name, output] of [
+    ["COVERED2_MANUAL_NFLVERSE_GAME_ID", "nfl_nflverse_game_id"],
+    ["COVERED2_MANUAL_NFL_EVENT_DATE", "nfl_event_date"],
+    ["COVERED2_MANUAL_NFL_EVENT_START_TIME", "nfl_event_start_time"],
+    ["COVERED2_MANUAL_NFL_HOME_TEAM", "nfl_home_team"],
+    ["COVERED2_MANUAL_NFL_AWAY_TEAM", "nfl_away_team"],
+    ["COVERED2_MANUAL_NFL_HOME_TEAM_ID", "nfl_home_team_id"],
+    ["COVERED2_MANUAL_NFL_AWAY_TEAM_ID", "nfl_away_team_id"],
+  ]) assert.match(step, new RegExp(`${name}:.*steps\\.contract\\.outputs\\.${output}`));
+  assert.match(step, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
+  assert.match(step, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
+  assert.match(step, /COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY:.*force_discovery/);
+  assert.match(step, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:.*publish_board/);
+  assert.doesNotMatch(step, /COVERED2_MANUAL_VALIDATION_MARKET|COVERED2_MANUAL_NFL_CANONICAL_EVENT_ID|COVERED2_MANUAL_NFL_PROVIDER_EVENT_ID|COVERED2_MANUAL_MARKET_LINE/);
+  assert.match(step, /^        run: pnpm run covered2:nfl-event-hydration$/m);
+  assert.doesNotMatch(step, /run-covered2-wnba-refresh\.mjs|run-covered2-nfl-refresh|run-covered2-certification|refreshNflMarkets|SHARPAPI_KEY:\s*\$\{\{/i);
+
+  const genericStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
+  const genericEnd = workflow.indexOf("\n      - name:", genericStart + 1);
+  const generic = workflow.slice(genericStart, genericEnd);
+  assert.match(generic.split("\n")[1] ?? "", /mode != 'manual-nfl-event-hydration'/);
+});
+
+test("manual NFL hydration fails closed on partial, invalid, cross-sport, market, force, board, or scored-prop inputs", () => {
+  for (const missing of Object.keys(validNflHydrationTarget)) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "manual-nfl-event-hydration",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: "",
+      ...validNflHydrationTarget,
+      [missing]: "",
+    });
+    assert.notEqual(rejected.status, 0, `${missing} must be required`);
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+  for (const invalid of [
+    { VALIDATION_SPORT_INPUT: "NBA" },
+    { VALIDATION_MARKET_INPUT: "receiving_yards" },
+    { FORCE_DISCOVERY_INPUT: "true" },
+    { NFL_CANONICAL_EVENT_ID_INPUT: "event-id-is-not-an-hydration-input" },
+    { NFL_PROVIDER_EVENT_ID_INPUT: "provider-id-is-not-an-hydration-input" },
+    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
+    { MLB_GAME_PK_INPUT: "849817" },
+    { MLB_EVENT_DATE_INPUT: "2026-10-22" },
+    { WNBA_EVENT_ID_INPUT: "401918307" },
+    { WNBA_EVENT_DATE_INPUT: "2026-10-22" },
+    { NFL_EVENT_DATE_INPUT: "2026-02-30" },
+    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00Z" },
+    { NFL_HOME_TEAM_INPUT: "Chi" },
+    { NFL_AWAY_TEAM_ID_INPUT: "canonical-bears" },
+    { SCHEDULER_ENABLED: "true" },
+    { CERTIFICATION_LEDGER_ENABLED: "true" },
+  ]) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "manual-nfl-event-hydration",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: "",
+      FORCE_DISCOVERY_INPUT: "false",
+      ...validNflHydrationTarget,
+      ...invalid,
+    });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: \$\{\{ steps\.contract\.outputs\.publish_board \}\}/);
+});
+
+test("scheduled execution cannot select or forward the manual NFL hydration tuple", () => {
+  const scheduled = runContract(naturalWakeOverrides({
+    MANUAL_OPERATION: "manual-nfl-event-hydration",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "",
+    ...validNflHydrationTarget,
+  }));
+  assert.equal(scheduled.status, 0, scheduled.diagnostics);
+  assert.match(scheduled.outputs, /^mode=scheduled$/m);
+  assert.doesNotMatch(scheduled.outputs, /manual-nfl-event-hydration|nfl_nflverse_game_id=|nfl_event_date=/);
+  const generic = workflow.slice(workflow.indexOf("- name: Run exactly one bounded C2 exact-market discovery"));
+  assert.match(generic, /mode != 'manual-nfl-event-hydration'/);
 });
 test("read-only preflight is limited to one NFL market and cannot fall through to discovery", () => {
   const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
@@ -899,7 +1034,7 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
     ["WNBA_HOME_TEAM_ID_INPUT", "wnba_home_team_id"],
     ["WNBA_AWAY_TEAM_ID_INPUT", "wnba_away_team_id"],
   ]) assert.match(workflow, new RegExp(`${name}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}`));
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="19f52b9a88abdf5c0623a97ca9108bcd964883be"/);
+  assert.match(workflow, new RegExp(`REVIEWED_RELEASE_SHA="${reviewedSha}"`));
   assert.match(workflow, /mode != 'manual-wnba-event-hydration'/);
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 
