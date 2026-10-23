@@ -67,40 +67,8 @@ on:
         required: false
         default: false
         type: boolean
-      nfl_canonical_event_id:
-        description: "Exact admitted canonical NFL event ID for manual Receiving/Rushing proof"
-        required: false
-        type: string
-      nfl_nflverse_game_id:
-        description: "Exact nflverse game ID for manual NFL proof"
-        required: false
-        type: string
-      nfl_provider_event_id:
-        description: "Exact provider event ID for manual NFL proof"
-        required: false
-        type: string
-      nfl_event_date:
-        description: "Exact official NFL event date (YYYY-MM-DD)"
-        required: false
-        type: string
-      nfl_event_start_time:
-        description: "Exact canonical UTC NFL event start timestamp"
-        required: false
-        type: string
-      nfl_home_team:
-        description: "Exact NFL home team abbreviation"
-        required: false
-        type: string
-      nfl_away_team:
-        description: "Exact NFL away team abbreviation"
-        required: false
-        type: string
-      nfl_home_team_id:
-        description: "Exact canonical NFL home team ID"
-        required: false
-        type: string
-      nfl_away_team_id:
-        description: "Exact canonical NFL away team ID"
+      nfl_event_tuple:
+        description: "Strict JSON exact-event tuple for one manual NFL operation"
         required: false
         type: string
       scored_prop_id:
@@ -417,15 +385,7 @@ jobs:
           VALIDATION_SPORT_INPUT: ${{ inputs.validation_sport }}
           VALIDATION_MARKET_INPUT: ${{ inputs.validation_market }}
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
-          NFL_CANONICAL_EVENT_ID_INPUT: ${{ inputs.nfl_canonical_event_id }}
-          NFL_NFLVERSE_GAME_ID_INPUT: ${{ inputs.nfl_nflverse_game_id }}
-          NFL_PROVIDER_EVENT_ID_INPUT: ${{ inputs.nfl_provider_event_id }}
-          NFL_EVENT_DATE_INPUT: ${{ inputs.nfl_event_date }}
-          NFL_EVENT_START_TIME_INPUT: ${{ inputs.nfl_event_start_time }}
-          NFL_HOME_TEAM_INPUT: ${{ inputs.nfl_home_team }}
-          NFL_AWAY_TEAM_INPUT: ${{ inputs.nfl_away_team }}
-          NFL_HOME_TEAM_ID_INPUT: ${{ inputs.nfl_home_team_id }}
-          NFL_AWAY_TEAM_ID_INPUT: ${{ inputs.nfl_away_team_id }}
+          NFL_EVENT_TUPLE_INPUT: ${{ inputs.nfl_event_tuple }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
           MLB_EVENT_DATE_INPUT: ${{ inputs.mlb_event_date }}
           MLB_EVENT_START_TIME_INPUT: ${{ inputs.mlb_event_start_time }}
@@ -442,49 +402,190 @@ jobs:
         run: |
           REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"
           NFL_TARGET_SUPPLIED="false"
-          for nfl_target_input in "$NFL_CANONICAL_EVENT_ID_INPUT" "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_PROVIDER_EVENT_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
-            case "$nfl_target_input" in
-              *$'\n'*|*$'\r'*) echo "::error::NFL exact-event inputs may not contain line breaks."; exit 1 ;;
-            esac
-            if [ -n "$nfl_target_input" ]; then NFL_TARGET_SUPPLIED="true"; fi
-          done
+          if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
+            NFL_TARGET_SUPPLIED="true"
+          fi
+          validate_nfl_event_tuple() {
+            local tuple_shape="$1"
+            NFL_TUPLE_SHAPE="$tuple_shape" node --input-type=commonjs <<'NODE'
+          const fs = require("node:fs");
+
+          const fail = (message) => {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          const raw = process.env.NFL_EVENT_TUPLE_INPUT ?? "";
+          const shape = process.env.NFL_TUPLE_SHAPE;
+          const keysByShape = {
+            hydration: [
+              "nflverseGameId", "officialDate", "expectedStartTime",
+              "homeTeamAbbreviation", "awayTeamAbbreviation",
+              "canonicalHomeTeamId", "canonicalAwayTeamId",
+            ],
+            discovery: [
+              "canonicalEventId", "nflverseGameId", "providerEventId",
+              "officialDate", "expectedStartTime", "homeTeamAbbreviation",
+              "awayTeamAbbreviation", "canonicalHomeTeamId", "canonicalAwayTeamId",
+            ],
+          };
+          const allKeys = new Set([
+            "canonicalEventId", "nflverseGameId", "providerEventId", "officialDate",
+            "expectedStartTime", "homeTeamAbbreviation", "awayTeamAbbreviation",
+            "canonicalHomeTeamId", "canonicalAwayTeamId",
+          ]);
+          if (!keysByShape[shape]) fail("NFL tuple operation shape is invalid.");
+          if (raw.trim() === "") fail("NFL exact-event tuple is required for this manual operation.");
+
+          let tuple;
+          const rejectDuplicateKeys = (source) => {
+            let index = 0;
+            const whitespace = () => { while (/\s/.test(source[index] ?? "")) index += 1; };
+            const readString = () => {
+              const start = index;
+              index += 1;
+              while (index < source.length) {
+                if (source[index] === "\\") { index += 2; continue; }
+                if (source[index] === '"') { index += 1; return JSON.parse(source.slice(start, index)); }
+                index += 1;
+              }
+              throw new Error("invalid_json_string");
+            };
+            const readValue = () => {
+              whitespace();
+              if (source[index] === "{") {
+                index += 1; whitespace();
+                const keys = new Set();
+                if (source[index] === "}") { index += 1; return; }
+                while (index < source.length) {
+                  whitespace();
+                  if (source[index] !== '"') throw new Error("invalid_json_object_key");
+                  const key = readString();
+                  if (keys.has(key)) throw new Error("duplicate_json_key");
+                  keys.add(key); whitespace();
+                  if (source[index++] !== ":") throw new Error("invalid_json_object_separator");
+                  readValue(); whitespace();
+                  const delimiter = source[index++];
+                  if (delimiter === "}") return;
+                  if (delimiter !== ",") throw new Error("invalid_json_object_delimiter");
+                }
+                throw new Error("invalid_json_object");
+              }
+              if (source[index] === "[") {
+                index += 1; whitespace();
+                if (source[index] === "]") { index += 1; return; }
+                while (index < source.length) {
+                  readValue(); whitespace();
+                  const delimiter = source[index++];
+                  if (delimiter === "]") return;
+                  if (delimiter !== ",") throw new Error("invalid_json_array_delimiter");
+                }
+                throw new Error("invalid_json_array");
+              }
+              if (source[index] === '"') { readString(); return; }
+              const start = index;
+              while (index < source.length && !/[\s,}\]]/.test(source[index])) index += 1;
+              if (start === index) throw new Error("invalid_json_value");
+            };
+            readValue(); whitespace();
+            if (index !== source.length) throw new Error("invalid_json_trailing_data");
+          };
+          try {
+            rejectDuplicateKeys(raw);
+            tuple = JSON.parse(raw);
+          } catch (error) {
+            if (error?.message === "duplicate_json_key") fail("NFL exact-event tuple contains duplicate identity keys.");
+            fail("NFL exact-event tuple must be valid JSON.");
+          }
+          if (tuple === null || Array.isArray(tuple) || typeof tuple !== "object") {
+            fail("NFL exact-event tuple must be a JSON object.");
+          }
+          const keys = Object.keys(tuple);
+          if (keys.some((key) => !allKeys.has(key))) fail("NFL exact-event tuple contains an unknown key.");
+          const requiredKeys = keysByShape[shape];
+          if (keys.length !== requiredKeys.length || requiredKeys.some((key) => !Object.hasOwn(tuple, key))) {
+            fail(shape === "hydration"
+              ? "NFL event hydration requires exactly the seven-field event tuple and forbids canonicalEventId/providerEventId."
+              : "NFL Receiving/Rushing discovery requires exactly all nine exact-event identity fields.");
+          }
+
+          const normalized = {};
+          for (const key of requiredKeys) {
+            const value = tuple[key];
+            if (typeof value !== "string") fail("NFL exact-event tuple values must all be strings.");
+            if (/[\r\n]/.test(value)) fail("NFL exact-event tuple values may not contain line breaks.");
+            const trimmed = value.trim();
+            if (!trimmed) fail("NFL exact-event tuple contains an empty required value.");
+            normalized[key] = trimmed;
+          }
+
+          const identifierKeys = shape === "hydration"
+            ? ["nflverseGameId", "canonicalHomeTeamId", "canonicalAwayTeamId"]
+            : ["canonicalEventId", "nflverseGameId", "providerEventId", "canonicalHomeTeamId", "canonicalAwayTeamId"];
+          const safeIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+          if (identifierKeys.some((key) => !safeIdentifier.test(normalized[key]))) {
+            fail("NFL exact-event tuple contains a malformed identifier.");
+          }
+          const date = normalized.officialDate;
+          const start = normalized.expectedStartTime;
+          const dateValue = new Date(`${date}T00:00:00.000Z`);
+          const startValue = new Date(start);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date)
+            || !Number.isFinite(dateValue.getTime())
+            || dateValue.toISOString().slice(0, 10) !== date) {
+            fail("NFL exact-event tuple contains a malformed official date.");
+          }
+          if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(start)
+            || !Number.isFinite(startValue.getTime())
+            || startValue.toISOString() !== start) {
+            fail("NFL exact-event tuple contains a malformed canonical UTC start timestamp.");
+          }
+          const teamAbbreviations = new Set([
+            "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE", "DAL", "DEN",
+            "DET", "GB", "HOU", "IND", "JAX", "KC", "LAC", "LAR", "LV", "MIA",
+            "MIN", "NE", "NO", "NYG", "NYJ", "PHI", "PIT", "SEA", "SF", "TB",
+            "TEN", "WAS",
+          ]);
+          if (!teamAbbreviations.has(normalized.homeTeamAbbreviation)
+            || !teamAbbreviations.has(normalized.awayTeamAbbreviation)) {
+            fail("NFL exact-event tuple contains an invalid team abbreviation.");
+          }
+          if (normalized.homeTeamAbbreviation === normalized.awayTeamAbbreviation
+            || normalized.canonicalHomeTeamId === normalized.canonicalAwayTeamId) {
+            fail("NFL exact-event tuple must identify two distinct teams.");
+          }
+
+          for (const key of [
+            "SCORED_PROP_ID_INPUT", "MLB_EVENT_DATE_INPUT", "MLB_EVENT_START_TIME_INPUT",
+            "MLB_HOME_TEAM_ID_INPUT", "MLB_AWAY_TEAM_ID_INPUT", "MLB_GAME_TYPE_INPUT",
+            "MLB_SERIES_DESCRIPTION_INPUT", "MLB_GAME_PK_INPUT", "WNBA_EVENT_ID_INPUT",
+            "WNBA_EVENT_DATE_INPUT", "WNBA_EVENT_START_TIME_INPUT", "WNBA_HOME_TEAM_ID_INPUT",
+            "WNBA_AWAY_TEAM_ID_INPUT",
+          ]) {
+            if ((process.env[key] ?? "") !== "") {
+              fail("NFL exact-event operations reject incompatible MLB, WNBA, and scored-prop inputs.");
+            }
+          }
+
+          const outputFields = [
+            ["nfl_canonical_event_id", "canonicalEventId"],
+            ["nfl_nflverse_game_id", "nflverseGameId"],
+            ["nfl_provider_event_id", "providerEventId"],
+            ["nfl_event_date", "officialDate"],
+            ["nfl_event_start_time", "expectedStartTime"],
+            ["nfl_home_team", "homeTeamAbbreviation"],
+            ["nfl_away_team", "awayTeamAbbreviation"],
+            ["nfl_home_team_id", "canonicalHomeTeamId"],
+            ["nfl_away_team_id", "canonicalAwayTeamId"],
+          ];
+          const output = outputFields
+            .filter(([, key]) => Object.hasOwn(normalized, key))
+            .map(([name, key]) => `${name}=${normalized[key]}\n`)
+            .join("");
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, output, { encoding: "utf8", flag: "a" });
+          NODE
+          }
           validate_nfl_exact_event_target() {
-            local values=("$NFL_CANONICAL_EVENT_ID_INPUT" "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_PROVIDER_EVENT_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT")
-            local value
-            for value in "${values[@]}"; do
-              if [ -z "$value" ]; then echo "::error::Manual NFL Receiving/Rushing discovery requires the complete exact-event tuple."; return 1; fi
-            done
-            for value in "$NFL_CANONICAL_EVENT_ID_INPUT" "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_PROVIDER_EVENT_ID_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
-              if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'; then echo "::error::NFL exact-event IDs must be safe non-empty identifiers."; return 1; fi
-            done
-            if ! printf '%s' "$NFL_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
-              || ! printf '%s' "$NFL_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
-              || ! printf '%s' "$NFL_HOME_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
-              || ! printf '%s' "$NFL_AWAY_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
-              || [ "$NFL_HOME_TEAM_INPUT" = "$NFL_AWAY_TEAM_INPUT" ] \
-              || [ "$NFL_HOME_TEAM_ID_INPUT" = "$NFL_AWAY_TEAM_ID_INPUT" ]; then
-              echo "::error::NFL exact-event date, UTC start, team abbreviations, and distinct team identities are invalid."; return 1
-            fi
-            if ! node -e '
-              const [date, start] = process.argv.slice(1);
-              const dateValue = new Date(`${date}T00:00:00.000Z`);
-              const startValue = new Date(start);
-              if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== date || !Number.isFinite(startValue.getTime()) || startValue.toISOString() !== start) process.exit(1);
-            ' "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT"; then
-              echo "::error::NFL event date and start must be valid canonical UTC values."; return 1
-            fi
-            for value in "$SCORED_PROP_ID_INPUT" "$MLB_EVENT_DATE_INPUT" "$MLB_EVENT_START_TIME_INPUT" "$MLB_HOME_TEAM_ID_INPUT" "$MLB_AWAY_TEAM_ID_INPUT" "$MLB_GAME_TYPE_INPUT" "$MLB_SERIES_DESCRIPTION_INPUT" "$MLB_GAME_PK_INPUT" "$WNBA_EVENT_ID_INPUT" "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT" "$WNBA_HOME_TEAM_ID_INPUT" "$WNBA_AWAY_TEAM_ID_INPUT"; do
-              if [ -n "$value" ]; then echo "::error::NFL exact-event discovery rejects incompatible MLB, WNBA, and scored-prop inputs."; return 1; fi
-            done
-            echo "nfl_canonical_event_id=$NFL_CANONICAL_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_nflverse_game_id=$NFL_NFLVERSE_GAME_ID_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_provider_event_id=$NFL_PROVIDER_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_event_date=$NFL_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_event_start_time=$NFL_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_home_team=$NFL_HOME_TEAM_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_away_team=$NFL_AWAY_TEAM_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_home_team_id=$NFL_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-            echo "nfl_away_team_id=$NFL_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+            validate_nfl_event_tuple "discovery"
           }
           if [ "$TRIGGER" = "workflow_dispatch" ]; then
             if [ "$REF_NAME" != "main" ] \
@@ -527,27 +628,11 @@ jobs:
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 ;;
               manual-nfl-event-hydration)
-                hydration_values=("$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT" "$NFL_HOME_TEAM_INPUT" "$NFL_AWAY_TEAM_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT")
-                for value in "${hydration_values[@]}"; do
-                  case "$value" in
-                    *$'\n'*|*$'\r'*) echo "::error::NFL hydration inputs may not contain line breaks."; exit 1 ;;
-                    "") echo "::error::NFL event hydration requires the complete seven-field exact-event tuple."; exit 1 ;;
-                  esac
-                done
-                for value in "$NFL_NFLVERSE_GAME_ID_INPUT" "$NFL_HOME_TEAM_ID_INPUT" "$NFL_AWAY_TEAM_ID_INPUT"; do
-                  if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'; then
-                    echo "::error::NFL hydration identifiers must be safe non-empty identifiers."; exit 1
-                  fi
-                done
-                if ! printf '%s' "$NFL_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
-                  || ! printf '%s' "$NFL_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' \
-                  || ! printf '%s' "$NFL_HOME_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
-                  || ! printf '%s' "$NFL_AWAY_TEAM_INPUT" | grep -Eq '^[A-Z]{2,3}$' \
-                  || [ "$NFL_HOME_TEAM_INPUT" = "$NFL_AWAY_TEAM_INPUT" ] \
-                  || [ "$NFL_HOME_TEAM_ID_INPUT" = "$NFL_AWAY_TEAM_ID_INPUT" ] \
-                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
-                  || [ -n "$NFL_CANONICAL_EVENT_ID_INPUT" ] \
-                  || [ -n "$NFL_PROVIDER_EVENT_ID_INPUT" ] \
+                if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] || [ -n "$VALIDATION_MARKET_INPUT" ]; then
+                  echo "::error::NFL event hydration is sport-only and does not accept a market selection."
+                  exit 1
+                fi
+                if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
                   || [ -n "$SCORED_PROP_ID_INPUT" ] \
                   || [ -n "$MLB_EVENT_DATE_INPUT" ] || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
                   || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
@@ -555,31 +640,16 @@ jobs:
                   || [ -n "$WNBA_EVENT_ID_INPUT" ] || [ -n "$WNBA_EVENT_DATE_INPUT" ] \
                   || [ -n "$WNBA_EVENT_START_TIME_INPUT" ] || [ -n "$WNBA_HOME_TEAM_ID_INPUT" ] || [ -n "$WNBA_AWAY_TEAM_ID_INPUT" ] \
                   || [ "$SCHEDULER_ENABLED" != "false" ] || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                  echo "::error::NFL event hydration requires one complete NFL tuple, false safety gates, no market/force/board/scored-prop inputs, and no cross-sport identity inputs."
+                  echo "::error::NFL event hydration requires false safety gates, no market/force/board/scored-prop inputs, and no cross-sport identity inputs."
                   exit 1
                 fi
-                if ! node -e '
-                  const [date, start] = process.argv.slice(1);
-                  const dateValue = new Date(`${date}T00:00:00.000Z`);
-                  const startValue = new Date(start);
-                  if (!Number.isFinite(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== date
-                    || !Number.isFinite(startValue.getTime()) || startValue.toISOString() !== start) process.exit(1);
-                ' "$NFL_EVENT_DATE_INPUT" "$NFL_EVENT_START_TIME_INPUT"; then
-                  echo "::error::NFL hydration date and kickoff must be valid canonical UTC values."; exit 1
-                fi
+                validate_nfl_event_tuple "hydration"
                 echo "mode=manual-nfl-event-hydration" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 echo "sport=NFL" >> "$GITHUB_OUTPUT"
                 echo "market=" >> "$GITHUB_OUTPUT"
                 echo "manual_validation=true" >> "$GITHUB_OUTPUT"
                 echo "publish_board=false" >> "$GITHUB_OUTPUT"
-                echo "nfl_nflverse_game_id=$NFL_NFLVERSE_GAME_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_event_date=$NFL_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_event_start_time=$NFL_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_home_team=$NFL_HOME_TEAM_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_away_team=$NFL_AWAY_TEAM_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_home_team_id=$NFL_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
-                echo "nfl_away_team_id=$NFL_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
                 echo "skip=false" >> "$GITHUB_OUTPUT"
                 echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
                 echo "exact_manual=true" >> "$GITHUB_OUTPUT"
