@@ -43,6 +43,7 @@ on:
           - mlb-player-history-hydration
           - wnba-event-hydration
           - manual-nfl-event-hydration
+          - manual-nfl-provider-event-resolution
           - certification-one-observation
           - certification-one-current-analysis
       release_sha:
@@ -400,7 +401,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"
+          REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"
           NFL_TARGET_SUPPLIED="false"
           if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
             NFL_TARGET_SUPPLIED="true"
@@ -419,6 +420,11 @@ jobs:
           const keysByShape = {
             hydration: [
               "nflverseGameId", "officialDate", "expectedStartTime",
+              "homeTeamAbbreviation", "awayTeamAbbreviation",
+              "canonicalHomeTeamId", "canonicalAwayTeamId",
+            ],
+            resolver: [
+              "canonicalEventId", "nflverseGameId", "officialDate", "expectedStartTime",
               "homeTeamAbbreviation", "awayTeamAbbreviation",
               "canonicalHomeTeamId", "canonicalAwayTeamId",
             ],
@@ -501,11 +507,16 @@ jobs:
           }
           const keys = Object.keys(tuple);
           if (keys.some((key) => !allKeys.has(key))) fail("NFL exact-event tuple contains an unknown key.");
+          if (shape === "resolver" && Object.hasOwn(tuple, "providerEventId")) {
+            fail("NFL provider-event resolver tuple forbids providerEventId.");
+          }
           const requiredKeys = keysByShape[shape];
           if (keys.length !== requiredKeys.length || requiredKeys.some((key) => !Object.hasOwn(tuple, key))) {
             fail(shape === "hydration"
               ? "NFL event hydration requires exactly the seven-field event tuple and forbids canonicalEventId/providerEventId."
-              : "NFL Receiving/Rushing discovery requires exactly all nine exact-event identity fields.");
+              : shape === "resolver"
+                ? "NFL provider-event resolution requires exactly the eight-field canonical event tuple."
+                : "NFL Receiving/Rushing discovery requires exactly all nine exact-event identity fields.");
           }
 
           const normalized = {};
@@ -520,7 +531,9 @@ jobs:
 
           const identifierKeys = shape === "hydration"
             ? ["nflverseGameId", "canonicalHomeTeamId", "canonicalAwayTeamId"]
-            : ["canonicalEventId", "nflverseGameId", "providerEventId", "canonicalHomeTeamId", "canonicalAwayTeamId"];
+            : shape === "resolver"
+              ? ["canonicalEventId", "nflverseGameId", "canonicalHomeTeamId", "canonicalAwayTeamId"]
+              : ["canonicalEventId", "nflverseGameId", "providerEventId", "canonicalHomeTeamId", "canonicalAwayTeamId"];
           const safeIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
           if (identifierKeys.some((key) => !safeIdentifier.test(normalized[key]))) {
             fail("NFL exact-event tuple contains a malformed identifier.");
@@ -600,7 +613,8 @@ jobs:
               echo "::error::Rejected exact-market workflow dispatch; owner, repair ref, reviewed SHA, paused scheduler, and persistent gates are required."
               exit 1
             fi
-            if [ "$MANUAL_OPERATION" = "manual-nfl-event-hydration" ]; then
+            if [ "$MANUAL_OPERATION" = "manual-nfl-event-hydration" ] \
+              || [ "$MANUAL_OPERATION" = "manual-nfl-provider-event-resolution" ]; then
               if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] || [ -n "$VALIDATION_MARKET_INPUT" ]; then
                 echo "::error::NFL event hydration is sport-only and does not accept a market selection."
                 exit 1
@@ -614,7 +628,7 @@ jobs:
             if [ "$NFL_TARGET_SUPPLIED" = "true" ]; then
               case "$MANUAL_OPERATION:$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" in
                 exact-market-preflight:NFL:*) echo "::error::Read-only NFL preflight rejects exact-event tuple inputs."; exit 1 ;;
-                exact-market-discovery:NFL:receiving_yards|exact-market-discovery:NFL:rushing_yards|exact-market-board-refresh:NFL:receiving_yards|manual-nfl-event-hydration:NFL:*) ;;
+                exact-market-discovery:NFL:receiving_yards|exact-market-discovery:NFL:rushing_yards|exact-market-board-refresh:NFL:receiving_yards|manual-nfl-event-hydration:NFL:*|manual-nfl-provider-event-resolution:NFL:*) ;;
                 *) echo "::error::NFL exact-event inputs are allowed only for write-capable manual NFL Receiving/Rushing operations."; exit 1 ;;
               esac
             fi
@@ -645,6 +659,34 @@ jobs:
                 fi
                 validate_nfl_event_tuple "hydration"
                 echo "mode=manual-nfl-event-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "sport=NFL" >> "$GITHUB_OUTPUT"
+                echo "market=" >> "$GITHUB_OUTPUT"
+                echo "manual_validation=true" >> "$GITHUB_OUTPUT"
+                echo "publish_board=false" >> "$GITHUB_OUTPUT"
+                echo "skip=false" >> "$GITHUB_OUTPUT"
+                echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+                echo "exact_manual=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              manual-nfl-provider-event-resolution)
+                if [ "$VALIDATION_SPORT_INPUT" != "NFL" ] || [ -n "$VALIDATION_MARKET_INPUT" ]; then
+                  echo "::error::NFL provider-event resolution is sport-only and does not accept a market selection."
+                  exit 1
+                fi
+                if [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ -n "$MLB_EVENT_DATE_INPUT" ] || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_GAME_TYPE_INPUT" ] || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] || [ -n "$MLB_GAME_PK_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_ID_INPUT" ] || [ -n "$WNBA_EVENT_DATE_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_START_TIME_INPUT" ] || [ -n "$WNBA_HOME_TEAM_ID_INPUT" ] || [ -n "$WNBA_AWAY_TEAM_ID_INPUT" ] \
+                  || [ "$SCHEDULER_ENABLED" != "false" ] || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::NFL provider-event resolution requires false safety gates, force_discovery=false, and no scored-prop or cross-sport inputs."
+                  exit 1
+                fi
+                validate_nfl_event_tuple "resolver"
+                echo "mode=manual-nfl-provider-event-resolution" >> "$GITHUB_OUTPUT"
                 echo "force_discovery=false" >> "$GITHUB_OUTPUT"
                 echo "sport=NFL" >> "$GITHUB_OUTPUT"
                 echo "market=" >> "$GITHUB_OUTPUT"
@@ -1021,8 +1063,34 @@ jobs:
           BBS_API_KEY: ""
         run: pnpm run covered2:nfl-event-hydration
 
+      - name: Resolve exactly one admitted NFL provider event ID
+        if: steps.contract.outputs.mode == 'manual-nfl-provider-event-resolution'
+        working-directory: private-covered
+        env:
+          EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
+          COVERED_PRIVATE_PIPELINE_SHA_V2: ${{ steps.contract.outputs.release_sha }}
+          COVERED2_MANUAL_VALIDATION: "true"
+          COVERED2_MANUAL_VALIDATION_SPORT: NFL
+          COVERED2_MANUAL_VALIDATION_OPERATION: manual-nfl-provider-event-resolution
+          COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY: "false"
+          COVERED2_MANUAL_NFL_CANONICAL_EVENT_ID: ${{ steps.contract.outputs.nfl_canonical_event_id }}
+          COVERED2_MANUAL_NFLVERSE_GAME_ID: ${{ steps.contract.outputs.nfl_nflverse_game_id }}
+          COVERED2_MANUAL_NFL_EVENT_DATE: ${{ steps.contract.outputs.nfl_event_date }}
+          COVERED2_MANUAL_NFL_EVENT_START_TIME: ${{ steps.contract.outputs.nfl_event_start_time }}
+          COVERED2_MANUAL_NFL_HOME_TEAM: ${{ steps.contract.outputs.nfl_home_team }}
+          COVERED2_MANUAL_NFL_AWAY_TEAM: ${{ steps.contract.outputs.nfl_away_team }}
+          COVERED2_MANUAL_NFL_HOME_TEAM_ID: ${{ steps.contract.outputs.nfl_home_team_id }}
+          COVERED2_MANUAL_NFL_AWAY_TEAM_ID: ${{ steps.contract.outputs.nfl_away_team_id }}
+          COVERED2_WNBA_SCHEDULER_ENABLED: ${{ vars.COVERED2_WNBA_SCHEDULER_ENABLED }}
+          COVERED2_CERTIFICATION_LEDGER_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
+          BBS_API_KEY: ""
+        run: pnpm run covered2:nfl-provider-event-resolution
+
       - name: Run exactly one bounded C2 exact-market discovery
-        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration' && steps.contract.outputs.mode != 'manual-wnba-event-hydration' && steps.contract.outputs.mode != 'manual-nfl-event-hydration'
+        if: steps.contract.outputs.skip != 'true' && steps.contract.outputs.mode != 'manual-certification' && steps.contract.outputs.mode != 'manual-current-analysis-certification' && steps.contract.outputs.mode != 'manual-preflight' && steps.contract.outputs.mode != 'manual-mlb-game-identity-diagnostic' && steps.contract.outputs.mode != 'manual-mlb-event-hydration' && steps.contract.outputs.mode != 'manual-mlb-player-history-hydration' && steps.contract.outputs.mode != 'manual-wnba-event-hydration' && steps.contract.outputs.mode != 'manual-nfl-event-hydration' && steps.contract.outputs.mode != 'manual-nfl-provider-event-resolution'
         working-directory: private-covered
         env:
           EXPECTED_SHA: ${{ steps.contract.outputs.release_sha }}
