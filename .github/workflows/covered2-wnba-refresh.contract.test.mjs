@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "d157c13d74e1d4c8347aef4ee8fb1aa209b7e698";
+const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
 const priorReviewedSha = "a57d76cb6b72039724ed4832d25c4e1e4ef04547";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
@@ -699,7 +699,8 @@ test("manual NFL provider-event resolver accepts only the exact eight-field even
   ]) assert.match(result.outputs, new RegExp(`^${name}=${value.replaceAll(".", "\\.")}$`, "m"));
   assert.doesNotMatch(result.outputs, /^nfl_provider_event_id=/m);
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"/);
+  assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"/);
   assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"/);
   assert.match(workflow, /run: pnpm run covered2:nfl-provider-event-resolution/);
   assert.doesNotMatch(workflow, /nfl_provider_event_id:\s*\$\{\{\s*steps\.contract\.outputs/);
@@ -788,7 +789,7 @@ test("manual NFL provider-event resolver requires the safe operation scope and r
     assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
     assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
   }
-  for (const sha of ["a57d76cb6b72039724ed4832d25c4e1e4ef04547", "19f52b9a88abdf5c0623a97ca9108bcd964883be"]) {
+  for (const sha of ["d157c13d74e1d4c8347aef4ee8fb1aa209b7e698", "a57d76cb6b72039724ed4832d25c4e1e4ef04547", "19f52b9a88abdf5c0623a97ca9108bcd964883be"]) {
     assert.notEqual(runContract({ ...base, RELEASE_SHA_INPUT: sha }).status, 0, `old SHA ${sha} must fail`);
   }
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);

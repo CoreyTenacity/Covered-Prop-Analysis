@@ -401,7 +401,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"
+          REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"
           NFL_TARGET_SUPPLIED="false"
           if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
             NFL_TARGET_SUPPLIED="true"
