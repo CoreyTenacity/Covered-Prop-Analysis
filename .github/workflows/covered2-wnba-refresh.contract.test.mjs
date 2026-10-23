@@ -38,27 +38,28 @@ function extractContractShell() {
 
 const contractShell = extractContractShell();
 
-const validNflTarget = {
-  NFL_CANONICAL_EVENT_ID_INPUT: "event-2026-chi-ne",
-  NFL_NFLVERSE_GAME_ID_INPUT: "2026_08_CHI_NE",
-  NFL_PROVIDER_EVENT_ID_INPUT: "provider-event-chi-ne",
-  NFL_EVENT_DATE_INPUT: "2026-10-22",
-  NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00.000Z",
-  NFL_HOME_TEAM_INPUT: "CHI",
-  NFL_AWAY_TEAM_INPUT: "NE",
-  NFL_HOME_TEAM_ID_INPUT: "canonical-bears",
-  NFL_AWAY_TEAM_ID_INPUT: "canonical-patriots",
+const validNflTuple = {
+  "canonicalEventId": "event-2026-chi-ne",
+  "nflverseGameId": "2026_08_CHI_NE",
+  "providerEventId": "provider-event-chi-ne",
+  "officialDate": "2026-10-22",
+  "expectedStartTime": "2026-10-23T00:15:00.000Z",
+  "homeTeamAbbreviation": "CHI",
+  "awayTeamAbbreviation": "NE",
+  "canonicalHomeTeamId": "canonical-bears",
+  "canonicalAwayTeamId": "canonical-patriots"
 };
-
-const validNflHydrationTarget = {
-  NFL_NFLVERSE_GAME_ID_INPUT: "2026_08_CHI_NE",
-  NFL_EVENT_DATE_INPUT: "2026-10-22",
-  NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00.000Z",
-  NFL_HOME_TEAM_INPUT: "CHI",
-  NFL_AWAY_TEAM_INPUT: "NE",
-  NFL_HOME_TEAM_ID_INPUT: "canonical-bears",
-  NFL_AWAY_TEAM_ID_INPUT: "canonical-patriots",
+const validNflHydrationTuple = {
+  "nflverseGameId": "2026_08_CHI_NE",
+  "officialDate": "2026-10-22",
+  "expectedStartTime": "2026-10-23T00:15:00.000Z",
+  "homeTeamAbbreviation": "CHI",
+  "awayTeamAbbreviation": "NE",
+  "canonicalHomeTeamId": "canonical-bears",
+  "canonicalAwayTeamId": "canonical-patriots"
 };
+const validNflTarget = { NFL_EVENT_TUPLE_INPUT: JSON.stringify(validNflTuple) };
+const validNflHydrationTarget = { NFL_EVENT_TUPLE_INPUT: JSON.stringify(validNflHydrationTuple) };
 
 function extractPilotGuardShell() {
   const guardStep = workflow.indexOf("        id: pilot_attempt_guard");
@@ -158,15 +159,7 @@ function runContract(overrides = {}) {
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
     FORCE_DISCOVERY_INPUT: "false",
-    NFL_CANONICAL_EVENT_ID_INPUT: "",
-    NFL_NFLVERSE_GAME_ID_INPUT: "",
-    NFL_PROVIDER_EVENT_ID_INPUT: "",
-    NFL_EVENT_DATE_INPUT: "",
-    NFL_EVENT_START_TIME_INPUT: "",
-    NFL_HOME_TEAM_INPUT: "",
-    NFL_AWAY_TEAM_INPUT: "",
-    NFL_HOME_TEAM_ID_INPUT: "",
-    NFL_AWAY_TEAM_ID_INPUT: "",
+    NFL_EVENT_TUPLE_INPUT: "",
     SCORED_PROP_ID_INPUT: "",
     MLB_EVENT_DATE_INPUT: "",
     MLB_EVENT_START_TIME_INPUT: "",
@@ -657,71 +650,143 @@ test("current-analysis certification accepts only one exact NFL receiving-yards 
   assert.match(workflow, /Certify one current NFL receiving-yards analysis/);
   assert.ok(workflow.includes("steps.contract.outputs.mode == 'manual-current-analysis-certification'"));
 });
-test("manual NFL exact-event tuple is mandatory only for write-capable Receiving/Rushing discovery", () => {
-  const fields = [
-    ["nfl_canonical_event_id", "NFL_CANONICAL_EVENT_ID_INPUT"],
-    ["nfl_nflverse_game_id", "NFL_NFLVERSE_GAME_ID_INPUT"],
-    ["nfl_provider_event_id", "NFL_PROVIDER_EVENT_ID_INPUT"],
-    ["nfl_event_date", "NFL_EVENT_DATE_INPUT"],
-    ["nfl_event_start_time", "NFL_EVENT_START_TIME_INPUT"],
-    ["nfl_home_team", "NFL_HOME_TEAM_INPUT"],
-    ["nfl_away_team", "NFL_AWAY_TEAM_INPUT"],
-    ["nfl_home_team_id", "NFL_HOME_TEAM_ID_INPUT"],
-    ["nfl_away_team_id", "NFL_AWAY_TEAM_ID_INPUT"],
-  ];
+test("workflow_dispatch stays at 19 inputs, below GitHub's 25-input limit", () => {
+  const dispatch = workflow.match(/^  workflow_dispatch:\n([\s\S]*?)(?=^\n(?:permissions|concurrency|jobs):)/m)?.[1] ?? "";
+  const names = [...dispatch.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
+  assert.equal(names.length, 19);
+  assert.ok(names.length <= 25);
+  assert.ok(names.includes("nfl_event_tuple"));
+  for (const removed of [
+    "nfl_canonical_event_id", "nfl_nflverse_game_id", "nfl_provider_event_id",
+    "nfl_event_date", "nfl_event_start_time", "nfl_home_team", "nfl_away_team",
+    "nfl_home_team_id", "nfl_away_team_id",
+  ]) assert.equal(names.includes(removed), false, `${removed} is no longer a top-level dispatch input`);
+});
+
+test("NFL JSON tuple accepts the exact hydration and nine-field discovery shapes and preserves internal outputs", () => {
+  const definition = workflow.match(/^      nfl_event_tuple:\n([\s\S]*?)(?=^      [a-z_]+:\n|^\n)/m)?.[1] ?? "";
+  assert.match(definition, /^        required: false$/m);
+  assert.match(definition, /^        type: string$/m);
+  assert.match(workflow, /NFL_EVENT_TUPLE_INPUT:\s*\$\{\{ inputs\.nfl_event_tuple \}\}/);
+
+  const hydration = runContract({
+    MANUAL_OPERATION: "manual-nfl-event-hydration",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "",
+    FORCE_DISCOVERY_INPUT: "false",
+    ...validNflHydrationTarget,
+  });
+  assert.equal(hydration.status, 0, hydration.diagnostics);
+  assert.match(hydration.outputs, /^mode=manual-nfl-event-hydration$/m);
+  assert.match(hydration.outputs, /^nfl_nflverse_game_id=2026_08_CHI_NE$/m);
+  assert.match(hydration.outputs, /^nfl_event_date=2026-10-22$/m);
+  assert.match(hydration.outputs, /^nfl_event_start_time=2026-10-23T00:15:00\.000Z$/m);
+  assert.match(hydration.outputs, /^nfl_home_team=CHI$/m);
+  assert.match(hydration.outputs, /^nfl_away_team=NE$/m);
+  assert.match(hydration.outputs, /^nfl_home_team_id=canonical-bears$/m);
+  assert.match(hydration.outputs, /^nfl_away_team_id=canonical-patriots$/m);
+  assert.doesNotMatch(hydration.outputs, /^nfl_(?:canonical_event_id|provider_event_id)=/m);
+  assert.match(workflow, /run: pnpm run covered2:nfl-event-hydration/);
+  assert.match(workflow, /mode != 'manual-nfl-event-hydration'/);
+
   for (const market of ["receiving_yards", "rushing_yards"]) {
-    const accepted = runContract({
+    const discovery = runContract({
       MANUAL_OPERATION: "exact-market-discovery",
       VALIDATION_SPORT_INPUT: "NFL",
       VALIDATION_MARKET_INPUT: market,
       ...validNflTarget,
     });
-    assert.equal(accepted.status, 0, market + ": " + accepted.diagnostics);
-    for (const [output, input] of fields) {
-      assert.match(accepted.outputs, new RegExp("^" + output + "=" + validNflTarget[input] + "$", "m"));
-      const workflowInput = "nfl_" + input.replace(/^NFL_/, "").replace(/_INPUT$/, "").toLowerCase();
-      assert.match(workflow, new RegExp("^      " + workflowInput + ":$", "m"));
-      assert.match(workflow, new RegExp("inputs\\." + workflowInput + "\\s*\\}\\}"));
-    }
+    assert.equal(discovery.status, 0, market + ": " + discovery.diagnostics);
+    for (const [output, key] of [
+      ["nfl_canonical_event_id", "canonicalEventId"], ["nfl_nflverse_game_id", "nflverseGameId"],
+      ["nfl_provider_event_id", "providerEventId"], ["nfl_event_date", "officialDate"],
+      ["nfl_event_start_time", "expectedStartTime"], ["nfl_home_team", "homeTeamAbbreviation"],
+      ["nfl_away_team", "awayTeamAbbreviation"], ["nfl_home_team_id", "canonicalHomeTeamId"],
+      ["nfl_away_team_id", "canonicalAwayTeamId"],
+    ]) assert.match(discovery.outputs, new RegExp(`^${output}=${validNflTuple[key].replaceAll(".", "\\.")}$`, "m"));
   }
+  const board = runContract({
+    MANUAL_OPERATION: "exact-market-board-refresh",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+    FORCE_DISCOVERY_INPUT: "true",
+    ...validNflTarget,
+  });
+  assert.equal(board.status, 0, board.diagnostics);
+  assert.match(board.outputs, /^mode=manual-board-refresh$/m);
+});
 
-  for (const missing of Object.keys(validNflTarget)) {
-    const rejected = runContract({
-      MANUAL_OPERATION: "exact-market-discovery",
-      VALIDATION_SPORT_INPUT: "NFL",
-      VALIDATION_MARKET_INPUT: "receiving_yards",
-      ...validNflTarget,
-      [missing]: "",
-    });
-    assert.notEqual(rejected.status, 0, missing + " is required");
-    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
-  }
-
-  const invalidInputs = [
-    ...["NFL_CANONICAL_EVENT_ID_INPUT", "NFL_NFLVERSE_GAME_ID_INPUT", "NFL_PROVIDER_EVENT_ID_INPUT", "NFL_HOME_TEAM_ID_INPUT", "NFL_AWAY_TEAM_ID_INPUT"]
-      .map((key) => ({ [key]: "unsafe/id" })),
-    { NFL_EVENT_DATE_INPUT: "2026-02-30" },
-    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00Z" },
-    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T25:15:00.000Z" },
-    { NFL_HOME_TEAM_INPUT: "Chi" },
-    { NFL_AWAY_TEAM_INPUT: "CHI" },
-    { NFL_HOME_TEAM_ID_INPUT: "same", NFL_AWAY_TEAM_ID_INPUT: "same" },
-    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
-    { MLB_GAME_PK_INPUT: "849817" },
-    { MLB_EVENT_DATE_INPUT: "2026-10-22" },
-    { WNBA_EVENT_ID_INPUT: "401918307" },
+test("NFL tuple parser rejects malformed JSON, duplicate/unknown keys, wrong shapes, types, and invalid identities before checkout", () => {
+  const invalidDiscovery = [
+    "{",
+    "[]", "null", '"string"', "42", "true",
+    JSON.stringify({ ...validNflTuple, unknown: "not-allowed" }),
+    '{"canonicalEventId":"first","canonicalEventId":"second"}',
+    JSON.stringify({ ...validNflTuple, canonicalEventId: 42 }),
+    JSON.stringify({ ...validNflTuple, providerEventId: "" }),
+    JSON.stringify(Object.fromEntries(Object.entries(validNflTuple).filter(([key]) => key !== "canonicalEventId"))),
+    JSON.stringify(Object.fromEntries(Object.entries(validNflTuple).filter(([key]) => key !== "providerEventId"))),
+    JSON.stringify({ ...validNflTuple, canonicalEventId: "bad/id" }),
+    JSON.stringify({ ...validNflTuple, officialDate: "2026-02-30" }),
+    JSON.stringify({ ...validNflTuple, expectedStartTime: "2026-10-23T00:15:00Z" }),
+    JSON.stringify({ ...validNflTuple, expectedStartTime: "2026-10-23T25:15:00.000Z" }),
+    JSON.stringify({ ...validNflTuple, homeTeamAbbreviation: "Chicago" }),
+    JSON.stringify({ ...validNflTuple, homeTeamAbbreviation: "CHI\n::warning::bad" }),
+    JSON.stringify({ ...validNflTuple, awayTeamAbbreviation: "CHI" }),
+    JSON.stringify({ ...validNflTuple, canonicalAwayTeamId: "canonical-bears" }),
+    JSON.stringify({ ...validNflTuple, nflverseGameId: " " }),
+    JSON.stringify({ ...validNflTuple, officialDate: 20261022 }),
   ];
-  for (const invalid of invalidInputs) {
+  for (const tuple of invalidDiscovery) {
     const rejected = runContract({
       MANUAL_OPERATION: "exact-market-discovery",
       VALIDATION_SPORT_INPUT: "NFL",
       VALIDATION_MARKET_INPUT: "receiving_yards",
-      ...validNflTarget,
-      ...invalid,
+      NFL_EVENT_TUPLE_INPUT: tuple,
     });
-    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+    assert.notEqual(rejected.status, 0, `tuple ${tuple} must fail closed`);
     assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
   }
+
+  for (const tuple of [
+    JSON.stringify({ ...validNflHydrationTuple, canonicalEventId: validNflTuple.canonicalEventId }),
+    JSON.stringify({ ...validNflHydrationTuple, providerEventId: validNflTuple.providerEventId }),
+    JSON.stringify({ ...validNflHydrationTuple, another: "key" }),
+    JSON.stringify(Object.fromEntries(Object.entries(validNflHydrationTuple).filter(([key]) => key !== "homeTeamAbbreviation"))),
+    JSON.stringify({ ...validNflHydrationTuple, homeTeamAbbreviation: 7 }),
+  ]) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "manual-nfl-event-hydration",
+      VALIDATION_SPORT_INPUT: "NFL",
+      VALIDATION_MARKET_INPUT: "",
+      FORCE_DISCOVERY_INPUT: "false",
+      NFL_EVENT_TUPLE_INPUT: tuple,
+    });
+    assert.notEqual(rejected.status, 0, tuple);
+    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
+  }
+});
+
+test("NFL exact-event operations preserve preflight, scheduled, Passing, and incompatible-market boundaries", () => {
+  const preflight = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
+  assert.equal(preflight.status, 0, preflight.diagnostics);
+  assert.match(preflight.outputs, /^mode=manual-preflight$/m);
+  const tuplePreflight = runContract({
+    MANUAL_OPERATION: "exact-market-preflight",
+    ...validNflTarget,
+  });
+  assert.notEqual(tuplePreflight.status, 0);
+  assert.match(tuplePreflight.diagnostics, /preflight rejects exact-event tuple/);
+  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
+  assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
+
+  const missing = runContract({
+    MANUAL_OPERATION: "exact-market-discovery",
+    VALIDATION_SPORT_INPUT: "NFL",
+    VALIDATION_MARKET_INPUT: "receiving_yards",
+  });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.diagnostics, /NFL exact-event tuple is required for this manual operation/);
 
   const passing = runContract({
     MANUAL_OPERATION: "exact-market-discovery",
@@ -729,28 +794,8 @@ test("manual NFL exact-event tuple is mandatory only for write-capable Receiving
     VALIDATION_MARKET_INPUT: "passing_yards",
     ...validNflTarget,
   });
-  assert.notEqual(passing.status, 0, "Passing remains blocked");
-  assert.ok(passing.diagnostics.includes("Unsupported exact sport/market pair"));
-
-  for (const [key, output] of [
-    ["CANONICAL_EVENT_ID", "canonical_event_id"],
-    ["NFLVERSE_GAME_ID", "nflverse_game_id"],
-    ["PROVIDER_EVENT_ID", "provider_event_id"],
-    ["EVENT_DATE", "event_date"],
-    ["EVENT_START_TIME", "event_start_time"],
-    ["HOME_TEAM", "home_team"],
-    ["AWAY_TEAM", "away_team"],
-    ["HOME_TEAM_ID", "home_team_id"],
-    ["AWAY_TEAM_ID", "away_team_id"],
-  ]) {
-    const discoveryStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
-    const discoveryEnd = workflow.indexOf("\n      - name:", discoveryStart + 1);
-    const line = workflow.slice(discoveryStart, discoveryEnd).split("\n").find((value) => value.includes("COVERED2_MANUAL_NFL_" + key + ":"));
-    assert.ok(line);
-    assert.match(line, /mode == 'manual-validation'/);
-    assert.match(line, new RegExp("steps\\.contract\\.outputs\\.nfl_" + output));
-    assert.match(line, /mode == 'manual-board-refresh'/);
-  }
+  assert.notEqual(passing.status, 0);
+  assert.match(passing.diagnostics, /Unsupported exact sport\/market pair/);
 
   const scheduled = runContract(naturalWakeOverrides({
     ...validNflTarget,
@@ -761,143 +806,7 @@ test("manual NFL exact-event tuple is mandatory only for write-capable Receiving
   assert.equal(scheduled.status, 0, scheduled.diagnostics);
   assert.match(scheduled.outputs, /^mode=scheduled$/m);
   assert.doesNotMatch(scheduled.outputs, /^nfl_/m);
-});
-
-test("manual NFL event hydration accepts only its seven-field event tuple and a dedicated event-only runner", () => {
-  const accepted = runContract({
-    MANUAL_OPERATION: "manual-nfl-event-hydration",
-    VALIDATION_SPORT_INPUT: "NFL",
-    VALIDATION_MARKET_INPUT: "",
-    FORCE_DISCOVERY_INPUT: "false",
-    ...validNflHydrationTarget,
-  });
-  assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.outputs, /^mode=manual-nfl-event-hydration$/m);
-  assert.match(accepted.outputs, /^sport=NFL$/m);
-  assert.match(accepted.outputs, /^market=$/m);
-  assert.match(accepted.outputs, /^manual_validation=true$/m);
-  assert.match(accepted.outputs, /^force_discovery=false$/m);
-  assert.match(accepted.outputs, /^publish_board=false$/m);
-  assert.doesNotMatch(accepted.outputs, /^nfl_canonical_event_id=/m);
-  assert.doesNotMatch(accepted.outputs, /^nfl_provider_event_id=/m);
-  for (const [output, input] of [
-    ["nfl_nflverse_game_id", "NFL_NFLVERSE_GAME_ID_INPUT"],
-    ["nfl_event_date", "NFL_EVENT_DATE_INPUT"],
-    ["nfl_event_start_time", "NFL_EVENT_START_TIME_INPUT"],
-    ["nfl_home_team", "NFL_HOME_TEAM_INPUT"],
-    ["nfl_away_team", "NFL_AWAY_TEAM_INPUT"],
-    ["nfl_home_team_id", "NFL_HOME_TEAM_ID_INPUT"],
-    ["nfl_away_team_id", "NFL_AWAY_TEAM_ID_INPUT"],
-  ]) assert.match(accepted.outputs, new RegExp(`^${output}=${validNflHydrationTarget[input]}$`, "m"));
-
-  assert.match(workflow, /^          - manual-nfl-event-hydration$/m);
-  const marketInput = workflow.match(/^      validation_market:\n([\s\S]*?)(?=^      [a-z_]+:\n)/m)?.[1] ?? "";
-  assert.match(marketInput, /^        required: false$/m, "hydration does not require a market selection");
-  const stepStart = workflow.indexOf("      - name: Admit exactly one NFL event using the dedicated event-only runner");
-  const stepEnd = workflow.indexOf("\n      - name:", stepStart + 1);
-  assert.ok(stepStart >= 0 && stepEnd > stepStart);
-  const step = workflow.slice(stepStart, stepEnd);
-  assert.match(step, /if: steps\.contract\.outputs\.mode == 'manual-nfl-event-hydration'/);
-  assert.match(step, /run: pnpm run covered2:nfl-event-hydration/);
-  assert.match(step, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
-  assert.match(step, /COVERED2_MANUAL_VALIDATION:\s*"true"/);
-  assert.match(step, /COVERED2_MANUAL_VALIDATION_SPORT:\s*NFL/);
-  assert.match(step, /COVERED2_MANUAL_VALIDATION_OPERATION:\s*manual-nfl-event-hydration/);
-  for (const [name, output] of [
-    ["COVERED2_MANUAL_NFLVERSE_GAME_ID", "nfl_nflverse_game_id"],
-    ["COVERED2_MANUAL_NFL_EVENT_DATE", "nfl_event_date"],
-    ["COVERED2_MANUAL_NFL_EVENT_START_TIME", "nfl_event_start_time"],
-    ["COVERED2_MANUAL_NFL_HOME_TEAM", "nfl_home_team"],
-    ["COVERED2_MANUAL_NFL_AWAY_TEAM", "nfl_away_team"],
-    ["COVERED2_MANUAL_NFL_HOME_TEAM_ID", "nfl_home_team_id"],
-    ["COVERED2_MANUAL_NFL_AWAY_TEAM_ID", "nfl_away_team_id"],
-  ]) assert.match(step, new RegExp(`${name}:.*steps\\.contract\\.outputs\\.${output}`));
-  assert.match(step, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
-  assert.match(step, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.match(step, /COVERED2_MANUAL_VALIDATION_FORCE_DISCOVERY:.*force_discovery/);
-  assert.match(step, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD:.*publish_board/);
-  assert.doesNotMatch(step, /COVERED2_MANUAL_VALIDATION_MARKET|COVERED2_MANUAL_NFL_CANONICAL_EVENT_ID|COVERED2_MANUAL_NFL_PROVIDER_EVENT_ID|COVERED2_MANUAL_MARKET_LINE/);
-  assert.match(step, /^        run: pnpm run covered2:nfl-event-hydration$/m);
-  assert.doesNotMatch(step, /run-covered2-wnba-refresh\.mjs|run-covered2-nfl-refresh|run-covered2-certification|refreshNflMarkets|SHARPAPI_KEY:\s*\$\{\{/i);
-
-  const genericStart = workflow.indexOf("      - name: Run exactly one bounded C2 exact-market discovery");
-  const genericEnd = workflow.indexOf("\n      - name:", genericStart + 1);
-  const generic = workflow.slice(genericStart, genericEnd);
-  assert.match(generic.split("\n")[1] ?? "", /mode != 'manual-nfl-event-hydration'/);
-});
-
-test("manual NFL hydration fails closed on partial, invalid, cross-sport, market, force, board, or scored-prop inputs", () => {
-  for (const missing of Object.keys(validNflHydrationTarget)) {
-    const rejected = runContract({
-      MANUAL_OPERATION: "manual-nfl-event-hydration",
-      VALIDATION_SPORT_INPUT: "NFL",
-      VALIDATION_MARKET_INPUT: "",
-      ...validNflHydrationTarget,
-      [missing]: "",
-    });
-    assert.notEqual(rejected.status, 0, `${missing} must be required`);
-    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
-  }
-  for (const invalid of [
-    { VALIDATION_SPORT_INPUT: "NBA" },
-    { VALIDATION_MARKET_INPUT: "receiving_yards" },
-    { FORCE_DISCOVERY_INPUT: "true" },
-    { NFL_CANONICAL_EVENT_ID_INPUT: "event-id-is-not-an-hydration-input" },
-    { NFL_PROVIDER_EVENT_ID_INPUT: "provider-id-is-not-an-hydration-input" },
-    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
-    { MLB_GAME_PK_INPUT: "849817" },
-    { MLB_EVENT_DATE_INPUT: "2026-10-22" },
-    { WNBA_EVENT_ID_INPUT: "401918307" },
-    { WNBA_EVENT_DATE_INPUT: "2026-10-22" },
-    { NFL_EVENT_DATE_INPUT: "2026-02-30" },
-    { NFL_EVENT_START_TIME_INPUT: "2026-10-23T00:15:00Z" },
-    { NFL_HOME_TEAM_INPUT: "Chi" },
-    { NFL_AWAY_TEAM_ID_INPUT: "canonical-bears" },
-    { SCHEDULER_ENABLED: "true" },
-    { CERTIFICATION_LEDGER_ENABLED: "true" },
-  ]) {
-    const rejected = runContract({
-      MANUAL_OPERATION: "manual-nfl-event-hydration",
-      VALIDATION_SPORT_INPUT: "NFL",
-      VALIDATION_MARKET_INPUT: "",
-      FORCE_DISCOVERY_INPUT: "false",
-      ...validNflHydrationTarget,
-      ...invalid,
-    });
-    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
-    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
-  }
-  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_PUBLISH_BOARD: \$\{\{ steps\.contract\.outputs\.publish_board \}\}/);
-});
-
-test("scheduled execution cannot select or forward the manual NFL hydration tuple", () => {
-  const scheduled = runContract(naturalWakeOverrides({
-    MANUAL_OPERATION: "manual-nfl-event-hydration",
-    VALIDATION_SPORT_INPUT: "NFL",
-    VALIDATION_MARKET_INPUT: "",
-    ...validNflHydrationTarget,
-  }));
-  assert.equal(scheduled.status, 0, scheduled.diagnostics);
-  assert.match(scheduled.outputs, /^mode=scheduled$/m);
-  assert.doesNotMatch(scheduled.outputs, /manual-nfl-event-hydration|nfl_nflverse_game_id=|nfl_event_date=/);
-  const generic = workflow.slice(workflow.indexOf("- name: Run exactly one bounded C2 exact-market discovery"));
-  assert.match(generic, /mode != 'manual-nfl-event-hydration'/);
-});
-test("read-only preflight is limited to one NFL market and cannot fall through to discovery", () => {
-  const allowed = runContract({ MANUAL_OPERATION: "exact-market-preflight" });
-  const tupleRejected=runContract({MANUAL_OPERATION:"exact-market-preflight",...validNflTarget}); assert.notEqual(tupleRejected.status,0); assert.match(tupleRejected.diagnostics,/preflight rejects exact-event tuple/);
-  assert.equal(allowed.status, 0);
-  assert.match(allowed.outputs, /^mode=manual-preflight$/m);
-  assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
-  assert.match(workflow, /rejectionReasons: manifest\?\.rejectionReasons \?\? \{\}/);
-  assert.match(workflow, /providerMarketTypeCounts: manifest\?\.providerMarketTypeCounts \?\? \{\}/);
-  assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
-  for (const invalid of [
-    { VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases" },
-    { FORCE_DISCOVERY_INPUT: "true" },
-  ]) {
-    assert.notEqual(runContract({ MANUAL_OPERATION: "exact-market-preflight", ...invalid }).status, 0);
-  }
+  assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
 
 test("one-shot MLB postseason event hydration is exact, owner-only, and cannot enter the market pipeline", () => {
