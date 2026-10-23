@@ -402,7 +402,7 @@ jobs:
         run: |
           REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"
           NFL_TARGET_SUPPLIED="false"
-          if [ -n "$(printf '%s' "$NFL_EVENT_TUPLE_INPUT" | tr -d '[:space:]')" ]; then
+          if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
             NFL_TARGET_SUPPLIED="true"
           fi
           validate_nfl_event_tuple() {

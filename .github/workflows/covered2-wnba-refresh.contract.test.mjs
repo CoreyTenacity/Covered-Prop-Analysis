@@ -777,6 +777,12 @@ test("NFL exact-event operations preserve preflight, scheduled, Passing, and inc
   });
   assert.notEqual(tuplePreflight.status, 0);
   assert.match(tuplePreflight.diagnostics, /preflight rejects exact-event tuple/);
+  const whitespaceTuplePreflight = runContract({
+    MANUAL_OPERATION: "exact-market-preflight",
+    NFL_EVENT_TUPLE_INPUT: " \n ",
+  });
+  assert.notEqual(whitespaceTuplePreflight.status, 0, "any non-empty tuple input is incompatible with read-only preflight");
+  assert.match(whitespaceTuplePreflight.diagnostics, /preflight rejects exact-event tuple/);
   assert.match(workflow, /refreshNflMarkets\(\{ write: false, markets: \[market\], includeReadOnlyDiagnostics: true \}\)/);
   assert.match(workflow, /steps\.contract\.outputs\.mode != 'manual-preflight'/);
 
