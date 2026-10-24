@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 22046)
-Total output lines: 1383
-
 # COVERED 2 PRODUCTION WAKE - the single recurring production trigger.
 #
 # DISABLING THIS DISABLES THE ENTIRE LIVE COVERED 2 REFRESH PATH.
@@ -740,7 +737,123 @@ jobs:
                     || [ -n "$MLB_GAME_PK_INPUT" ] \
                     || [ "$SCHEDULER_ENABLED" != "false" ] \
                     || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
-                    echo "::error::Forced WNBA Reboun…2046 tokens truncated…     *$'\n'*|*$'\r'*) echo "::error::WNBA event inputs may not contain line breaks."; exit 1 ;;
+                    echo "::error::Forced WNBA Rebounds proof requires one complete exact event tuple, paused scheduler, disabled certification writes, and no incompatible operation inputs."
+                    exit 1
+                  fi
+                  if ! node -e '
+                    const [date, start] = process.argv.slice(1);
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/.test(start)) process.exit(1);
+                    const dateCheck = new Date(`${date}T00:00:00.000Z`);
+                    const startCheck = new Date(start);
+                    if (!Number.isFinite(dateCheck.getTime()) || dateCheck.toISOString().slice(0, 10) !== date
+                      || !Number.isFinite(startCheck.getTime()) || startCheck.toISOString() !== start) process.exit(1);
+                  ' "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT"; then
+                    echo "::error::WNBA proof date and start time must be valid canonical UTC values."
+                    exit 1
+                  fi
+                  echo "wnba_event_id=$WNBA_EVENT_ID_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_event_date=$WNBA_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_event_start_time=$WNBA_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_home_team_id=$WNBA_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                  echo "wnba_away_team_id=$WNBA_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                elif [ -n "$WNBA_EVENT_ID_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_DATE_INPUT" ] \
+                  || [ -n "$WNBA_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$WNBA_HOME_TEAM_ID_INPUT" ] \
+                  || [ -n "$WNBA_AWAY_TEAM_ID_INPUT" ]; then
+                  echo "::error::WNBA event tuple inputs are valid only for forced exact-event WNBA Rebounds discovery or WNBA event hydration."
+                  exit 1
+                fi
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" = "MLB:batter_total_bases" ]; then
+                  if ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$'; then
+                    echo "::error::MLB Batter Total Bases manual operation requires one bounded positive numeric gamePk."
+                    exit 1
+                  fi
+                  echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
+                elif [ -n "$MLB_GAME_PK_INPUT" ]; then
+                  echo "::error::mlb_game_pk is valid only for the exact MLB Batter Total Bases manual proof."
+                  exit 1
+                fi
+                echo "mode=manual-validation" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=$FORCE_DISCOVERY_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              exact-market-board-refresh)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "NFL:receiving_yards" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "true" ] \
+                  || [ "$BOARD_BUILD_ENABLED" != "true" ]; then
+                  echo "::error::Published one-shot board refresh requires exact NFL receiving_yards and the explicit one-off discovery control."
+                  exit 1
+                fi
+                validate_nfl_exact_event_target
+                echo "mode=manual-board-refresh" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=true" >> "$GITHUB_OUTPUT"
+                echo "publish_board=true" >> "$GITHUB_OUTPUT"
+                ;;
+              mlb-game-identity-diagnostic)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || [ "$MLB_EVENT_DATE_INPUT" != "2026-10-15" ] \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB identity diagnostic requires the exact target date/market, no discovery bypass, and disabled certification writes."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-game-identity-diagnostic" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              mlb-event-hydration)
+                for event_input in "$MLB_GAME_PK_INPUT" "$MLB_EVENT_DATE_INPUT" "$MLB_EVENT_START_TIME_INPUT" "$MLB_HOME_TEAM_ID_INPUT" "$MLB_AWAY_TEAM_ID_INPUT" "$MLB_GAME_TYPE_INPUT" "$MLB_SERIES_DESCRIPTION_INPUT"; do
+                  case "$event_input" in
+                    *$'\n'*|*$'\r'*) echo "::error::MLB event inputs may not contain line breaks."; exit 1 ;;
+                  esac
+                done
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$' \
+                  || ! printf '%s' "$MLB_EVENT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                  || ! printf '%s' "$MLB_EVENT_START_TIME_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
+                  || ! printf '%s' "$MLB_HOME_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
+                  || ! printf '%s' "$MLB_AWAY_TEAM_ID_INPUT" | grep -Eq '^[0-9]{1,6}$' \
+                  || [ "$MLB_HOME_TEAM_ID_INPUT" = "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || ! printf '%s' "$MLB_GAME_TYPE_INPUT" | grep -Eq '^[FDLW]$' \
+                  || ! printf '%s' "$MLB_SERIES_DESCRIPTION_INPUT" | grep -Eq "^[A-Za-z0-9 ,.'-]{3,80}$" \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB event hydration requires one exact postseason event, paused scheduler, disabled certification writes, and no discovery bypass."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-event-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_date=$MLB_EVENT_DATE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_event_start_time=$MLB_EVENT_START_TIME_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_home_team_id=$MLB_HOME_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_away_team_id=$MLB_AWAY_TEAM_ID_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_type=$MLB_GAME_TYPE_INPUT" >> "$GITHUB_OUTPUT"
+                echo "mlb_series_description=$MLB_SERIES_DESCRIPTION_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              mlb-player-history-hydration)
+                if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "MLB:batter_total_bases" ] \
+                  || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+                  || ! printf '%s' "$MLB_GAME_PK_INPUT" | grep -Eq '^[1-9][0-9]{0,11}$' \
+                  || [ -n "$SCORED_PROP_ID_INPUT" ] \
+                  || [ -n "$MLB_EVENT_DATE_INPUT" ] \
+                  || [ -n "$MLB_EVENT_START_TIME_INPUT" ] \
+                  || [ -n "$MLB_HOME_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_AWAY_TEAM_ID_INPUT" ] \
+                  || [ -n "$MLB_GAME_TYPE_INPUT" ] \
+                  || [ -n "$MLB_SERIES_DESCRIPTION_INPUT" ] \
+                  || [ "$CERTIFICATION_LEDGER_ENABLED" != "false" ]; then
+                  echo "::error::MLB player-history hydration is restricted to the exact Total Bases event, with no discovery bypass or other operation inputs."
+                  exit 1
+                fi
+                echo "mode=manual-mlb-player-history-hydration" >> "$GITHUB_OUTPUT"
+                echo "force_discovery=false" >> "$GITHUB_OUTPUT"
+                echo "mlb_game_pk=$MLB_GAME_PK_INPUT" >> "$GITHUB_OUTPUT"
+                ;;
+              wnba-event-hydration)
+                for event_input in "$WNBA_EVENT_ID_INPUT" "$WNBA_EVENT_DATE_INPUT" "$WNBA_EVENT_START_TIME_INPUT" "$WNBA_HOME_TEAM_ID_INPUT" "$WNBA_AWAY_TEAM_ID_INPUT"; do
+                  case "$event_input" in
+                    *$'\n'*|*$'\r'*) echo "::error::WNBA event inputs may not contain line breaks."; exit 1 ;;
                   esac
                 done
                 if [ "$VALIDATION_SPORT_INPUT:$VALIDATION_MARKET_INPUT" != "WNBA:rebounds" ] \
