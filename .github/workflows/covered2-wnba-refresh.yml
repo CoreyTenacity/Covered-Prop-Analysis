@@ -402,6 +402,11 @@ jobs:
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
           REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"
+          NBA_MANUAL_RELEASE_SHA="85acd2eaa3cae4ac7ea5489e17e3800c4c731b29"
+          EXPECTED_MANUAL_RELEASE_SHA="$REVIEWED_RELEASE_SHA"
+          if [ "$MANUAL_OPERATION" = "exact-market-discovery" ] && [ "$VALIDATION_SPORT_INPUT" = "NBA" ]; then
+            EXPECTED_MANUAL_RELEASE_SHA="$NBA_MANUAL_RELEASE_SHA"
+          fi
           NFL_TARGET_SUPPLIED="false"
           if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
             NFL_TARGET_SUPPLIED="true"
@@ -604,7 +609,7 @@ jobs:
             if [ "$REF_NAME" != "main" ] \
               || [ "$ACTOR" != "CoreyTenacity" ] \
               || [ "$SCHEDULER_ENABLED" != "false" ] \
-              || [ "$RELEASE_SHA_INPUT" != "$REVIEWED_RELEASE_SHA" ] \
+              || [ "$RELEASE_SHA_INPUT" != "$EXPECTED_MANUAL_RELEASE_SHA" ] \
               || ! printf '%s' "$RELEASE_SHA_INPUT" | grep -Eq '^[0-9a-f]{40}$' \
               || [ "$ALLOWLIST" != "corey093011@gmail.com" ] \
               || [ "$CADENCE" != "0,30 11-23,0-4 * * *" ] \
@@ -1372,3 +1377,4 @@ jobs:
 # bounded target-player logs. NFL event hydration writes one exact schedule
 # event/mapping only. No NBA, NFL market discovery, scoring, board,
 # publication, grading, snapshot, Automatic Picks, or source export is added.
+
