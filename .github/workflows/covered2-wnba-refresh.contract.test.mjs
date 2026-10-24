@@ -7,6 +7,7 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
+const nbaManualSha = "85acd2eaa3cae4ac7ea5489e17e3800c4c731b29";
 const priorReviewedSha = "a57d76cb6b72039724ed4832d25c4e1e4ef04547";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
@@ -152,6 +153,9 @@ function runContract(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "c2-receiver-contract-"));
   const outputPath = join(directory, "github-output.txt");
   writeFileSync(outputPath, "");
+  const operation = overrides.MANUAL_OPERATION ?? "exact-market-discovery";
+  const sport = overrides.VALIDATION_SPORT_INPUT ?? "NFL";
+  const defaultReleaseSha = sport === "NBA" && operation === "exact-market-discovery" ? nbaManualSha : reviewedSha;
   const env = {
     ...process.env,
     GITHUB_OUTPUT: outputPath,
@@ -159,7 +163,7 @@ function runContract(overrides = {}) {
     REF_NAME: "main",
     ACTOR: "CoreyTenacity",
     SCHEDULER_ENABLED: "false",
-    RELEASE_SHA_INPUT: reviewedSha,
+    RELEASE_SHA_INPUT: overrides.RELEASE_SHA_INPUT ?? defaultReleaseSha,
         ALLOWLIST: "corey093011@gmail.com",
     CADENCE: "0,30 11-23,0-4 * * *",
     DEPLOYMENT_AUTHORIZED: "true",
@@ -291,6 +295,38 @@ test("only the public-reviewed immutable SHA is executable; manual callers canno
   assert.equal(reviewedSha.length, 40);
   assert.equal(runContract({ RELEASE_SHA_INPUT: retiredSha }).status, 1);
 });
+
+test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL resolver keeps its separately reviewed SHA", () => {
+  assert.match(workflow, new RegExp('NBA_MANUAL_RELEASE_SHA="' + nbaManualSha + '"'));
+  assert.match(workflow, /EXPECTED_MANUAL_RELEASE_SHA="\$REVIEWED_RELEASE_SHA"[\s\S]*?MANUAL_OPERATION.*?exact-market-discovery[\s\S]*?VALIDATION_SPORT_INPUT.*?NBA[\s\S]*?EXPECTED_MANUAL_RELEASE_SHA="\$NBA_MANUAL_RELEASE_SHA"/);
+  for (const market of ["points", "rebounds", "assists"]) {
+    const accepted = runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false" });
+    assert.equal(accepted.status, 0, `NBA ${market}: ${accepted.diagnostics}`);
+    assert.match(accepted.outputs, new RegExp("^release_sha=" + nbaManualSha + "$", "m"));
+    assert.match(accepted.outputs, /^mode=manual-validation$/m);
+    assert.match(accepted.outputs, new RegExp("^market=" + market + "$", "m"));
+    assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: reviewedSha }).status, 1);
+  }
+  for (const invalid of [
+    { market: "three_pointers", sha: nbaManualSha },
+    { market: "3pm", sha: nbaManualSha },
+    { market: "points", force: "true", sha: nbaManualSha },
+  ]) {
+    const rejected = runContract({
+      MANUAL_OPERATION: "exact-market-discovery",
+      VALIDATION_SPORT_INPUT: "NBA",
+      VALIDATION_MARKET_INPUT: invalid.market,
+      FORCE_DISCOVERY_INPUT: invalid.force ?? "false",
+      RELEASE_SHA_INPUT: invalid.sha,
+    });
+    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
+  }
+  const resolver = runContract({ MANUAL_OPERATION: "manual-nfl-provider-event-resolution", VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "", FORCE_DISCOVERY_INPUT: "false", NFL_EVENT_TUPLE_INPUT: JSON.stringify(validNflResolverTuple), RELEASE_SHA_INPUT: reviewedSha });
+  assert.equal(resolver.status, 0, resolver.diagnostics);
+  assert.match(resolver.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+  assert.equal(runContract({ MANUAL_OPERATION: "manual-nfl-provider-event-resolution", VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "", FORCE_DISCOVERY_INPUT: "false", NFL_EVENT_TUPLE_INPUT: JSON.stringify(validNflResolverTuple), RELEASE_SHA_INPUT: nbaManualSha }).status, 1);
+  assert.match(workflow, /resolver: \[[\s\S]*?canonicalEventId[\s\S]*?nflverseGameId[\s\S]*?expectedStartTime[\s\S]*?canonicalAwayTeamId/);
+});
 test("scheduled execution derives the private checkout and runner SHA only from the reviewed public release", () => {
   assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
   assert.doesNotMatch(workflow, /PIN:\s*\$\{\{/);
@@ -385,7 +421,8 @@ test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact disc
     assert.match(result.outputs, /^mode=manual-validation$/m);
     assert.match(result.outputs, new RegExp("^sport=" + sport + "$", "m"));
     assert.match(result.outputs, new RegExp("^market=" + market + "$", "m"));
-    assert.match(result.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
+    const expectedSha = sport === "NBA" ? nbaManualSha : reviewedSha;
+    assert.match(result.outputs, new RegExp("^release_sha=" + expectedSha + "$", "m"));
     assert.match(result.outputs, /^exact_manual=true$/m);
   }
   for (const [sport, market] of blockedPairs) {
@@ -1468,3 +1505,4 @@ test("manual exact-market discovery passes the reviewed release SHA into the pri
   assert.match(discoveryStep, /EXPECTED_SHA:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
   assert.match(discoveryStep, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
 });
+
