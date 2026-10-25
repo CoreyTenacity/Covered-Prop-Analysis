@@ -7,7 +7,7 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
-const nbaManualSha = "5e770d6b79dddd8a948c58aefda431d3bcb79486";
+const nbaManualSha = "27dd401ef774bfda9601c66c710f21b8a5d12f96";
 const priorReviewedSha = "a57d76cb6b72039724ed4832d25c4e1e4ef04547";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
