@@ -8,6 +8,7 @@ import test from "node:test";
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
 const nbaManualSha = "27dd401ef774bfda9601c66c710f21b8a5d12f96";
+const previousNbaManualSha = "5e770d6b79dddd8a948c58aefda431d3bcb79486";
 const priorReviewedSha = "a57d76cb6b72039724ed4832d25c4e1e4ef04547";
 const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
@@ -306,6 +307,7 @@ test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL 
     assert.match(accepted.outputs, /^mode=manual-validation$/m);
     assert.match(accepted.outputs, new RegExp("^market=" + market + "$", "m"));
     assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: reviewedSha }).status, 1);
+    assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: previousNbaManualSha }).status, 1);
   }
   for (const invalid of [
     { market: "three_pointers", sha: nbaManualSha },
