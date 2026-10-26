@@ -7,11 +7,12 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
-const nbaManualSha = "29a5fd5a33123ef1577be3c9450c492fc705daae";
+const nbaManualSha = "4b21f430d760f6ba44d0200fb41a63cb6821272b";
 const supersededLatestNbaManualSha = "3654444372f9286e4d9a5fb22629686959f0030a";
 const supersededPriorNbaManualSha = "a7e870ac1afe0c71bdcc842d8091d905180c51d9";
 const supersededNbaManualSha = "da4d121dd1e77e577127d1f5ac5127f241391cdf";
 const supersededCurrentNbaManualSha = "1660cf3421c75614b9a8b7bdd2de46d0eac48fec";
+const supersededImmediatelyPreviousNbaManualSha = "29a5fd5a33123ef1577be3c9450c492fc705daae";
 const previousNbaManualSha = "79543e9f142a06d305a2f51984003742caa34a36";
 const earlierNbaManualSha = "27dd401ef774bfda9601c66c710f21b8a5d12f96";
 const oldestNbaManualSha = "5e770d6b79dddd8a948c58aefda431d3bcb79486";
@@ -315,7 +316,7 @@ test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL 
     assert.match(accepted.outputs, /^mode=manual-validation$/m);
     assert.match(accepted.outputs, new RegExp("^market=" + market + "$", "m"));
     assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: reviewedSha }).status, 1);
-    for (const rejectedSha of [supersededLatestNbaManualSha, supersededCurrentNbaManualSha, supersededNbaManualSha, supersededPriorNbaManualSha, previousNbaManualSha, earlierNbaManualSha, oldestNbaManualSha, oldestSupportedNbaManualSha]) {
+    for (const rejectedSha of [supersededImmediatelyPreviousNbaManualSha, supersededLatestNbaManualSha, supersededCurrentNbaManualSha, supersededNbaManualSha, supersededPriorNbaManualSha, previousNbaManualSha, earlierNbaManualSha, oldestNbaManualSha, oldestSupportedNbaManualSha]) {
       assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: rejectedSha }).status, 1);
     }
   }
