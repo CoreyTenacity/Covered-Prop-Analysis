@@ -63,6 +63,10 @@ on:
         description: "Exact market key"
         required: false
         type: string
+      validation_sportsbook:
+        description: "Exact NBA manual sportsbook selector (DraftKings or FanDuel); leave blank to preserve current selection"
+        required: false
+        type: string
       force_discovery:
         description: "Use the one-off NFL discovery-cadence bypass"
         required: false
@@ -385,6 +389,7 @@ jobs:
           RELEASE_SHA_INPUT: ${{ inputs.release_sha }}
           VALIDATION_SPORT_INPUT: ${{ inputs.validation_sport }}
           VALIDATION_MARKET_INPUT: ${{ inputs.validation_market }}
+          VALIDATION_SPORTBOOK_INPUT: ${{ inputs.validation_sportsbook }}
           FORCE_DISCOVERY_INPUT: ${{ inputs.force_discovery }}
           NFL_EVENT_TUPLE_INPUT: ${{ inputs.nfl_event_tuple }}
           SCORED_PROP_ID_INPUT: ${{ inputs.scored_prop_id }}
@@ -402,10 +407,25 @@ jobs:
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
           REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"
-          NBA_MANUAL_RELEASE_SHA="109671930c26362b2ad841114fccd5146efc5029"
+          NBA_MANUAL_RELEASE_SHA="a7e870ac1afe0c71bdcc842d8091d905180c51d9"
           EXPECTED_MANUAL_RELEASE_SHA="$REVIEWED_RELEASE_SHA"
           if [ "$MANUAL_OPERATION" = "exact-market-discovery" ] && [ "$VALIDATION_SPORT_INPUT" = "NBA" ]; then
             EXPECTED_MANUAL_RELEASE_SHA="$NBA_MANUAL_RELEASE_SHA"
+          fi
+          if [ -n "$VALIDATION_SPORTBOOK_INPUT" ]; then
+            if [ "$VALIDATION_SPORTBOOK_INPUT" != "DraftKings" ] && [ "$VALIDATION_SPORTBOOK_INPUT" != "FanDuel" ]; then
+              echo "::error::validation_sportsbook accepts only DraftKings or FanDuel."
+              exit 1
+            fi
+            if [ "$TRIGGER" != "workflow_dispatch" ] \
+              || [ "$MANUAL_OPERATION" != "exact-market-discovery" ] \
+              || [ "$VALIDATION_SPORT_INPUT" != "NBA" ] \
+              || { [ "$VALIDATION_MARKET_INPUT" != "points" ] && [ "$VALIDATION_MARKET_INPUT" != "rebounds" ] && [ "$VALIDATION_MARKET_INPUT" != "assists" ]; } \
+              || [ "$FORCE_DISCOVERY_INPUT" != "false" ] \
+              || [ "$RELEASE_SHA_INPUT" != "$NBA_MANUAL_RELEASE_SHA" ]; then
+              echo "::error::validation_sportsbook is restricted to non-forced NBA Points/Rebounds/Assists exact-market discovery on the reviewed NBA runtime."
+              exit 1
+            fi
           fi
           NFL_TARGET_SUPPLIED="false"
           if [ -n "$NFL_EVENT_TUPLE_INPUT" ]; then
@@ -909,6 +929,9 @@ jobs:
             echo "release_sha=$RELEASE_SHA_INPUT" >> "$GITHUB_OUTPUT"
             echo "sport=$VALIDATION_SPORT_INPUT" >> "$GITHUB_OUTPUT"
             echo "market=$VALIDATION_MARKET_INPUT" >> "$GITHUB_OUTPUT"
+            if [ -n "$VALIDATION_SPORTBOOK_INPUT" ]; then
+              echo "validation_sportsbook=$VALIDATION_SPORTBOOK_INPUT" >> "$GITHUB_OUTPUT"
+            fi
             if [ "$MANUAL_OPERATION" = "certification-one-observation" ]; then
               echo "scored_prop_id=$SCORED_PROP_ID_INPUT" >> "$GITHUB_OUTPUT"
             fi
@@ -1105,6 +1128,7 @@ jobs:
           COVERED2_MANUAL_VALIDATION: ${{ steps.contract.outputs.manual_validation }}
           COVERED2_MANUAL_VALIDATION_SPORT: ${{ steps.contract.outputs.sport }}
           COVERED2_MANUAL_VALIDATION_MARKET: ${{ steps.contract.outputs.market }}
+          COVERED2_MANUAL_VALIDATION_SPORTSBOOK: ${{ steps.contract.outputs.validation_sportsbook }}
           COVERED2_MANUAL_MLB_GAME_PK: ${{ steps.contract.outputs.mlb_game_pk }}
           COVERED2_MANUAL_NFL_CANONICAL_EVENT_ID: ${{ ((steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'NFL' && (steps.contract.outputs.market == 'receiving_yards' || steps.contract.outputs.market == 'rushing_yards')) || (steps.contract.outputs.mode == 'manual-board-refresh' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'receiving_yards')) && steps.contract.outputs.nfl_canonical_event_id || '' }}
           COVERED2_MANUAL_NFL_NFLVERSE_GAME_ID: ${{ ((steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'NFL' && (steps.contract.outputs.market == 'receiving_yards' || steps.contract.outputs.market == 'rushing_yards')) || (steps.contract.outputs.mode == 'manual-board-refresh' && steps.contract.outputs.sport == 'NFL' && steps.contract.outputs.market == 'receiving_yards')) && steps.contract.outputs.nfl_nflverse_game_id || '' }}
