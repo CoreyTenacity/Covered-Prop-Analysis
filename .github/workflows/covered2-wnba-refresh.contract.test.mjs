@@ -7,7 +7,7 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
-const nbaManualSha = "109671930c26362b2ad841114fccd5146efc5029";
+const nbaManualSha = "a7e870ac1afe0c71bdcc842d8091d905180c51d9";
 const supersededNbaManualSha = "da4d121dd1e77e577127d1f5ac5127f241391cdf";
 const supersededCurrentNbaManualSha = "1660cf3421c75614b9a8b7bdd2de46d0eac48fec";
 const previousNbaManualSha = "79543e9f142a06d305a2f51984003742caa34a36";
@@ -178,6 +178,7 @@ function runContract(overrides = {}) {
     MANUAL_OPERATION: "exact-market-discovery",
     VALIDATION_SPORT_INPUT: "NFL",
     VALIDATION_MARKET_INPUT: "receiving_yards",
+    VALIDATION_SPORTBOOK_INPUT: "",
     FORCE_DISCOVERY_INPUT: "false",
     NFL_EVENT_TUPLE_INPUT: "",
     SCORED_PROP_ID_INPUT: "",
@@ -336,6 +337,36 @@ test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL 
   assert.equal(runContract({ MANUAL_OPERATION: "manual-nfl-provider-event-resolution", VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "", FORCE_DISCOVERY_INPUT: "false", NFL_EVENT_TUPLE_INPUT: JSON.stringify(validNflResolverTuple), RELEASE_SHA_INPUT: nbaManualSha }).status, 1);
   assert.match(workflow, /resolver: \[[\s\S]*?canonicalEventId[\s\S]*?nflverseGameId[\s\S]*?expectedStartTime[\s\S]*?canonicalAwayTeamId/);
 });
+test("NBA manual sportsbook selector is exact, optional, and pinned to the PR #43 runtime", () => {
+  assert.match(workflow, /validation_sportsbook:\n\s+description: .*exact NBA manual sportsbook selector/i);
+  assert.match(workflow, /COVERED2_MANUAL_VALIDATION_SPORTSBOOK: \$\{\{ steps\.contract\.outputs\.validation_sportsbook \}\}/);
+  for (const market of ["points", "rebounds", "assists"]) {
+    const base = { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false" };
+    const omitted = runContract(base);
+    assert.equal(omitted.status, 0, omitted.diagnostics);
+    assert.doesNotMatch(omitted.outputs, /^validation_sportsbook=/m);
+    for (const sportsbook of ["DraftKings", "FanDuel"]) {
+      const accepted = runContract({ ...base, VALIDATION_SPORTBOOK_INPUT: sportsbook });
+      assert.equal(accepted.status, 0, `NBA ${market}/${sportsbook}: ${accepted.diagnostics}`);
+      assert.match(accepted.outputs, new RegExp("^validation_sportsbook=" + sportsbook + "$", "m"));
+      assert.match(accepted.outputs, new RegExp("^release_sha=" + nbaManualSha + "$", "m"));
+    }
+  }
+  const invalid = [
+    { label: "unsupported sportsbook", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", VALIDATION_SPORTBOOK_INPUT: "Caesars" } },
+    { label: "NBA 3PM", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "3pm", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "forced discovery", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", FORCE_DISCOVERY_INPUT: "true", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "preflight", overrides: { MANUAL_OPERATION: "exact-market-preflight", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", RELEASE_SHA_INPUT: reviewedSha, VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "board refresh", overrides: { MANUAL_OPERATION: "exact-market-board-refresh", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", RELEASE_SHA_INPUT: reviewedSha, VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "NFL", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NFL", VALIDATION_MARKET_INPUT: "receiving_yards", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "MLB", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "MLB", VALIDATION_MARKET_INPUT: "batter_total_bases", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "WNBA", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "WNBA", VALIDATION_MARKET_INPUT: "rebounds", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+    { label: "superseded NBA runtime", overrides: { MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", VALIDATION_SPORTBOOK_INPUT: "FanDuel", RELEASE_SHA_INPUT: "109671930c26362b2ad841114fccd5146efc5029" } },
+    { label: "repository_dispatch", overrides: { TRIGGER: "repository_dispatch", MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: "points", VALIDATION_SPORTBOOK_INPUT: "FanDuel" } },
+  ];
+  for (const { label, overrides } of invalid) assert.notEqual(runContract(overrides).status, 0, label);
+});
+
 test("scheduled execution derives the private checkout and runner SHA only from the reviewed public release", () => {
   assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
   assert.doesNotMatch(workflow, /PIN:\s*\$\{\{/);
@@ -706,10 +737,10 @@ test("current-analysis certification accepts only one exact NFL receiving-yards 
   assert.match(workflow, /Certify one current NFL receiving-yards analysis/);
   assert.ok(workflow.includes("steps.contract.outputs.mode == 'manual-current-analysis-certification'"));
 });
-test("workflow_dispatch stays at 19 inputs, below GitHub's 25-input limit", () => {
+test("workflow_dispatch stays at 20 inputs, below GitHub's 25-input limit", () => {
   const dispatch = workflow.match(/^  workflow_dispatch:\n([\s\S]*?)(?=^\n(?:permissions|concurrency|jobs):)/m)?.[1] ?? "";
   const names = [...dispatch.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
-  assert.equal(names.length, 19);
+  assert.equal(names.length, 20);
   assert.ok(names.length <= 25);
   assert.ok(names.includes("nfl_event_tuple"));
   assert.match(workflow, /- manual-nfl-provider-event-resolution/);
@@ -1514,4 +1545,3 @@ test("manual exact-market discovery passes the reviewed release SHA into the pri
   assert.match(discoveryStep, /EXPECTED_SHA:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
   assert.match(discoveryStep, /COVERED_PRIVATE_PIPELINE_SHA_V2:\s*\$\{\{\s*steps\.contract\.outputs\.release_sha\s*\}\}/);
 });
-
