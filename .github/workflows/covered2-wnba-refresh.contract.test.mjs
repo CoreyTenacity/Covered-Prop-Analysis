@@ -7,7 +7,8 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
 const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
-const nbaManualSha = "cdf6aabe40cea10f3968b54a3fd2c02dacf9e193";
+const nbaManualSha = "35d8b6904fdee5f9bd4ca3086226e9d78e87610b";
+const supersededPr48NbaManualSha = "cdf6aabe40cea10f3968b54a3fd2c02dacf9e193";
 const supersededDiagnosticNbaManualSha = "4b21f430d760f6ba44d0200fb41a63cb6821272b";
 const supersededImmediatelyPreviousIntegrationNbaManualSha = "8b772dfee4dcfa57edba03e76c3b6a18a36c3fe4";
 const supersededLatestNbaManualSha = "3654444372f9286e4d9a5fb22629686959f0030a";
@@ -318,7 +319,7 @@ test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL 
     assert.match(accepted.outputs, /^mode=manual-validation$/m);
     assert.match(accepted.outputs, new RegExp("^market=" + market + "$", "m"));
     assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: reviewedSha }).status, 1);
-    for (const rejectedSha of [supersededDiagnosticNbaManualSha, supersededImmediatelyPreviousIntegrationNbaManualSha, supersededImmediatelyPreviousNbaManualSha, supersededLatestNbaManualSha, supersededCurrentNbaManualSha, supersededNbaManualSha, supersededPriorNbaManualSha, previousNbaManualSha, earlierNbaManualSha, oldestNbaManualSha, oldestSupportedNbaManualSha]) {
+    for (const rejectedSha of [supersededPr48NbaManualSha, supersededDiagnosticNbaManualSha, supersededImmediatelyPreviousIntegrationNbaManualSha, supersededImmediatelyPreviousNbaManualSha, supersededLatestNbaManualSha, supersededCurrentNbaManualSha, supersededNbaManualSha, supersededPriorNbaManualSha, previousNbaManualSha, earlierNbaManualSha, oldestNbaManualSha, oldestSupportedNbaManualSha]) {
       assert.equal(runContract({ MANUAL_OPERATION: "exact-market-discovery", VALIDATION_SPORT_INPUT: "NBA", VALIDATION_MARKET_INPUT: market, FORCE_DISCOVERY_INPUT: "false", RELEASE_SHA_INPUT: rejectedSha }).status, 1);
     }
   }
