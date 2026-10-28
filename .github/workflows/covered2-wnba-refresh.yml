@@ -407,7 +407,7 @@ jobs:
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
           REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"
-          NBA_MANUAL_RELEASE_SHA="35d8b6904fdee5f9bd4ca3086226e9d78e87610b"
+          NBA_MANUAL_RELEASE_SHA="a19211dafa0e0665ee6eae08d2d9b3bc8a69f51c"
           EXPECTED_MANUAL_RELEASE_SHA="$REVIEWED_RELEASE_SHA"
           if [ "$MANUAL_OPERATION" = "exact-market-discovery" ] && [ "$VALIDATION_SPORT_INPUT" = "NBA" ]; then
             EXPECTED_MANUAL_RELEASE_SHA="$NBA_MANUAL_RELEASE_SHA"
