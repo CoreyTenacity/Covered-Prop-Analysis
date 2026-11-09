@@ -17,17 +17,17 @@ on:
   workflow_dispatch:
     inputs:
       league:
-        description: League to run (MLB or WNBA)
+        description: League to run (WNBA)
         required: true
         type: choice
-        options: [WNBA, MLB]
+        options: [WNBA]
       dry_run:
         description: Dry run (no production writes)
         required: true
         type: boolean
         default: true
       config_limit:
-        description: SharpAPI configs this run (WNBA ~8, MLB ~10; provider margin protected by spacing)
+        description: SharpAPI configs this run (WNBA ~8; provider margin protected by spacing)
         required: true
         type: string
         default: "1"
@@ -89,6 +89,7 @@ jobs:
         env:
           SCHED: ${{ github.event.schedule }}
           MAINTENANCE_JOB: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.maintenance_job || 'none' }}
+          REQUESTED_LEAGUE: ${{ github.event.inputs.league }}
           DISPATCH_TYPE: ${{ github.event.action }}
           DISPATCH_SCHEMA: ${{ github.event.client_payload.schema }}
           DISPATCH_SOURCE: ${{ github.event.client_payload.source }}
@@ -101,7 +102,11 @@ jobs:
               # generic private-job runner or expose season/full-backfill controls publicly.
               LEAGUE="WNBA"; DRY="false"; CFG="1"; SCORING="false"; BOARD="false"; PUBLISH="false"
             elif [ "$MAINTENANCE_JOB" = "none" ]; then
-              LEAGUE="${{ github.event.inputs.league }}"
+              LEAGUE="$REQUESTED_LEAGUE"
+              if [ "$LEAGUE" != "WNBA" ]; then
+                echo "::error::Only WNBA is permitted; MLB is retired."
+                exit 1
+              fi
               DRY="${{ github.event.inputs.dry_run }}"
               CFG="${{ github.event.inputs.config_limit }}"
               SCORING="${{ github.event.inputs.run_scoring }}"
@@ -143,8 +148,8 @@ jobs:
         env:
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
         run: |
-          if ! printf '%s' "$PIN" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::COVERED_PRIVATE_PIPELINE_SHA_V2 is missing or not a full 40-char SHA. Refusing to run."
+          if [ "$PIN" != "71c6cb587710cef825caf32bb51116db33907a06" ]; then
+            echo "::error::COVERED_PRIVATE_PIPELINE_SHA_V2 must match the reviewed retirement runtime. Refusing to run."
             exit 1
           fi
           echo "Pinned private SHA present (value not printed)."

@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
+const reviewedSha = "71c6cb587710cef825caf32bb51116db33907a06";
 const nbaManualSha = "4caf597f40e772567dcd72acd4572e05f6c115b5";
 const supersededPr51NbaManualSha = "a19211dafa0e0665ee6eae08d2d9b3bc8a69f51c";
 const supersededPr50NbaManualSha = "35d8b6904fdee5f9bd4ca3086226e9d78e87610b";
@@ -308,6 +308,7 @@ test("only the public-reviewed immutable SHA is executable; manual callers canno
   assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
   assert.doesNotMatch(contractShell, /\$PIN/);
   for (const invalid of [
+    { RELEASE_SHA_INPUT: "4a6ae017fc442237c048c5498e7a442059f8b3aa" },
     { RELEASE_SHA_INPUT: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
     { RELEASE_SHA_INPUT: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
     { RELEASE_SHA_INPUT: "codex/public-repo-repair" },
@@ -326,6 +327,27 @@ test("only the public-reviewed immutable SHA is executable; manual callers canno
   assert.match(accepted.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
   assert.equal(reviewedSha.length, 40);
   assert.equal(runContract({ RELEASE_SHA_INPUT: retiredSha }).status, 1);
+});
+
+test("legacy public pipeline accepts only WNBA and the exact retirement-safe private pin", () => {
+  const legacy = readFileSync(new URL("./covered-production-pipeline.yml", import.meta.url), "utf8");
+  assert.match(legacy, /options: \[WNBA\]/);
+  assert.match(legacy, /\[ "\$LEAGUE" != "WNBA" \]/);
+  assert.match(legacy, new RegExp(`\\[ "\\$PIN" != "${reviewedSha}" \\]`));
+  assert.match(legacy, /COVERED_GITHUB_SCHEDULER_ENABLED/);
+  assert.match(legacy, /wnba_incremental_ingest/);
+  assert.equal(existsSync(new URL("./diagnostic-mlb-providers.yml", import.meta.url)), false);
+  const leagueGuard = legacy.match(/if \[ "\$LEAGUE" != "WNBA" \]; then[\s\S]*?\n\s*fi/)?.[0];
+  const pinGuard = legacy.match(/if \[ "\$PIN" != "[0-9a-f]{40}" \]; then[\s\S]*?\n\s*fi/)?.[0];
+  assert.ok(leagueGuard && pinGuard);
+  for (const league of ["MLB", "mlb", " MLB ", "NBA", "", "WNBA; echo injected"]) {
+    assert.notEqual(spawnSync("bash", ["-c", leagueGuard], { env: { ...process.env, LEAGUE: league } }).status, 0, league);
+  }
+  assert.equal(spawnSync("bash", ["-c", leagueGuard], { env: { ...process.env, LEAGUE: "WNBA" } }).status, 0);
+  assert.equal(spawnSync("bash", ["-c", pinGuard], { env: { ...process.env, PIN: reviewedSha } }).status, 0);
+  for (const pin of ["", "4a6ae017fc442237c048c5498e7a442059f8b3aa", "a".repeat(40)]) {
+    assert.notEqual(spawnSync("bash", ["-c", pinGuard], { env: { ...process.env, PIN: pin } }).status, 0);
+  }
 });
 
 test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL resolver keeps its separately reviewed SHA", () => {
@@ -772,7 +794,7 @@ test("manual NFL provider-event resolver accepts only the exact eight-field even
   ]) assert.match(result.outputs, new RegExp(`^${name}=${value.replaceAll(".", "\\.")}$`, "m"));
   assert.doesNotMatch(result.outputs, /^nfl_provider_event_id=/m);
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="71c6cb587710cef825caf32bb51116db33907a06"/);
   assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"/);
   assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"/);
   assert.match(workflow, /run: pnpm run covered2:nfl-provider-event-resolution/);

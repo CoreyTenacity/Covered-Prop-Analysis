@@ -6,8 +6,7 @@
 # never scores, builds a board, publishes a snapshot, grades props". That is no
 # longer true and had become actively misleading: this one workflow now owns
 #   - WNBA current-evidence refresh
-#   - MLB refresh, schedule ingest, identity, player logs and postgame settlement
-#   - odds-snapshot and current-prop retention for BOTH leagues
+#   - bounded odds-snapshot and current-prop retention
 #   - the WNBA league profile
 #   - the Covered Picks board build (gated by COVERED2_PICKS_BOARD_BUILD)
 #
@@ -415,7 +414,7 @@ jobs:
           WNBA_HOME_TEAM_ID_INPUT: ${{ inputs.wnba_home_team_id }}
           WNBA_AWAY_TEAM_ID_INPUT: ${{ inputs.wnba_away_team_id }}
         run: |
-          REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"
+          REVIEWED_RELEASE_SHA="71c6cb587710cef825caf32bb51116db33907a06"
           NBA_MANUAL_RELEASE_SHA="4caf597f40e772567dcd72acd4572e05f6c115b5"
           EXPECTED_MANUAL_RELEASE_SHA="$REVIEWED_RELEASE_SHA"
           if [ "$MANUAL_OPERATION" = "exact-market-discovery" ] && [ "$VALIDATION_SPORT_INPUT" = "NBA" ]; then
@@ -1187,9 +1186,7 @@ jobs:
         if: always()
         run: rm -rf private-covered
 
-# The owner-gated MLB identity diagnostic above is read-only; event hydration
-# writes one canonical schedule target, and player-history hydration writes only
-# bounded target-player logs. NFL event hydration writes one exact schedule
+# NFL event hydration writes one exact schedule
 # event/mapping only. NBA exact-market discovery is permitted only through the
 # bounded owner-dispatched one-shot Points/Rebounds/Assists path. NFL market
 # discovery remains separately governed. No recurring NBA activation, scoring,
