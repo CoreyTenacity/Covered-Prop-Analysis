@@ -303,6 +303,19 @@ function runPilotGuard({ history = [], overrides = {} } = {}) {
   }
 }
 
+test("explicit WNBA general wake is isolated from NFL pilot and rejects mixed capabilities", () => {
+  const flags = { WNBA_GENERAL_WAKE: "wnba-general-v1", MARKET_SCOPE: "", MANUAL_VALIDATION: "false", RECEIVING_YARDS_ENABLED: "false", RECEPTIONS_ENABLED: "false", RUSHING_YARDS_ENABLED: "false", PASSING_YARDS_ENABLED: "false", CERTIFICATION_WRITE_ENABLED: "false", NBA_LIFECYCLE_ENABLED: "false", PILOT_ENABLED: "false" };
+  const accepted = runPilotGuard({ overrides: flags });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^pilot_attempt_guard=wnba_general_wake$/m);
+  assert.equal(accepted.curlCalled, false);
+  for (const changes of [{ MARKET_SCOPE: "NFL:receiving_yards" }, { MARKET_SCOPE: "MLB:points" }, { PILOT_ENABLED: "true" }, { RECEIVING_YARDS_ENABLED: "true" }, { CERTIFICATION_WRITE_ENABLED: "true" }, { NBA_LIFECYCLE_ENABLED: "true" }, { WNBA_GENERAL_WAKE: "bad" }]) {
+    assert.notEqual(runPilotGuard({ overrides: { ...flags, ...changes } }).status, 0, JSON.stringify(changes));
+  }
+  assert.match(workflow, /COVERED2_WNBA_GENERAL_WAKE:.*steps\.contract\.outputs\.mode == 'scheduled'/);
+  assert.match(workflow, /COVERED2_NBA_LIFECYCLE_ENABLED:.*vars\.COVERED2_NBA_LIFECYCLE_ENABLED/);
+});
+
 test("only the public-reviewed immutable SHA is executable; manual callers cannot inject another ref", () => {
   assert.match(workflow, new RegExp("REVIEWED_RELEASE_SHA=\"" + reviewedSha + "\""));
   assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);

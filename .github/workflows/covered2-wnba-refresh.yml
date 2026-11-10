@@ -267,6 +267,7 @@ jobs:
           PASSING_YARDS_ENABLED: ${{ vars.COVERED2_NFL_PASSING_YARDS_REFRESH }}
           CERTIFICATION_WRITE_ENABLED: ${{ vars.COVERED2_CERTIFICATION_LEDGER_ENABLED }}
           NBA_LIFECYCLE_ENABLED: ${{ vars.COVERED2_NBA_LIFECYCLE_ENABLED }}
+          WNBA_GENERAL_WAKE: ${{ vars.COVERED2_WNBA_GENERAL_WAKE }}
           PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
           PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -282,6 +283,25 @@ jobs:
           if [ "$SCHEDULER_ENABLED" != "true" ]; then
             echo "pilot_attempt_guard=scheduler_paused" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          # The historical general WNBA wake is a distinct explicit mode;
+          # it cannot bypass or spend the NFL pilot's bounded attempt budget.
+          if [ "${WNBA_GENERAL_WAKE:-}" = "wnba-general-v1" ]; then
+            if [ -n "$MARKET_SCOPE" ] || [ "$MANUAL_VALIDATION" = "true" ] \
+              || [ "$RECEIVING_YARDS_ENABLED" != "false" ] || [ "$RECEPTIONS_ENABLED" != "false" ] \
+              || [ "$RUSHING_YARDS_ENABLED" != "false" ] || [ "$PASSING_YARDS_ENABLED" != "false" ] \
+              || [ "$CERTIFICATION_WRITE_ENABLED" != "false" ] || [ "$NBA_LIFECYCLE_ENABLED" != "false" ] \
+              || [ "$PILOT_ENABLED" != "false" ]; then
+              echo "::error::Rejected general WNBA wake: conflicting scope, pilot or sibling capability."
+              exit 1
+            fi
+            echo "pilot_attempt_guard=wnba_general_wake" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "${WNBA_GENERAL_WAKE:-}" ]; then
+            echo "::error::Invalid WNBA general wake mode."
+            exit 1
           fi
 
           if [ "$MARKET_SCOPE" != "NFL:receiving_yards" ] \
@@ -1094,6 +1114,8 @@ jobs:
           COVERED2_MANUAL_WNBA_HOME_TEAM_ID: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_home_team_id || '' }}
           COVERED2_MANUAL_WNBA_AWAY_TEAM_ID: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport == 'WNBA' && steps.contract.outputs.market == 'rebounds' && steps.contract.outputs.force_discovery == 'true' && steps.contract.outputs.wnba_away_team_id || '' }}
           COVERED2_SCHEDULED_MARKET_SCOPE: ${{ vars.COVERED2_SCHEDULED_MARKET_SCOPE }}
+          COVERED2_WNBA_GENERAL_WAKE: ${{ steps.contract.outputs.mode == 'scheduled' && vars.COVERED2_WNBA_GENERAL_WAKE || '' }}
+          COVERED2_NBA_LIFECYCLE_ENABLED: ${{ vars.COVERED2_NBA_LIFECYCLE_ENABLED }}
           COVERED2_NFL_RECEIVING_PILOT_ENABLED: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_ENABLED }}
           COVERED2_NFL_RECEIVING_PILOT_START_AT: ${{ vars.COVERED2_NFL_RECEIVING_PILOT_START_AT }}
           COVERED2_MLB_SCHEDULE_INGEST: ${{ steps.contract.outputs.mode == 'manual-validation' && steps.contract.outputs.sport != 'MLB' && 'false' || vars.COVERED2_MLB_SCHEDULE_INGEST }}
