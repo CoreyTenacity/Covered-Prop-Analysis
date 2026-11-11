@@ -148,7 +148,7 @@ jobs:
         env:
           PIN: ${{ vars.COVERED_PRIVATE_PIPELINE_SHA_V2 }}
         run: |
-          if [ "$PIN" != "71c6cb587710cef825caf32bb51116db33907a06" ]; then
+          if [ "$PIN" != "80a49ba484c0a26846d3f430d7cfb133293f1623" ]; then
             echo "::error::COVERED_PRIVATE_PIPELINE_SHA_V2 must match the reviewed retirement runtime. Refusing to run."
             exit 1
           fi
