@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("./covered2-wnba-refresh.yml", import.meta.url), "utf8");
-const reviewedSha = "4a6ae017fc442237c048c5498e7a442059f8b3aa";
+const reviewedSha = "80a49ba484c0a26846d3f430d7cfb133293f1623";
 const nbaManualSha = "4caf597f40e772567dcd72acd4572e05f6c115b5";
 const supersededPr51NbaManualSha = "a19211dafa0e0665ee6eae08d2d9b3bc8a69f51c";
 const supersededPr50NbaManualSha = "35d8b6904fdee5f9bd4ca3086226e9d78e87610b";
@@ -27,8 +27,6 @@ const retiredSha = "667c13ac455786210618ecfd9a9af65cfb56cad4";
 const readyPairs = [
   ["NFL", "receiving_yards"],
   ["NFL", "rushing_yards"],
-  ["MLB", "batter_total_bases"],
-  ["MLB", "pitcher_strikeouts"],
   ["WNBA", "rebounds"],
   ["NBA", "points"],
   ["NBA", "rebounds"],
@@ -119,6 +117,7 @@ function runSchedulerPreflight({
   apiExitCode = 0,
   actor = "CoreyTenacity",
   refName = "main",
+  overrides = {},
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "c2-scheduler-preflight-"));
   const bin = join(directory, "bin");
@@ -143,6 +142,7 @@ function runSchedulerPreflight({
     MOCK_CURL_MARKER: curlMarker,
     MOCK_CURL_RESPONSE: response,
     MOCK_CURL_EXIT: String(apiExitCode),
+    ...overrides,
   };
   try {
     const result = spawnSync("bash", ["-euo", "pipefail", "-c", schedulerPreflightShell], {
@@ -162,6 +162,23 @@ function runSchedulerPreflight({
     rmSync(directory, { recursive: true, force: true });
   }
 }
+
+test("retired MLB operations stop at the public preflight without disturbing WNBA", () => {
+  for (const input of [
+    { trigger: "workflow_dispatch", overrides: { REQUESTED_SPORT: "MLB" } },
+    { trigger: "workflow_dispatch", overrides: { REQUESTED_OPERATION: "mlb-event-hydration" } },
+    { overrides: { DISPATCH_MANUAL: "true", DISPATCH_SPORT: "MLB" } },
+    { overrides: { DISPATCH_MANUAL: "true", DISPATCH_SPORT: " MLB " } },
+    { overrides: { SCHEDULED_SCOPE: " MLB:batter_total_bases " } },
+    { overrides: { SCHEDULED_SCOPE: "MLB:batter_total_bases" } },
+  ]) {
+    const result = runSchedulerPreflight({ ...input, repositoryValue: "true" });
+    assert.match(result.outputs, /^allow_refresh=false$/m);
+    assert.equal(result.curlCalled, false);
+  }
+  const wnba = runSchedulerPreflight({ trigger: "workflow_dispatch", overrides: { REQUESTED_SPORT: "WNBA", REQUESTED_OPERATION: "wnba-event-hydration" } });
+  assert.match(wnba.outputs, /^allow_refresh=true$/m);
+});
 
 function runContract(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "c2-receiver-contract-"));
@@ -286,11 +303,25 @@ function runPilotGuard({ history = [], overrides = {} } = {}) {
   }
 }
 
+test("explicit WNBA general wake is isolated from NFL pilot and rejects mixed capabilities", () => {
+  const flags = { WNBA_GENERAL_WAKE: "wnba-general-v1", MARKET_SCOPE: "", MANUAL_VALIDATION: "false", RECEIVING_YARDS_ENABLED: "false", RECEPTIONS_ENABLED: "false", RUSHING_YARDS_ENABLED: "false", PASSING_YARDS_ENABLED: "false", CERTIFICATION_WRITE_ENABLED: "false", NBA_LIFECYCLE_ENABLED: "false", PILOT_ENABLED: "false" };
+  const accepted = runPilotGuard({ overrides: flags });
+  assert.equal(accepted.status, 0, accepted.diagnostics);
+  assert.match(accepted.outputs, /^pilot_attempt_guard=wnba_general_wake$/m);
+  assert.equal(accepted.curlCalled, false);
+  for (const changes of [{ MARKET_SCOPE: "NFL:receiving_yards" }, { MARKET_SCOPE: "MLB:points" }, { PILOT_ENABLED: "true" }, { RECEIVING_YARDS_ENABLED: "true" }, { CERTIFICATION_WRITE_ENABLED: "true" }, { NBA_LIFECYCLE_ENABLED: "true" }, { WNBA_GENERAL_WAKE: "bad" }]) {
+    assert.notEqual(runPilotGuard({ overrides: { ...flags, ...changes } }).status, 0, JSON.stringify(changes));
+  }
+  assert.match(workflow, /COVERED2_WNBA_GENERAL_WAKE:.*steps\.contract\.outputs\.mode == 'scheduled'/);
+  assert.match(workflow, /COVERED2_NBA_LIFECYCLE_ENABLED:.*vars\.COVERED2_NBA_LIFECYCLE_ENABLED/);
+});
+
 test("only the public-reviewed immutable SHA is executable; manual callers cannot inject another ref", () => {
   assert.match(workflow, new RegExp("REVIEWED_RELEASE_SHA=\"" + reviewedSha + "\""));
   assert.doesNotMatch(workflow, /vars\.COVERED_PRIVATE_PIPELINE_SHA_V2/);
   assert.doesNotMatch(contractShell, /\$PIN/);
   for (const invalid of [
+    { RELEASE_SHA_INPUT: "4a6ae017fc442237c048c5498e7a442059f8b3aa" },
     { RELEASE_SHA_INPUT: "e51d02ebe61d8e6eab998cb20d3814e8f14827cd" },
     { RELEASE_SHA_INPUT: "599e526560861ebecdb3ae6a691b0ac3bc56d101" },
     { RELEASE_SHA_INPUT: "codex/public-repo-repair" },
@@ -309,6 +340,27 @@ test("only the public-reviewed immutable SHA is executable; manual callers canno
   assert.match(accepted.outputs, new RegExp("^release_sha=" + reviewedSha + "$", "m"));
   assert.equal(reviewedSha.length, 40);
   assert.equal(runContract({ RELEASE_SHA_INPUT: retiredSha }).status, 1);
+});
+
+test("legacy public pipeline accepts only WNBA and the exact retirement-safe private pin", () => {
+  const legacy = readFileSync(new URL("./covered-production-pipeline.yml", import.meta.url), "utf8");
+  assert.match(legacy, /options: \[WNBA\]/);
+  assert.match(legacy, /\[ "\$LEAGUE" != "WNBA" \]/);
+  assert.match(legacy, new RegExp(`\\[ "\\$PIN" != "${reviewedSha}" \\]`));
+  assert.match(legacy, /COVERED_GITHUB_SCHEDULER_ENABLED/);
+  assert.match(legacy, /wnba_incremental_ingest/);
+  assert.equal(existsSync(new URL("./diagnostic-mlb-providers.yml", import.meta.url)), false);
+  const leagueGuard = legacy.match(/if \[ "\$LEAGUE" != "WNBA" \]; then[\s\S]*?\n\s*fi/)?.[0];
+  const pinGuard = legacy.match(/if \[ "\$PIN" != "[0-9a-f]{40}" \]; then[\s\S]*?\n\s*fi/)?.[0];
+  assert.ok(leagueGuard && pinGuard);
+  for (const league of ["MLB", "mlb", " MLB ", "NBA", "", "WNBA; echo injected"]) {
+    assert.notEqual(spawnSync("bash", ["-c", leagueGuard], { env: { ...process.env, LEAGUE: league } }).status, 0, league);
+  }
+  assert.equal(spawnSync("bash", ["-c", leagueGuard], { env: { ...process.env, LEAGUE: "WNBA" } }).status, 0);
+  assert.equal(spawnSync("bash", ["-c", pinGuard], { env: { ...process.env, PIN: reviewedSha } }).status, 0);
+  for (const pin of ["", "4a6ae017fc442237c048c5498e7a442059f8b3aa", "a".repeat(40)]) {
+    assert.notEqual(spawnSync("bash", ["-c", pinGuard], { env: { ...process.env, PIN: pin } }).status, 0);
+  }
 });
 
 test("NBA Points/Rebounds/Assists use only the NBA manual release while the NFL resolver keeps its separately reviewed SHA", () => {
@@ -480,35 +532,6 @@ test("each and only each READY_FOR_LIVE_EXPERIMENT pair routes as one exact disc
   }
 });
 
-test("MLB Batter Total Bases manual discovery requires and forwards one bounded exact event gamePk", () => {
-  const accepted = runContract({
-    VALIDATION_SPORT_INPUT: "MLB",
-    VALIDATION_MARKET_INPUT: "batter_total_bases",
-    MLB_GAME_PK_INPUT: "849817",
-  });
-  assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.outputs, /^mode=manual-validation$/m);
-  assert.match(accepted.outputs, /^manual_validation=true$/m);
-  assert.match(accepted.outputs, /^mlb_game_pk=849817$/m);
-  assert.match(workflow, /mlb_game_pk:\s*\n\s*description:.*one-event Batter Total Bases (?:discovery or history hydration|proof)/);
-  assert.match(workflow, /COVERED2_MANUAL_MLB_GAME_PK:\s*\$\{\{\s*steps\.contract\.outputs\.mlb_game_pk\s*\}\}/);
-  for (const invalid of ["", "84x817", "0849817", "1234567890123"]) {
-    const rejected = runContract({
-      VALIDATION_SPORT_INPUT: "MLB",
-      VALIDATION_MARKET_INPUT: "batter_total_bases",
-      MLB_GAME_PK_INPUT: invalid,
-    });
-    assert.notEqual(rejected.status, 0, `gamePk ${JSON.stringify(invalid)} must fail closed`);
-  }
-  const wrongMarket = runContract({
-    VALIDATION_SPORT_INPUT: "MLB",
-    VALIDATION_MARKET_INPUT: "pitcher_strikeouts",
-    MLB_GAME_PK_INPUT: "849817",
-  });
-  assert.notEqual(wrongMarket.status, 0);
-  assert.match(wrongMarket.diagnostics, /valid only for the exact MLB Batter Total Bases manual proof/);
-});
-
 test("forced WNBA Rebounds discovery requires one exact event tuple and forwards it only to the manual proof", () => {
   const valid = {
     MANUAL_OPERATION: "exact-market-discovery",
@@ -678,7 +701,7 @@ test("published board refresh requires and forwards an exact NFL receiving event
   ]) {
     const result = runContract({ MANUAL_OPERATION: "exact-market-board-refresh", ...invalid });
     assert.notEqual(result.status, 0, JSON.stringify(invalid));
-    assert.match(result.diagnostics, /Published one-shot board refresh requires exact NFL receiving_yards/);
+    assert.match(result.diagnostics, /Published one-shot board refresh requires exact NFL receiving_yards|Unsupported exact sport\/market pair/);
   }
   assert.match(workflow, /exact-market-board-refresh/);
   assert.match(workflow, /BOARD_BUILD_ENABLED:\s*\$\{\{\s*vars\.COVERED2_PICKS_BOARD_BUILD\s*\}\}/);
@@ -740,7 +763,7 @@ test("current-analysis certification accepts only one exact NFL receiving-yards 
   ]) {
     const result = runContract({ MANUAL_OPERATION: "certification-one-current-analysis", ...invalid });
     assert.notEqual(result.status, 0, JSON.stringify(invalid));
-    assert.match(result.diagnostics, /Current-analysis certification is restricted/);
+    assert.match(result.diagnostics, /Current-analysis certification is restricted|Unsupported exact sport\/market pair/);
   }
   assert.match(workflow, /Certify one current NFL receiving-yards analysis/);
   assert.ok(workflow.includes("steps.contract.outputs.mode == 'manual-current-analysis-certification'"));
@@ -784,7 +807,7 @@ test("manual NFL provider-event resolver accepts only the exact eight-field even
   ]) assert.match(result.outputs, new RegExp(`^${name}=${value.replaceAll(".", "\\.")}$`, "m"));
   assert.doesNotMatch(result.outputs, /^nfl_provider_event_id=/m);
 
-  assert.match(workflow, /REVIEWED_RELEASE_SHA="4a6ae017fc442237c048c5498e7a442059f8b3aa"/);
+  assert.match(workflow, /REVIEWED_RELEASE_SHA="80a49ba484c0a26846d3f430d7cfb133293f1623"/);
   assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="d157c13d74e1d4c8347aef4ee8fb1aa209b7e698"/);
   assert.doesNotMatch(workflow, /REVIEWED_RELEASE_SHA="a57d76cb6b72039724ed4832d25c4e1e4ef04547"/);
   assert.match(workflow, /run: pnpm run covered2:nfl-provider-event-resolution/);
@@ -1036,77 +1059,6 @@ test("NFL exact-event operations preserve preflight, scheduled, Passing, and inc
   assert.doesNotMatch(workflow, /^\s{2}schedule:/m);
 });
 
-test("one-shot MLB postseason event hydration is exact, owner-only, and cannot enter the market pipeline", () => {
-  const accepted = runContract({
-    MANUAL_OPERATION: "mlb-event-hydration",
-    VALIDATION_SPORT_INPUT: "MLB",
-    VALIDATION_MARKET_INPUT: "batter_total_bases",
-    FORCE_DISCOVERY_INPUT: "false",
-    MLB_GAME_PK_INPUT: "849817",
-    MLB_EVENT_DATE_INPUT: "2026-10-14",
-    MLB_EVENT_START_TIME_INPUT: "2026-10-15T00:00:00.000Z",
-    MLB_HOME_TEAM_ID_INPUT: "119",
-    MLB_AWAY_TEAM_ID_INPUT: "158",
-    MLB_GAME_TYPE_INPUT: "L",
-    MLB_SERIES_DESCRIPTION_INPUT: "National League Championship Series",
-  });
-  assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.outputs, /^mode=manual-mlb-event-hydration$/m);
-  assert.match(accepted.outputs, /^manual_validation=false$/m);
-  assert.match(accepted.outputs, /^mlb_game_pk=849817$/m);
-  assert.match(accepted.outputs, /^mlb_event_date=2026-10-14$/m);
-  assert.match(accepted.outputs, /^mlb_game_type=L$/m);
-  assert.match(workflow, /- mlb-event-hydration/);
-  assert.match(workflow, /COVERED2_MANUAL_MLB_EVENT_HYDRATION:\s*"true"/);
-  assert.match(workflow, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
-  assert.match(workflow, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.match(workflow, /run-covered2-mlb-event-hydration\.mjs/);
-  const hydrationStart = workflow.indexOf("- name: Hydrate exactly one current MLB postseason event only");
-  const hydrationEnd = workflow.indexOf("\n      - name:", hydrationStart + 1);
-  assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart);
-  const hydrationStep = workflow.slice(hydrationStart, hydrationEnd);
-  assert.match(hydrationStep, /MLB_GAME_PK:\s*\$\{\{\s*steps\.contract\.outputs\.mlb_game_pk\s*\}\}/);
-  assert.match(hydrationStep, /--game-pk "\$MLB_GAME_PK"/);
-  assert.doesNotMatch(hydrationStep, /SHARPAPI_KEY:\s*\$\{\{/);
-  assert.match(workflow, /mode != 'manual-mlb-event-hydration'/);
-  assert.doesNotMatch(workflow, /schedule:\s*\n/);
-  assert.match(workflow, /environment:\s*production/);
-
-  for (const invalid of [
-    { VALIDATION_SPORT_INPUT: "NFL" },
-    { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
-    { FORCE_DISCOVERY_INPUT: "true" },
-    { MLB_GAME_PK_INPUT: "" },
-    { MLB_GAME_PK_INPUT: "0" },
-    { MLB_GAME_PK_INPUT: "84x817" },
-    { SCHEDULER_ENABLED: "true" },
-    { MLB_EVENT_DATE_INPUT: "2026-10-14\n::warning::bad" },
-    { MLB_EVENT_START_TIME_INPUT: "tomorrow" },
-    { MLB_HOME_TEAM_ID_INPUT: "119\n" },
-    { MLB_AWAY_TEAM_ID_INPUT: "119" },
-    { MLB_GAME_TYPE_INPUT: "R" },
-    { MLB_SERIES_DESCRIPTION_INPUT: "" },
-    { CERTIFICATION_LEDGER_ENABLED: "true" },
-  ]) {
-    const result = runContract({
-      MANUAL_OPERATION: "mlb-event-hydration",
-      VALIDATION_SPORT_INPUT: "MLB",
-      VALIDATION_MARKET_INPUT: "batter_total_bases",
-      FORCE_DISCOVERY_INPUT: "false",
-      MLB_GAME_PK_INPUT: "849817",
-      MLB_EVENT_DATE_INPUT: "2026-10-14",
-      MLB_EVENT_START_TIME_INPUT: "2026-10-15T00:00:00.000Z",
-      MLB_HOME_TEAM_ID_INPUT: "119",
-      MLB_AWAY_TEAM_ID_INPUT: "158",
-      MLB_GAME_TYPE_INPUT: "L",
-      MLB_SERIES_DESCRIPTION_INPUT: "National League Championship Series",
-      ...invalid,
-    });
-    assert.notEqual(result.status, 0, JSON.stringify(invalid));
-    assert.doesNotMatch(result.outputs, /^release_sha=/m, "invalid event contract must fail before private checkout");
-  }
-});
-
 test("one-shot WNBA postseason event hydration is exact, guarded, and isolated from market discovery", () => {
   const valid = {
     MANUAL_OPERATION: "wnba-event-hydration",
@@ -1248,118 +1200,6 @@ test("one-shot WNBA postseason event hydration is exact, guarded, and isolated f
   assert.equal(naturallyScheduled.status, 0, naturallyScheduled.diagnostics);
   assert.match(naturallyScheduled.outputs, /^mode=scheduled$/m);
   assert.doesNotMatch(naturallyScheduled.outputs, /manual-wnba-event-hydration|wnba_event_id=/);
-});
-
-test("MLB player-history hydration is exact-event, exact-market, write-bounded, and isolated from Sharp discovery", () => {
-  const accepted = runContract({
-    MANUAL_OPERATION: "mlb-player-history-hydration",
-    VALIDATION_SPORT_INPUT: "MLB",
-    VALIDATION_MARKET_INPUT: "batter_total_bases",
-    FORCE_DISCOVERY_INPUT: "false",
-    MLB_GAME_PK_INPUT: "849817",
-  });
-  assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.outputs, /^mode=manual-mlb-player-history-hydration$/m);
-  assert.match(accepted.outputs, /^manual_validation=false$/m);
-  assert.match(accepted.outputs, /^mlb_game_pk=849817$/m);
-
-  for (const invalid of [
-    { VALIDATION_SPORT_INPUT: "NFL" },
-    { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
-    { MLB_GAME_PK_INPUT: "84x817" },
-    { FORCE_DISCOVERY_INPUT: "true" },
-    { MLB_EVENT_DATE_INPUT: "2026-10-15" },
-    { SCORED_PROP_ID_INPUT: "00000000-0000-4000-8000-000000000001" },
-    { CERTIFICATION_LEDGER_ENABLED: "true" },
-    { SCHEDULER_ENABLED: "true" },
-  ]) {
-    const rejected = runContract({
-      MANUAL_OPERATION: "mlb-player-history-hydration",
-      VALIDATION_SPORT_INPUT: "MLB",
-      VALIDATION_MARKET_INPUT: "batter_total_bases",
-      FORCE_DISCOVERY_INPUT: "false",
-    MLB_GAME_PK_INPUT: "849817",
-      ...invalid,
-    });
-    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
-    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
-  }
-
-  assert.match(workflow, /- mlb-player-history-hydration/);
-  const start = workflow.indexOf("- name: Hydrate exact-target MLB Total Bases player history only");
-  const end = workflow.indexOf("- name: Hydrate exactly one current MLB postseason event only", start);
-  assert.ok(start >= 0 && end > start);
-  const step = workflow.slice(start, end);
-  assert.match(step, /if: steps\.contract\.outputs\.mode == 'manual-mlb-player-history-hydration'/);
-  assert.match(step, /COVERED2_MANUAL_MLB_PLAYER_HISTORY_HYDRATION:\s*"true"/);
-  assert.match(step, /COVERED2_WNBA_SCHEDULER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_WNBA_SCHEDULER_ENABLED\s*\}\}/);
-  assert.match(step, /COVERED2_CERTIFICATION_LEDGER_ENABLED:\s*\$\{\{\s*vars\.COVERED2_CERTIFICATION_LEDGER_ENABLED\s*\}\}/);
-  assert.match(step, /SUPABASE_SERVICE_ROLE_KEY:\s*\$\{\{\s*secrets\.SUPABASE_SERVICE_ROLE_KEY\s*\}\}/);
-  assert.match(step, /SHARPAPI_KEY:\s*""/);
-  assert.match(step, /BBS_API_KEY:\s*""/);
-  assert.match(step, /run-covered2-mlb-player-history-hydration\.mjs --game-pk/);
-  assert.doesNotMatch(step, /run-covered2-wnba-refresh\.mjs|run-covered2-mlb-refresh|--write/);
-  const generic = workflow.slice(workflow.indexOf("- name: Run exactly one bounded C2 exact-market discovery"));
-  assert.match(generic.split("\n")[1] ?? "", /manual-mlb-player-history-hydration/);
-});
-
-test("MLB identity diagnostic is owner-only, exact-date, read-only, and isolated from market discovery", () => {
-  const accepted = runContract({
-    MANUAL_OPERATION: "mlb-game-identity-diagnostic",
-    VALIDATION_SPORT_INPUT: "MLB",
-    VALIDATION_MARKET_INPUT: "batter_total_bases",
-    FORCE_DISCOVERY_INPUT: "false",
-    MLB_EVENT_DATE_INPUT: "2026-10-15",
-  });
-  assert.equal(accepted.status, 0, accepted.diagnostics);
-  assert.match(accepted.outputs, /^mode=manual-mlb-game-identity-diagnostic$/m);
-  assert.match(accepted.outputs, /^mlb_event_date=2026-10-15$/m);
-  assert.match(accepted.outputs, /^manual_validation=false$/m);
-  assert.match(accepted.outputs, /^force_discovery=false$/m);
-
-  for (const invalid of [
-    { VALIDATION_SPORT_INPUT: "NFL" },
-    { VALIDATION_MARKET_INPUT: "pitcher_strikeouts" },
-    { FORCE_DISCOVERY_INPUT: "true" },
-    { MLB_EVENT_DATE_INPUT: "2026-10-14" },
-    { CERTIFICATION_LEDGER_ENABLED: "true" },
-    { SCHEDULER_ENABLED: "true" },
-  ]) {
-    const rejected = runContract({
-      MANUAL_OPERATION: "mlb-game-identity-diagnostic",
-      VALIDATION_SPORT_INPUT: "MLB",
-      VALIDATION_MARKET_INPUT: "batter_total_bases",
-      FORCE_DISCOVERY_INPUT: "false",
-      MLB_EVENT_DATE_INPUT: "2026-10-15",
-      ...invalid,
-    });
-    assert.notEqual(rejected.status, 0, JSON.stringify(invalid));
-    assert.doesNotMatch(rejected.outputs, /^release_sha=/m);
-  }
-
-  assert.match(workflow, /- mlb-game-identity-diagnostic/);
-  assert.match(workflow, /mode != 'manual-mlb-game-identity-diagnostic'/);
-  const start = workflow.indexOf("- name: Read exact official MLB game identity without writes");
-  const end = workflow.indexOf("- name: Hydrate exactly one current MLB postseason event only", start);
-  assert.ok(start >= 0 && end > start);
-  const step = workflow.slice(start, end);
-  assert.match(step, /if: steps\.contract\.outputs\.mode == 'manual-mlb-game-identity-diagnostic'/);
-  assert.match(step, /run-covered2-mlb-event-hydration\.mjs/);
-  assert.match(step, /ensureTeam: async \(\) => \{ throw new Error\("diagnostic_stop_before_write"\); \}/);
-  assert.match(step, /ensureEvent: async \(\) => \{ throw new Error\("diagnostic_stop_before_write"\); \}/);
-  assert.match(step, /scheduleRequestCount !== 0/);
-  assert.match(step, /searchParams\.get\("startDate"\) !== officialDate/);
-  assert.match(step, /searchParams\.get\("endDate"\) !== officialDate/);
-  assert.match(step, /searchParams\.get\("sportId"\) !== "1"/);
-  assert.match(step, /searchParams\.get\("hydrate"\) !== "team"/);
-  assert.match(step, /COVERED2_ALLOWED_EMAILS: ""/);
-  assert.match(step, /NEXT_PUBLIC_SUPABASE_URL: ""/);
-  assert.match(step, /SUPABASE_SERVICE_ROLE_KEY: ""/);
-  assert.match(step, /SHARPAPI_KEY: ""/);
-  assert.match(step, /BBS_API_KEY: ""/);
-  assert.doesNotMatch(step, /run-covered2-wnba-refresh\.mjs|--write/);
-  assert.match(step, /targetRows\.length !== 1/);
-  assert.match(step, /officialGames: rows\.map\(project\)/);
 });
 
 test("superseded repository_dispatch manual payload is explicitly rejected; ordinary paused wakes still skip checkout", () => {
